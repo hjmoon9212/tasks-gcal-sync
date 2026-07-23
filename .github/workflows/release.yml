@@ -1,0 +1,38 @@
+name: Release Obsidian plugin
+
+# manifest.json 의 version 과 같은 태그(예: 0.3.1)를 push 하면
+# 빌드 후 main.js / manifest.json / versions.json 을 첨부한 GitHub Release 를 만든다.
+# BRAT / 커뮤니티 스토어가 이 Release 에서 플러그인을 내려받는다.
+on:
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build plugin
+        run: |
+          npm ci
+          npm run build
+
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release create "$tag" \
+            --title="$tag" \
+            --generate-notes \
+            main.js manifest.json versions.json
