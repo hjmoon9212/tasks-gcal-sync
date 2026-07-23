@@ -3,7 +3,13 @@
 //   node version-bump.mjs 0.2.1   → manifest/package/versions.json 을 0.2.1로 통일
 //   node version-bump.mjs         → 인자 없으면 manifest.json의 현재 version 기준으로
 //                                    package.json/versions.json만 맞춰 동기화
-// (이 플러그인은 수동 배포라 git 태그/커밋 없이 파일만 갱신한다.)
+//
+// 이 스크립트는 "버전 파일 3종만" 갱신한다. 실제 배포는 별도 단계:
+//   1) node version-bump.mjs <버전>   # 이 스크립트
+//   2) git commit & push              # 소스 커밋 (main.js는 gitignore)
+//   3) git tag <버전> && git push origin <버전>   # v 접두사 없이 manifest.version 과 동일
+// 태그 push → .github/workflows/release.yml 이 빌드 후 main.js/manifest.json/versions.json 을
+// 첨부한 GitHub Release 를 생성 → BRAT/커뮤니티 스토어가 그 Release 에서 내려받는다.
 import { readFileSync, writeFileSync } from "fs";
 
 const write = (f, obj) => writeFileSync(f, JSON.stringify(obj, null, 2) + "\n");
