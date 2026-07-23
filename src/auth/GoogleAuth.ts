@@ -63,7 +63,7 @@ export class GoogleAuth {
   async authenticateInteractive(): Promise<void> {
     if (!Platform.isDesktopApp) {
       throw new Error(
-        "모바일에서는 인증할 수 없습니다. 데스크탑에서 인증 후 Obsidian Sync로 토큰이 전파됩니다."
+        "모바일에서는 대화형 인증을 할 수 없습니다. 데스크탑에서 인증한 뒤 자격증명(state.json)을 이 기기로 옮겨야 합니다."
       );
     }
     const { clientId, clientSecret } = this.getCreds();

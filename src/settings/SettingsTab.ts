@@ -31,7 +31,7 @@ export class SettingsTab extends PluginSettingTab {
     // ---- 1. Google 인증 ----
     containerEl.createEl("h3", { text: "1. Google 인증" });
     containerEl.createEl("p", {
-      text: "Google Cloud Console에서 OAuth 클라이언트(Desktop app)를 만들고 Client ID/Secret을 입력하세요. 인증은 데스크탑에서 1회만 — 토큰은 Obsidian Sync로 모바일에 전파됩니다.",
+      text: "Google Cloud Console에서 OAuth 클라이언트(Desktop app)를 만들고 Client ID/Secret을 입력하세요. 인증은 데스크탑에서 실행하며, 자격증명은 각 기기에 로컬(state.json)로 저장되어 동기화되지 않습니다 — 기기마다 개별 설정이 필요합니다.",
       cls: "setting-item-description",
     });
 

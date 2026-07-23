@@ -1,7 +1,7 @@
 {
   "id": "tasks-gcal-sync",
   "name": "Tasks ⇄ Google Calendar Sync",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "minAppVersion": "1.4.0",
   "description": "Obsidian Tasks(📅 due)를 Google Calendar 종일 이벤트로 동기화. 완료=색상 또는 free(한가함), 반복(🔁) 아이콘 표시, 이벤트→노트 딥링크. Morgen 대체용.",
   "author": "Moon",
