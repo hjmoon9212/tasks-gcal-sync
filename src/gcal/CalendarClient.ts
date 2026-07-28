@@ -167,12 +167,23 @@ export class CalendarClient {
     return items.filter((e) => e.status !== "cancelled" && e.id);
   }
 
+  /**
+   * 이벤트 삭제(멱등). 이미 없는 이벤트(404/410 Gone)는 성공으로 간주 —
+   * 삭제의 목표 상태가 이미 달성된 것이므로 재시도/실패 처리하지 않는다.
+   * (사용자가 GCal 앱에서 수동 삭제했거나 이전 sync가 부분 완료된 경우 발생)
+   */
   async deleteEvent(calendarId: string, eventId: string): Promise<void> {
-    await this.req(
-      `${BASE}/calendars/${encodeURIComponent(
-        calendarId
-      )}/events/${encodeURIComponent(eventId)}`,
-      "DELETE"
-    );
+    try {
+      await this.req(
+        `${BASE}/calendars/${encodeURIComponent(
+          calendarId
+        )}/events/${encodeURIComponent(eventId)}`,
+        "DELETE"
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/GCal DELETE (404|410):/.test(msg)) return; // 이미 삭제됨 → OK
+      throw e;
+    }
   }
 }
