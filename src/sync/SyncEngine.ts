@@ -197,19 +197,20 @@ export class SyncEngine {
       } catch (e) {
         console.warn("[tasks-gcal-sync] getEvent 실패(종일로 처리):", e);
       }
-      if (cur?.start?.dateTime) {
+      // 순수 timed 이벤트(양끝 모두 dateTime)일 때만 시각 유지하고 날짜만 이동.
+      // 한쪽만 dateTime인 혼합형(예: iPhone 기본 캘린더가 만들 수 있음)을 그대로
+      // patch하면 start=dateTime/end=date 타입 불일치로 GCal 400 → 종일로 정규화.
+      if (cur?.start?.dateTime && cur?.end?.dateTime) {
         const oldDate = cur.start.dateTime.slice(0, 10);
         const delta = daysBetween(oldDate, task.due!);
         patch.start = {
           dateTime: shiftDateTime(cur.start.dateTime, delta),
           timeZone: cur.start.timeZone,
         };
-        patch.end = cur.end?.dateTime
-          ? {
-              dateTime: shiftDateTime(cur.end.dateTime, delta),
-              timeZone: cur.end.timeZone,
-            }
-          : { date: addDay(task.due!) };
+        patch.end = {
+          dateTime: shiftDateTime(cur.end.dateTime, delta),
+          timeZone: cur.end.timeZone,
+        };
       } else {
         patch.start = { date: startDate };
         patch.end = { date: addDay(task.due!) };
