@@ -57,6 +57,7 @@ export class CalendarClient {
 
   private async req(url: string, method: string, body?: unknown): Promise<any> {
     const token = await this.auth.getAccessToken();
+    const payload = body !== undefined ? JSON.stringify(body) : undefined;
     const resp = await this.fetchWithRetry({
       url,
       method,
@@ -64,10 +65,18 @@ export class CalendarClient {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      body: payload,
     });
     if (resp.status === 204) return null;
     if (resp.status < 200 || resp.status >= 300) {
+      // 4xx(특히 400 badRequest) 진단용: 어떤 요청 본문이 거부됐는지 로그로 남긴다.
+      // body엔 자격증명이 없음(토큰은 헤더). 400/422는 본문 문제이므로 특히 유용.
+      if (resp.status >= 400 && resp.status < 500 && payload) {
+        console.error(
+          `[tasks-gcal-sync] GCal ${method} ${resp.status} 요청 본문:`,
+          payload
+        );
+      }
       throw new Error(`GCal ${method} ${resp.status}: ${resp.text}`);
     }
     return resp.json;

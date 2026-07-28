@@ -11,6 +11,7 @@ import {
   daysBetween,
   genId,
   isoDaysAgo,
+  isValidDate,
   shiftDateTime,
   todayStr,
 } from "./dates";
@@ -439,6 +440,16 @@ export class SyncEngine {
           continue;
         }
 
+        // task는 있으나 📅(due)를 잃음 → 미일정화(이벤트 제거, record 삭제).
+        // due 없이 patch하면 addDay(undefined)=NaN 날짜로 GCal 400이 매 sync 반복됨.
+        // (예: 템플릿이 due 없이 #task를 만들거나 사용자가 📅를 지운 경우)
+        if (!isValidDate(task.due)) {
+          await this.client.deleteEvent(rec.calendarId, rec.eventId);
+          delete records[id];
+          result.deleted++;
+          continue;
+        }
+
         // GCal에서 이벤트 삭제됨 → task 미일정화(📅 제거)
         if (evCancelled) {
           await this.writer.removeDue(task);
@@ -554,7 +565,7 @@ export class SyncEngine {
 
     // ---- 2) record 없는 새 task → 생성 ----
     for (const t of tasks) {
-      if (!t.due) continue;
+      if (!isValidDate(t.due)) continue; // due 없음/형식오류 → 스킵(잘못된 이벤트 생성 방지)
       if (t.id && records[t.id]) continue; // 이미 처리됨
 
       const target = resolveCalendar(t.tags, this.settings);

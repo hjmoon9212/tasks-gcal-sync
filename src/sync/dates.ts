@@ -23,6 +23,16 @@ export function addDay(date: string): string {
   return addDays(date, 1);
 }
 
+/**
+ * YYYY-MM-DD 형식이며 실제 존재하는 날짜인지 검증.
+ * rollover("2026-02-31"→3/3)·NaN·undefined를 모두 거른다.
+ */
+export function isValidDate(s: string | undefined | null): s is string {
+  if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(s + "T00:00:00");
+  return !isNaN(d.getTime()) && fmt(d) === s;
+}
+
 /** 두 날짜(YYYY-MM-DD) 사이 일수 차 (b - a). */
 export function daysBetween(a: string, b: string): number {
   const da = new Date(a + "T00:00:00").getTime();
