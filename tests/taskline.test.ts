@@ -3,6 +3,7 @@ import {
   setDue,
   removeDue,
   setId,
+  removeId,
   setStatusChar,
   setDoneDate,
   removeDone,
@@ -160,6 +161,36 @@ eq(
   shiftDateTime("2026-07-05T14:00:00+09:00", 5),
   "2026-07-10T14:00:00+09:00",
   "shiftDateTime 시각·오프셋 유지하며 날짜만 이동"
+);
+
+// --- 하드닝: 손상된 날짜 자가 치유 (날짜 뒤 잉여 숫자/하이픈 소거) ---
+eq(
+  setDue("- [ ] #task 데모 📅 2026-08-038-03 🆔 pgDvAD", "2026-08-03"),
+  "- [ ] #task 데모 📅 2026-08-03 🆔 pgDvAD",
+  "setDue: 손상된 날짜(2026-08-038-03)의 잉여까지 정리"
+);
+eq(
+  removeDue("- [ ] #task 데모 📅 2026-08-038-03 🆔 pgDvAD"),
+  "- [ ] #task 데모 🆔 pgDvAD",
+  "removeDue: 손상 날짜도 통째로 제거"
+);
+
+// --- removeId: 반복 새 회차에 복사된 🆔 제거(중복 id 방지의 핵심) ---
+eq(
+  removeId("- [ ] #task 데모 📅 2026-08-10 🆔 abc123"),
+  "- [ ] #task 데모 📅 2026-08-10",
+  "removeId: 🆔 필드 제거, 나머지 보존"
+);
+eq(
+  removeId("- [ ] #task 데모 📅 2026-08-10"),
+  "- [ ] #task 데모 📅 2026-08-10",
+  "removeId: 🆔 없으면 무변화"
+);
+// 정상 날짜는 그대로(잉여 없음)
+eq(
+  setDue(L3, "2026-07-24"),
+  "- [ ] #task 주간(월간)보고 🔁 every week 🛫 2026-07-02 📅 2026-07-24 🆔 KRBgwN",
+  "setDue: 정상 날짜는 잉여 없이 교체(하드닝 회귀 없음)"
 );
 
 console.log(`\n${pass} passed, ${fail} failed`);

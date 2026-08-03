@@ -400,6 +400,9 @@ export class SyncEngine {
 
     const records = this.state.records;
     const today = todayStr();
+    // 반복 완료로 줄이 삽입(구조 변경)된 파일. 이 run에서 이후 task.line이 밀려
+    // 형제 줄을 오손상시키지 않도록, 해당 파일의 추가 쓰기는 다음 사이클로 미룬다.
+    const dirtyFiles = new Set<string>();
     const result: SyncResult = {
       created: 0,
       updated: 0,
@@ -432,6 +435,13 @@ export class SyncEngine {
       const evCancelled = calData?.cancelledEventIds.has(rec.eventId) ?? false;
 
       try {
+        // 같은 run에서 이 파일에 반복 회차가 삽입됨 → task.line이 밀려 오손상 위험.
+        // 이 task의 반영은 스킵하고 다음 사이클(신규 read)에서 처리.
+        if (task && dirtyFiles.has(task.path)) {
+          result.skipped++;
+          continue;
+        }
+
         // Obsidian에서 task 사라짐 → 이벤트 삭제
         if (!task) {
           await this.client.deleteEvent(rec.calendarId, rec.eventId);
@@ -509,9 +519,15 @@ export class SyncEngine {
           }
           // 완료
           if (gcalDone !== task.checked) {
-            if (gcalDone)
-              await this.completion.complete(task, this.writer, today);
-            else await this.completion.uncomplete(task, this.writer);
+            if (gcalDone) {
+              const structural = await this.completion.complete(
+                task,
+                this.writer,
+                today
+              );
+              // 반복 회차가 삽입돼 줄이 늘면 이 파일의 이후 쓰기를 미룬다.
+              if (structural) dirtyFiles.add(task.path);
+            } else await this.completion.uncomplete(task, this.writer);
           }
           rec.due = gcalDate ?? rec.due;
           rec.start = gcalStart ?? rec.start;
@@ -567,6 +583,9 @@ export class SyncEngine {
     for (const t of tasks) {
       if (!isValidDate(t.due)) continue; // due 없음/형식오류 → 스킵(잘못된 이벤트 생성 방지)
       if (t.id && records[t.id]) continue; // 이미 처리됨
+      // 이번 run에 구조 변경(반복 회차 삽입)된 파일 → 캐시된 line이 밀렸으므로
+      // 새 회차 이벤트 생성은 다음 사이클(신규 read)로 미룬다.
+      if (dirtyFiles.has(t.path)) continue;
 
       const target = resolveCalendar(t.tags, this.settings);
       if (!target) continue;

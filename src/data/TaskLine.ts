@@ -57,6 +57,12 @@ const FIELD_LOOKAHEAD =
 
 const TASK_LINE_RE = /^(\s*)([-*+]) \[(.)\] (.*)$/;
 const DATE = "(\\d{4}-\\d{2}-\\d{2})";
+/*
+ * set/remove(재작성)용 날짜 매칭. 파싱용 DATE는 엄격(정확히 10자리)하게 두되,
+ * 재작성 시에는 과거 손상으로 날짜 뒤에 이어붙은 잉여 숫자/하이픈
+ * (예: "2026-08-038-03")까지 한 번에 소거·교체해 오염을 자가 치유한다.
+ */
+const DATE_GREEDY = "\\d{4}-\\d{2}-\\d{2}[\\d-]*";
 
 export interface ParsedTask {
   indent: string;
@@ -155,7 +161,7 @@ export function cleanTitle(body: string, globalFilter: string): string {
 
 /** 📅 due 날짜를 교체(없으면 줄 끝에 추가). 다른 필드는 절대 건드리지 않음. */
 export function setDue(raw: string, date: string): string {
-  const re = reU(reEsc(EMOJI.due) + "\\s*\\d{4}-\\d{2}-\\d{2}");
+  const re = reU(reEsc(EMOJI.due) + "\\s*" + DATE_GREEDY);
   if (re.test(raw)) return raw.replace(re, EMOJI.due + " " + date);
   return raw.replace(/\s+$/, "") + " " + EMOJI.due + " " + date;
 }
@@ -163,13 +169,13 @@ export function setDue(raw: string, date: string): string {
 /** 📅 due 제거(미일정화). */
 export function removeDue(raw: string): string {
   return raw
-    .replace(reU("\\s*" + reEsc(EMOJI.due) + "\\s*\\d{4}-\\d{2}-\\d{2}"), "")
+    .replace(reU("\\s*" + reEsc(EMOJI.due) + "\\s*" + DATE_GREEDY), "")
     .replace(/\s+$/, "");
 }
 
 /** 🛫 start 날짜 교체(없으면 줄 끝에 추가). 다른 필드는 건드리지 않음. */
 export function setStart(raw: string, date: string): string {
-  const re = reU(reEsc(EMOJI.start) + "\\s*\\d{4}-\\d{2}-\\d{2}");
+  const re = reU(reEsc(EMOJI.start) + "\\s*" + DATE_GREEDY);
   if (re.test(raw)) return raw.replace(re, EMOJI.start + " " + date);
   return raw.replace(/\s+$/, "") + " " + EMOJI.start + " " + date;
 }
@@ -177,7 +183,7 @@ export function setStart(raw: string, date: string): string {
 /** 🛫 start 제거. */
 export function removeStart(raw: string): string {
   return raw
-    .replace(reU("\\s*" + reEsc(EMOJI.start) + "\\s*\\d{4}-\\d{2}-\\d{2}"), "")
+    .replace(reU("\\s*" + reEsc(EMOJI.start) + "\\s*" + DATE_GREEDY), "")
     .replace(/\s+$/, "");
 }
 
@@ -204,6 +210,16 @@ export function setId(raw: string, id: string): string {
   return raw.replace(/\s+$/, "") + " " + EMOJI.id + " " + id;
 }
 
+/**
+ * 🆔 id 필드 제거. 반복 완료 시 Tasks가 다음 회차 줄에 원본 id를 복사해
+ * 중복 id를 만드는 것을 막기 위해, 새 회차 줄에서 id를 떼어내는 용도.
+ */
+export function removeId(raw: string): string {
+  return raw
+    .replace(reU("\\s*" + reEsc(EMOJI.id) + "\\s*[A-Za-z0-9]+"), "")
+    .replace(/\s+$/, "");
+}
+
 /** 체크박스 상태 문자 교체: `- [ ]` → `- [x]` 등. */
 export function setStatusChar(raw: string, char: string): string {
   return raw.replace(/^(\s*[-*+] )\[.\]/, "$1[" + char + "]");
@@ -218,6 +234,6 @@ export function setDoneDate(raw: string, date: string): string {
 /** ✅ 완료일 제거(완료 취소용). */
 export function removeDone(raw: string): string {
   return raw
-    .replace(reU("\\s*" + reEsc(EMOJI.done) + "\\s*\\d{4}-\\d{2}-\\d{2}"), "")
+    .replace(reU("\\s*" + reEsc(EMOJI.done) + "\\s*" + DATE_GREEDY), "")
     .replace(/\s+$/, "");
 }
