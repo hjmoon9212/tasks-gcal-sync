@@ -305,13 +305,51 @@ export class SettingsTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("편집 시 자동 push")
+      .setName("편집 시 자동 동기화")
       .setDesc(
-        "task를 수정하면 몇 초 뒤 자동으로 GCal에 반영(Obsidian→GCal). GCal→Obsidian은 시작/주기/수동 때만."
+        "task를 수정하면 잠시 뒤 자동으로 동기화한다. 기본은 양방향(push+pull) — 아래 '편집 시 push만'으로 바꿀 수 있다."
       )
       .addToggle((t) =>
         t.setValue(s.autoPushOnEdit).onChange(async (v) => {
           s.autoPushOnEdit = v;
+          await this.plugin.saveAll();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("편집 후 대기(초)")
+      .setDesc(
+        "편집이 멎고 이 시간이 지나면 동기화. 길수록 연속 작업(날짜 → 시작일 → 우선순위)이 한 번으로 합쳐진다. 기본 20."
+      )
+      .addText((t) =>
+        t.setValue(String(s.autoPushDebounceSeconds)).onChange(async (v) => {
+          const n = parseInt(v, 10);
+          s.autoPushDebounceSeconds = isNaN(n) || n < 0 ? 0 : n;
+          await this.plugin.saveAll();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("자동 동기화 최소 간격(초)")
+      .setDesc(
+        "직전 동기화 후 이 시간 안에는 자동으로 다시 돌지 않는다(편집·주기 트리거만 해당, 수동/리본은 항상 즉시). 0이면 제한 없음. 기본 60."
+      )
+      .addText((t) =>
+        t.setValue(String(s.minSyncIntervalSeconds)).onChange(async (v) => {
+          const n = parseInt(v, 10);
+          s.minSyncIntervalSeconds = isNaN(n) || n < 0 ? 0 : n;
+          await this.plugin.saveAll();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("편집 시 push만 (pull 생략)")
+      .setDesc(
+        "켜면 편집 트리거가 GCal을 읽지 않아 API 호출이 줄어든다. 대신 편집 직전에 GCal에서 바꾼 내용을 못 보고 덮어쓸 수 있다. pull은 시작/주기/수동에서만."
+      )
+      .addToggle((t) =>
+        t.setValue(s.skipPullOnEdit).onChange(async (v) => {
+          s.skipPullOnEdit = v;
           await this.plugin.saveAll();
         })
       );

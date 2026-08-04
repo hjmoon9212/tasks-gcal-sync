@@ -15,7 +15,21 @@ export class TaskLineDriftError extends Error {
  * 어긋나면 절대 쓰지 않고 throw → 호출자가 skip.
  */
 export class TaskWriter {
-  constructor(private app: App) {}
+  /** 우리가 방금 쓴 파일 (vault.on("modify") 자기 에코 억제용). path → 쓴 시각(ms) */
+  private readonly recentWrites = new Map<string, number>();
+
+  constructor(private app: App, private getGlobalFilter: () => string) {}
+
+  /** windowMs 안에 우리가 쓴 파일이면 true. 지난 항목은 조회 시 정리한다. */
+  wroteRecently(path: string, windowMs: number): boolean {
+    const t = this.recentWrites.get(path);
+    if (t === undefined) return false;
+    if (Date.now() - t > windowMs) {
+      this.recentWrites.delete(path);
+      return false;
+    }
+    return true;
+  }
 
   private async apply(
     task: VaultTask,
@@ -36,7 +50,20 @@ export class TaskWriter {
       return lines.join("\n");
     });
     task.raw = updated; // 캐시 동기화
+    this.recentWrites.set(task.path, Date.now());
+    this.refresh(task, updated);
     return updated;
+  }
+
+  /**
+   * 쓰기 후 인메모리 task의 파싱 필드(due/start/checked/title…)를 새 원문에 맞춘다.
+   * 이게 없으면 같은 sync run 안에서 이어지는 push가 낡은 값을 올린다
+   * (예: GCal 날짜를 pull로 반영한 직후 Obsidian 변경분을 push할 때).
+   * 반복 완료처럼 결과가 2줄이면 파싱이 안 되므로 그대로 둔다 — 호출부가 dirtyFiles로 건너뛴다.
+   */
+  private refresh(task: VaultTask, updated: string): void {
+    const parsed = TaskLine.parseTaskLine(updated, this.getGlobalFilter());
+    if (parsed) Object.assign(task, parsed);
   }
 
   ensureId(task: VaultTask, id: string): Promise<string> {

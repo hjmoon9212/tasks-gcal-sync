@@ -1,4 +1,4 @@
-import { Notice, Plugin, normalizePath } from "obsidian";
+import { Notice, Plugin, TFile, normalizePath } from "obsidian";
 import { DEFAULT_SETTINGS, PluginSettings } from "./settings/Settings";
 import { SettingsTab } from "./settings/SettingsTab";
 import { PersistedState, emptyState } from "./sync/StateStore";
@@ -40,6 +40,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
   private syncing = false;
   private intervalId: number | null = null;
   private autoPushTimer: number | null = null;
+  private lastSyncAt = 0; // 마지막 동기화 "완료" 시각(ms) — 최소 간격 계산 기준
   private statusBar!: HTMLElement;
 
   async onload(): Promise<void> {
@@ -58,7 +59,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
     );
     this.client = new CalendarClient(this.auth);
     this.repo = new TaskRepository(this.app, () => this.settings.globalFilter);
-    this.writer = new TaskWriter(this.app);
+    this.writer = new TaskWriter(this.app, () => this.settings.globalFilter);
     this.completion = new CompletionHandler(this.app);
     this.engine = new SyncEngine(
       this.app,
@@ -94,8 +95,14 @@ export default class TasksGcalSyncPlugin extends Plugin {
     this.addSettingTab(new SettingsTab(this.app, this));
 
     // task 편집 시 자동 push (디바운스). 파일 저장 이벤트 기준.
+    // 마크다운이 아니거나 우리가 방금 쓴 파일이면 무시 — pull이 노트를 고칠 때마다
+    // 그 modify로 no-op 동기화가 한 번 더 도는 것을 막는다.
     this.registerEvent(
-      this.app.vault.on("modify", () => this.scheduleAutoPush())
+      this.app.vault.on("modify", (file) => {
+        if (!(file instanceof TFile) || file.extension !== "md") return;
+        if (this.writer.wroteRecently(file.path, 10_000)) return;
+        this.scheduleAutoPush();
+      })
     );
 
     this.app.workspace.onLayoutReady(() => {
@@ -112,17 +119,30 @@ export default class TasksGcalSyncPlugin extends Plugin {
     if (this.autoPushTimer !== null) window.clearTimeout(this.autoPushTimer);
   }
 
-  /** 편집 후 디바운스하여 동기화. 우리 자신의 쓰기로 트리거돼도 변경 없으면 no-op. */
+  /**
+   * 편집 후 디바운스하여 동기화.
+   *  - 디바운스: 편집이 멎고 autoPushDebounceSeconds 뒤에 실행. 연속 편집(날짜 → 시작일 →
+   *    우선순위)이 한 번으로 합쳐진다.
+   *  - 최소 간격: 직전 동기화 완료 후 minSyncIntervalSeconds가 안 지났으면 남은 만큼 더 미룬다.
+   *    타이머를 하나만 쓰므로 그 사이 편집이 더 들어와도 실행 횟수는 늘지 않는다.
+   */
   scheduleAutoPush(): void {
     if (!this.settings.autoPushOnEdit) return;
     if (!this.auth.isAuthenticated()) return;
     if (this.autoPushTimer !== null) window.clearTimeout(this.autoPushTimer);
+
+    const debounce = Math.max(0, this.settings.autoPushDebounceSeconds) * 1000;
+    const cooldown = Math.max(0, this.settings.minSyncIntervalSeconds) * 1000;
+    const remaining = this.lastSyncAt + cooldown - Date.now();
+    const delay = Math.max(debounce, remaining);
+
     this.autoPushTimer = window.setTimeout(() => {
       this.autoPushTimer = null;
-      // 양방향(pushOnly=off)이면 pull도 함께 → 편집 직전 GCal 수정을 맹목적으로 덮어쓰지 않고 LWW 적용.
+      // 기본은 양방향 — 편집 직전의 GCal 수정을 못 보고 덮어쓰지 않도록 pull도 함께 한다.
+      // skipPullOnEdit을 켜면 push만 (pull은 시작/주기/수동에서만).
       // 단방향(pushOnly=on)이면 run() 내부에서 어차피 pull 안 함.
-      this.runSync(true);
-    }, 4000);
+      this.runSync(true, this.settings.skipPullOnEdit ? { pull: false } : {});
+    }, delay);
   }
 
   setupInterval(): void {
@@ -132,10 +152,12 @@ export default class TasksGcalSyncPlugin extends Plugin {
     }
     const m = this.settings.syncIntervalMinutes;
     if (m > 0) {
-      this.intervalId = window.setInterval(
-        () => this.runSync(true),
-        m * 60_000
-      );
+      this.intervalId = window.setInterval(() => {
+        // 방금 편집 트리거로 돌았으면 이번 틱은 건너뛴다(최소 간격).
+        const cooldown = Math.max(0, this.settings.minSyncIntervalSeconds) * 1000;
+        if (Date.now() - this.lastSyncAt < cooldown) return;
+        this.runSync(true);
+      }, m * 60_000);
       this.registerInterval(this.intervalId);
     }
   }
@@ -164,6 +186,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
       this.statusBar.setText(`GCal ⚠ ${this.nowHM()}`);
     } finally {
       this.syncing = false;
+      this.lastSyncAt = Date.now(); // 최소 간격은 "완료" 시각 기준 (실패해도 연타 방지)
     }
   }
 

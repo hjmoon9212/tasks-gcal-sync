@@ -44,6 +44,9 @@ export interface PluginSettings {
   syncOnStartup: boolean;
   syncIntervalMinutes: number; // 0 = 수동만
   autoPushOnEdit: boolean; // task 편집 시 자동 push(Obsidian→GCal, 디바운스)
+  autoPushDebounceSeconds: number; // 편집이 멎고 몇 초 뒤에 동기화할지
+  minSyncIntervalSeconds: number; // 자동 동기화 최소 간격(수동/리본은 무시). 0 = 제한 없음
+  skipPullOnEdit: boolean; // 편집 트리거는 push만 (pull은 시작/주기/수동에서만)
 
   // (구버전 호환) 단일 대상 캘린더 — 마이그레이션에만 사용
   targetCalendarId?: string;
@@ -72,6 +75,9 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   syncOnStartup: true,
   syncIntervalMinutes: 5,
   autoPushOnEdit: true,
+  autoPushDebounceSeconds: 20,
+  minSyncIntervalSeconds: 60,
+  skipPullOnEdit: false,
 };
 
 /**

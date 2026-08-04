@@ -34,8 +34,9 @@ interface CalPull {
  * 양방향 동기화 엔진.
  *  Push (Obsidian → GCal): 📅 task → 종일 이벤트(태그→캘린더 라우팅), 완료 시 #done prefix.
  *  Pull (GCal → Obsidian): syncToken 증분으로 날짜이동/#done/삭제를 감지해 반영.
- *  충돌(양쪽 변경): GCal 우선(사용자 조작 화면).
- *  매핑 스냅샷(records)으로 어느 쪽이 바뀌었는지 판정.
+ *  충돌: 필드(due/start/done/title) 단위로 병합한다. 한쪽에서만 바뀐 필드는 그대로 살리고,
+ *        같은 필드가 양쪽에서 바뀐 경우에만 GCal을 채택(직접 조작한 화면)하고 warn을 남긴다.
+ *  매핑 스냅샷(records)으로 어느 쪽 어느 필드가 바뀌었는지 판정.
  */
 export class SyncEngine {
   constructor(
@@ -470,76 +471,114 @@ export class SyncEngine {
 
         const obsTitle = this.titleBase(task);
         const obsStart = this.spanStart(task);
-        const obsChanged =
-          task.due !== rec.due ||
-          obsStart !== (rec.start ?? rec.due) ||
-          task.checked !== rec.done ||
-          obsTitle !== rec.title;
+
+        // ── 어느 쪽에서 무엇이 바뀌었나: 필드별로 판정한다 ──
+        // 기준은 양쪽 모두 마지막 동기화 스냅샷(rec). 필드를 따로 보기 때문에
+        // "Obsidian에서 ✅ + GCal에서 날짜 이동"처럼 겹치지 않는 변경은 둘 다 살아남는다.
+        const obs = {
+          due: task.due !== rec.due,
+          start: obsStart !== (rec.start ?? rec.due),
+          done: task.checked !== rec.done,
+          title: obsTitle !== rec.title,
+        };
 
         // GCal 외부 수정 감지: 증분 pull에 이벤트가 왔고 그 updated가
         // 우리가 마지막으로 본 값(rec.gcalUpdated)과 다름 → 우리 push가 아닌 사용자 수정.
         const gcalChanged =
           !!ev && !!ev.updated && ev.updated !== rec.gcalUpdated;
 
-        // 충돌(양쪽 변경): 최근 수정이 이김(LWW) — 파일 mtime vs GCal updated 비교.
-        let preferGcal = gcalChanged;
-        if (gcalChanged && obsChanged) {
-          const mtime = this.repo.getFile(task.path)?.stat.mtime ?? 0;
-          const gcalMs = Date.parse(ev!.updated!);
-          preferGcal = gcalMs >= mtime; // GCal이 더 최근이면 GCal 채택
+        const gcalDate = gcalChanged ? this.eventDueDate(ev!) : undefined; // 다중일 블록은 끝(배타적−1)
+        const gcalStart = gcalChanged ? this.eventStartDate(ev!) : undefined;
+        const gcalDone = gcalChanged ? this.isGcalDone(ev!) : false;
+        const gcalTitle = gcalChanged ? this.gcalTitleBase(ev!) : undefined;
+        // 이벤트에서 날짜를 못 읽으면(파싱 실패·혼합형) 날짜 계열은 아예 손대지 않는다.
+        // 예전엔 이 경우에도 else로 떨어져 task의 🛫를 근거 없이 지웠다.
+        const datesOk = !!gcalDate;
+        const gcalSpanStart = datesOk ? gcalStart ?? gcalDate : undefined;
+
+        const gc = {
+          due: gcalChanged && datesOk && gcalDate !== rec.due,
+          start:
+            gcalChanged && datesOk && gcalSpanStart !== (rec.start ?? rec.due),
+          done: gcalChanged && gcalDone !== rec.done,
+          title: gcalChanged && !!gcalTitle && gcalTitle !== rec.title,
+        };
+
+        // 같은 필드가 양쪽 다 바뀐 경우에만 승자가 필요하다 → GCal 채택(직접 조작한 화면).
+        const conflicts: string[] = [];
+        const takeGcal = (f: "due" | "start" | "done" | "title"): boolean => {
+          if (!gc[f]) return false;
+          if (obs[f]) conflicts.push(f);
+          return true;
+        };
+
+        // 병합 결과(스냅샷 갱신용). 초기값 = Obsidian 현재 상태.
+        let mDue = task.due!;
+        let mStart = obsStart;
+        let mDone = task.checked;
+        let mTitle = obsTitle;
+
+        // ── 1) pull: GCal이 이긴 필드만 노트에 반영 ──
+        // writer가 쓰기 후 task의 파싱 필드까지 갱신하므로, 아래 push는 병합된 값을 올린다.
+        let pulled = false;
+
+        if (takeGcal("due")) {
+          await this.writer.setDue(task, gcalDate!);
+          mDue = gcalDate!;
+          pulled = true;
+        }
+        if (takeGcal("start")) {
+          if (gcalSpanStart! < mDue) await this.writer.setStart(task, gcalSpanStart!);
+          else if (task.start) await this.writer.removeStart(task); // GCal이 단일일로 바꿈
+          mStart = gcalSpanStart!;
+          pulled = true;
+        }
+        if (takeGcal("title")) {
+          try {
+            await this.writer.replaceTitle(task, this.titleBase(task), gcalTitle!);
+            mTitle = gcalTitle!;
+            pulled = true;
+          } catch (e) {
+            console.warn("[tasks-gcal-sync] 제목 pull skip:", id, e);
+          }
+        }
+        // 완료는 맨 마지막 — 반복 완료가 줄을 삽입해 구조를 바꿀 수 있다.
+        if (takeGcal("done")) {
+          if (gcalDone) {
+            const structural = await this.completion.complete(
+              task,
+              this.writer,
+              today
+            );
+            // 반복 회차가 삽입돼 줄이 늘면 이 파일의 이후 쓰기를 미룬다.
+            if (structural) dirtyFiles.add(task.path);
+          } else await this.completion.uncomplete(task, this.writer);
+          mDone = gcalDone;
+          pulled = true;
         }
 
-        if (gcalChanged && preferGcal) {
-          // GCal → Obsidian 반영
-          const gcalDate = this.eventDueDate(ev!); // 다중일 블록은 끝(배타적−1)이 due
-          const gcalStart = this.eventStartDate(ev!); // 다중일 블록의 시작(🛫)
-          const gcalDone = this.isGcalDone(ev!); // 완료색(회색) 또는 제목 #done 폴백
-          const gcalTitle = this.gcalTitleBase(ev!);
-
-          // 마감일
-          if (gcalDate && gcalDate !== task.due) {
-            await this.writer.setDue(task, gcalDate);
-          }
-          // 🛫 start: 시작<마감이면 그 날짜로, 같으면(단일일) 기존 🛫 제거
-          if (gcalStart && gcalDate && gcalStart < gcalDate) {
-            if (gcalStart !== task.start)
-              await this.writer.setStart(task, gcalStart);
-          } else if (task.start) {
-            await this.writer.removeStart(task);
-          }
-          // 제목(접두사 제거한 순수 제목이 다르면 본문 제목만 교체; 모호하면 내부 skip)
-          let newTitle = this.titleBase(task);
-          if (gcalTitle && gcalTitle !== newTitle) {
-            try {
-              await this.writer.replaceTitle(task, newTitle, gcalTitle);
-              newTitle = gcalTitle;
-            } catch (e) {
-              console.warn("[tasks-gcal-sync] 제목 pull skip:", id, e);
-            }
-          }
-          // 완료
-          if (gcalDone !== task.checked) {
-            if (gcalDone) {
-              const structural = await this.completion.complete(
-                task,
-                this.writer,
-                today
-              );
-              // 반복 회차가 삽입돼 줄이 늘면 이 파일의 이후 쓰기를 미룬다.
-              if (structural) dirtyFiles.add(task.path);
-            } else await this.completion.uncomplete(task, this.writer);
-          }
-          rec.due = gcalDate ?? rec.due;
-          rec.start = gcalStart ?? rec.start;
-          rec.done = gcalDone;
-          rec.title = newTitle;
-          rec.gcalUpdated = ev!.updated;
-          result.pulled++;
-          continue;
+        if (conflicts.length) {
+          console.warn(
+            `[tasks-gcal-sync] 충돌 → GCal 채택 (${conflicts.join(", ")}):`,
+            `${task.path}:${task.line + 1}`
+          );
         }
+        if (pulled) result.pulled++;
 
-        // GCal 변경 없음(또는 Obsidian이 더 최근) → Obsidian 변경분 push
-        if (obsChanged) {
+        // ── 2) push: GCal이 가져가지 않은 Obsidian 변경이 남아 있으면 올린다 ──
+        const pushNeeded =
+          (obs.due && !gc.due) ||
+          (obs.start && !gc.start) ||
+          (obs.done && !gc.done) ||
+          (obs.title && !gc.title);
+
+        // 반복 완료로 줄이 밀린 파일은 이번 run에서 더 쓰지 않는다(다음 사이클에서 신규 read).
+        if (pushNeeded && !dirtyFiles.has(task.path)) {
+          mDue = task.due!;
+          mStart = this.spanStart(task);
+          mDone = task.checked;
+          mTitle = this.titleBase(task);
+
           const target = resolveCalendar(task.tags, this.settings);
           if (target && target.id !== rec.calendarId) {
             // 대상 캘린더 변경 → 이동
@@ -554,25 +593,23 @@ export class SyncEngine {
             );
             rec.eventId = newEv.id!;
             rec.calendarId = target.id;
-            rec.due = task.due!;
-            rec.start = obsStart;
-            rec.done = task.checked;
-            rec.title = obsTitle;
             rec.gcalUpdated = newEv.updated; // 우리 push의 updated 저장 → 다음 pull에서 self-echo 제외
             result.moved++;
           } else {
             const updatedEv = await this.pushUpdate(rec, task, id);
-            rec.due = task.due!;
-            rec.start = obsStart;
-            rec.done = task.checked;
-            rec.title = obsTitle;
             rec.gcalUpdated = updatedEv.updated;
             result.updated++;
           }
         } else if (gcalChanged) {
-          // GCal이 바뀌었지만 채택 안 함(거의 없음) → 다음 비교 기준만 갱신.
+          // push하지 않았으면 GCal의 현재 updated가 다음 비교 기준.
           rec.gcalUpdated = ev!.updated;
         }
+
+        // ── 3) 스냅샷을 병합 결과로 갱신 ──
+        rec.due = mDue;
+        rec.start = mStart;
+        rec.done = mDone;
+        rec.title = mTitle;
       } catch (e) {
         console.error("[tasks-gcal-sync] reconcile 실패:", id, e);
         result.skipped++;
