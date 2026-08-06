@@ -368,13 +368,20 @@ export class SyncEngine {
       const inst = (this.app as any).internalPlugins?.plugins?.sync?.instance;
       if (!inst) return false;
       if (inst.pause === true) return true;
-      const raw = typeof inst.getStatus === "function" ? inst.getStatus() : inst.syncStatus;
+      const raw =
+        typeof inst.getStatus === "function" ? inst.getStatus() : inst.syncStatus;
       const s = String(raw ?? "").toLowerCase();
       if (!s) return false;
-      // 확실히 "끝났다"고 말할 때만 통과시킨다.
-      const settled = /synced|up to date|최신|동기화됨|완료/.test(s);
-      if (!settled) console.log("[tasks-gcal-sync] Sync 상태:", raw);
-      return !settled;
+      // **fail-open**: "진행 중"이라고 확실히 읽힐 때만 true.
+      // 반대로 "완료"를 인식하는 방식으로 짜면, 비공식 API의 문구가 바뀌거나 다른
+      // 언어로 나올 때 영원히 true가 되어 pull과 삭제가 조용히 멈춘다.
+      // 판단이 안 서면 통과시키고, 오삭제는 2단계 삭제 가드가 막는다.
+      const busy =
+        /syncing|synchronizing|uploading|downloading|pending|queued|동기화\s*중|업로드|다운로드/.test(
+          s
+        );
+      if (busy) console.log("[tasks-gcal-sync] Sync 진행 중:", raw);
+      return busy;
     } catch {
       return false;
     }
