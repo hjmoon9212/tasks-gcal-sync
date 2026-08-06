@@ -354,6 +354,30 @@ export class SettingsTab extends PluginSettingTab {
         })
       );
 
+    new Setting(containerEl)
+      .setName("창을 벗어날 때 동기화")
+      .setDesc(
+        "다른 앱으로 전환하면(모바일은 백그라운드 진입) 밀린 편집을 대기 없이 바로 밀어 올린다. 편집이 없었으면 아무것도 하지 않는다. '편집 시 자동 동기화'를 꺼도 동작한다. 모바일은 백그라운드에서 실행이 끊길 수 있어 보장되진 않는다(다음 동기화에서 복구)."
+      )
+      .addToggle((t) =>
+        t.setValue(s.syncOnBlur).onChange(async (v) => {
+          s.syncOnBlur = v;
+          await this.plugin.saveAll();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("창으로 돌아올 때 동기화")
+      .setDesc(
+        "Obsidian으로 복귀하면 자리를 비운 사이 GCal에서 바꾼 것(드래그·완료·삭제)을 바로 당겨온다. 단방향(push만)이면 동작하지 않는다. 위 '최소 간격'이 적용돼 잦은 전환에도 과하게 돌지 않는다."
+      )
+      .addToggle((t) =>
+        t.setValue(s.syncOnFocus).onChange(async (v) => {
+          s.syncOnFocus = v;
+          await this.plugin.saveAll();
+        })
+      );
+
     new Setting(containerEl).setName("시작 시 동기화").addToggle((t) =>
       t.setValue(s.syncOnStartup).onChange(async (v) => {
         s.syncOnStartup = v;

@@ -51,6 +51,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
   private intervalId: number | null = null;
   private autoPushTimer: number | null = null;
   private lastSyncAt = 0; // 마지막 동기화 "완료" 시각(ms) — 최소 간격 계산 기준
+  private dirty = false; // 마지막 동기화 이후 task 파일이 바뀌었는가 (창 이탈 트리거 조건)
   private statusBar!: HTMLElement;
 
   async onload(): Promise<void> {
@@ -111,9 +112,22 @@ export default class TasksGcalSyncPlugin extends Plugin {
       this.app.vault.on("modify", (file) => {
         if (!(file instanceof TFile) || file.extension !== "md") return;
         if (this.writer.wroteRecently(file.path, 10_000)) return;
+        this.dirty = true;
         this.scheduleAutoPush();
       })
     );
+
+    // 창을 벗어날 때 밀린 편집을 즉시 밀어내고, 돌아올 때 GCal 변경을 당겨온다.
+    // (GCal을 보러 나갔다 돌아오는 왕복이 디바운스·주기를 기다리지 않게 된다)
+    //  - 'focusout'이 아니라 window의 'blur'를 쓴다 — focusout은 에디터 안에서 커서가
+    //    옮겨갈 때마다 버블링돼 수십 번 터진다.
+    //  - 모바일 웹뷰는 blur/focus가 안 오는 대신 visibilitychange가 온다.
+    this.registerDomEvent(window, "blur", () => this.onLeave());
+    this.registerDomEvent(window, "focus", () => this.onReturn());
+    this.registerDomEvent(document, "visibilitychange", () => {
+      if (document.hidden) this.onLeave();
+      else this.onReturn();
+    });
 
     this.app.workspace.onLayoutReady(() => {
       this.setupInterval();
@@ -144,9 +158,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
     if (this.autoPushTimer !== null) window.clearTimeout(this.autoPushTimer);
 
     const debounce = Math.max(0, this.settings.autoPushDebounceSeconds) * 1000;
-    const cooldown = Math.max(0, this.settings.minSyncIntervalSeconds) * 1000;
-    const remaining = this.lastSyncAt + cooldown - Date.now();
-    const delay = Math.max(debounce, remaining);
+    const delay = Math.max(debounce, this.cooldownRemaining());
 
     this.autoPushTimer = window.setTimeout(() => {
       this.autoPushTimer = null;
@@ -155,6 +167,45 @@ export default class TasksGcalSyncPlugin extends Plugin {
       // 단방향(pushOnly=on)이면 run() 내부에서 어차피 pull 안 함.
       this.runSync(true, this.settings.skipPullOnEdit ? { pull: false } : {});
     }, delay);
+  }
+
+  /** 최소 간격이 지나기까지 남은 시간(ms). 0이면 지금 돌아도 된다. */
+  private cooldownRemaining(): number {
+    const cooldown = Math.max(0, this.settings.minSyncIntervalSeconds) * 1000;
+    return Math.max(0, this.lastSyncAt + cooldown - Date.now());
+  }
+
+  /**
+   * 창 이탈(다른 앱으로 전환 / 모바일 백그라운드) — 밀린 편집을 디바운스 기다리지 않고 즉시 push.
+   * 편집이 없었으면(dirty=false) 아무것도 하지 않는다. alt-tab이 잦아도 API를 두드리지 않게 하는 핵심.
+   * 최소 간격이 안 지났으면 그냥 넘긴다 — 편집 트리거가 이미 예약해 둔 타이머가 곧 처리한다.
+   *
+   * 모바일 주의: 백그라운드 진입 후 웹뷰 JS가 수 초 내 정지될 수 있어 요청이 중간에 끊길 수 있다.
+   * records는 캐시(GCal의 extendedProperties가 원천)라 상태가 깨지진 않고 다음 동기화에서 복구된다.
+   */
+  private onLeave(): void {
+    if (!this.settings.syncOnBlur) return;
+    if (!this.dirty) return;
+    if (this.syncing) return;
+    if (!this.auth.isAuthenticated()) return;
+    if (this.cooldownRemaining() > 0) return;
+
+    if (this.autoPushTimer !== null) {
+      window.clearTimeout(this.autoPushTimer);
+      this.autoPushTimer = null;
+    }
+    // 편집 트리거와 같은 규칙 — skipPullOnEdit이면 push만.
+    this.runSync(true, this.settings.skipPullOnEdit ? { pull: false } : {});
+  }
+
+  /** 창 복귀 — 자리를 비운 사이 GCal에서 바꾼 것(드래그·완료·삭제)을 바로 당겨온다. */
+  private onReturn(): void {
+    if (!this.settings.syncOnFocus) return;
+    if (this.settings.pushOnly) return; // 단방향이면 당겨올 게 없다
+    if (this.syncing) return;
+    if (!this.auth.isAuthenticated()) return;
+    if (this.cooldownRemaining() > 0) return;
+    this.runSync(true);
   }
 
   setupInterval(): void {
@@ -166,8 +217,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
     if (m > 0) {
       this.intervalId = window.setInterval(() => {
         // 방금 편집 트리거로 돌았으면 이번 틱은 건너뛴다(최소 간격).
-        const cooldown = Math.max(0, this.settings.minSyncIntervalSeconds) * 1000;
-        if (Date.now() - this.lastSyncAt < cooldown) return;
+        if (this.cooldownRemaining() > 0) return;
         this.runSync(true);
       }, m * 60_000);
       this.registerInterval(this.intervalId);
@@ -184,6 +234,9 @@ export default class TasksGcalSyncPlugin extends Plugin {
       return;
     }
     this.syncing = true;
+    // 시작 시점에 내린다 — 도는 도중 들어온 편집은 이 회차가 못 읽었을 수 있으니
+    // 다시 dirty로 남아 다음 트리거를 타야 한다.
+    this.dirty = false;
     this.statusBar.setText("GCal ⟳");
     try {
       const r = await this.engine.run(opts);
