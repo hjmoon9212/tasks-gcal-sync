@@ -262,6 +262,110 @@ export class SyncEngine {
     };
   }
 
+  /**
+   * task 없이 이벤트만으로 record 복원. 볼트에 대응 task가 없는 이벤트(삭제됐거나
+   * 아직 동기화 안 된)도 record로 만들어야 조정 루프의 시야에 들어온다.
+   * tgs* 스냅샷이 없는 옛 이벤트는 복원 불가 → null (backfill-ids로 채운 뒤 잡힌다).
+   */
+  private recordFromEventOnly(
+    ev: GCalEvent,
+    calendarId: string
+  ): SyncRecord | null {
+    const p = ev.extendedProperties?.private ?? {};
+    if (!ev.id || !p.tgsDue) return null;
+    return {
+      eventId: ev.id,
+      calendarId,
+      due: p.tgsDue,
+      start: p.tgsStart ?? p.tgsDue,
+      done: p.tgsDone === "1",
+      title: p.tgsTitle ?? this.gcalTitleBase(ev),
+      gcalUpdated: ev.updated,
+    };
+  }
+
+  /** 우리가 이벤트를 올리는 캘린더 전부(기본 + 라우팅 규칙 + 기존 record). */
+  private knownCalendarIds(): string[] {
+    const ids = new Set<string>();
+    if (this.settings.defaultCalendarId) ids.add(this.settings.defaultCalendarId);
+    for (const r of this.settings.rules) if (r.calendarId) ids.add(r.calendarId);
+    for (const rec of Object.values(this.state.records)) {
+      if (rec.calendarId) ids.add(rec.calendarId);
+    }
+    return [...ids];
+  }
+
+  /**
+   * records를 캘린더에서 재구성한다.
+   *
+   * records는 진실원천이 아니라 **캐시**다 — 매핑(tgsTaskId)도 스냅샷(tgsDue/tgsStart/
+   * tgsDone/tgsTitle)도 이미 이벤트에 심겨 있다(privateProps). 그래서 캐시가 비었거나
+   * 캘린더보다 좁아도 한 번 훑으면 그대로 복원된다. 이 스캔이 없으면 record를 잃은
+   * 이벤트는 조정 루프(records만 순회)의 시야 밖으로 영구히 빠진다.
+   *
+   * @returns 이번에 새로 주운 id 집합. 호출부는 이 id들을 같은 run에서 삭제하지 않는다.
+   */
+  private async rebuildRecords(
+    lookbackDays = 730,
+    lookaheadDays = 730
+  ): Promise<Set<string>> {
+    const adopted = new Set<string>();
+    const timeMin = isoDaysAgo(lookbackDays);
+    const timeMax = isoDaysAgo(-lookaheadDays);
+    for (const cal of this.knownCalendarIds()) {
+      let items: GCalEvent[];
+      try {
+        ({ items } = await this.client.listEvents(cal, {
+          singleEvents: "true",
+          showDeleted: "false",
+          maxResults: "2500",
+          timeMin,
+          timeMax,
+        }));
+      } catch (e) {
+        console.warn("[tasks-gcal-sync] 재구성 스캔 실패:", cal, e);
+        continue;
+      }
+      for (const ev of items) {
+        const tid = ev.extendedProperties?.private?.tgsTaskId;
+        if (!tid || ev.status === "cancelled") continue;
+        if (this.state.records[tid]) continue; // 이미 알고 있음
+        const rec = this.recordFromEventOnly(ev, cal);
+        if (!rec) continue;
+        this.state.records[tid] = rec;
+        adopted.add(tid);
+      }
+    }
+    if (adopted.size) {
+      console.log(`[tasks-gcal-sync] records 재구성: ${adopted.size}건 복원`);
+    }
+    return adopted;
+  }
+
+  /**
+   * 이 기기의 볼트가 뒤처져 있으면 true. Obsidian Sync 코어 플러그인의 상태를 읽는다
+   * (비공식 API — 없거나 모양이 바뀌면 판단을 포기하고 false).
+   *
+   * 뒤처진 볼트에서 "task가 없다 → 이벤트 삭제"를 돌리면, 다른 기기가 방금 만든
+   * task의 이벤트를 지운다. 확실히 동기화 중일 때만 삭제를 미룬다.
+   */
+  private vaultBehind(): boolean {
+    try {
+      const inst = (this.app as any).internalPlugins?.plugins?.sync?.instance;
+      if (!inst) return false;
+      if (inst.pause === true) return true;
+      const raw = typeof inst.getStatus === "function" ? inst.getStatus() : inst.syncStatus;
+      const s = String(raw ?? "").toLowerCase();
+      if (!s) return false;
+      // 확실히 "끝났다"고 말할 때만 통과시킨다.
+      const settled = /synced|up to date|최신|동기화됨|완료/.test(s);
+      if (!settled) console.log("[tasks-gcal-sync] Sync 상태:", raw);
+      return !settled;
+    } catch {
+      return false;
+    }
+  }
+
   private buildEvent(t: VaultTask, id: string): GCalEvent {
     const ev: GCalEvent = {
       summary: this.summary(t),
@@ -382,7 +486,9 @@ export class SyncEngine {
     return { byTaskId, cancelledEventIds };
   }
 
-  async run(opts: { pull?: boolean } = {}): Promise<SyncResult> {
+  async run(
+    opts: { pull?: boolean; fullScan?: boolean } = {}
+  ): Promise<SyncResult> {
     // pushOnly면 항상 단방향(Obsidian→GCal). 아니면 opts.pull로 제어(편집 자동 push는 pull:false).
     const doPull = !this.settings.pushOnly && opts.pull !== false;
     if (!this.settings.defaultCalendarId && this.settings.rules.length === 0) {
@@ -412,6 +518,20 @@ export class SyncEngine {
       pulled: 0,
       skipped: 0,
     };
+
+    // ---- 0) records 재구성(캐시 복구) ----
+    // 캐시가 비었으면 무조건, 그 외엔 시작 시 1회. 이걸 해야 record를 잃은 이벤트가
+    // 조정 루프의 시야에 들어와 "task 없음 → 삭제"로 정리된다.
+    const adopted =
+      opts.fullScan || Object.keys(records).length === 0
+        ? await this.rebuildRecords()
+        : new Set<string>();
+
+    // 볼트가 뒤처진 상태면 이번 run에선 삭제를 하지 않는다(다음 사이클로).
+    const holdDeletes = this.vaultBehind();
+    if (holdDeletes) {
+      console.log("[tasks-gcal-sync] 볼트 동기화 중 → 이번 run은 삭제 보류");
+    }
 
     // ---- PULL: 우리가 record를 가진 캘린더들의 변경분 가져오기 ----
     const pulled = new Map<string, CalPull>();
@@ -445,6 +565,14 @@ export class SyncEngine {
 
         // Obsidian에서 task 사라짐 → 이벤트 삭제
         if (!task) {
+          // 2단계 삭제: 이번 스캔에서 **처음 본** 이벤트는 지우지 않는다.
+          // 볼트가 아직 안 따라잡았을 뿐일 수 있으므로, record만 남겨두고 다음
+          // 사이클에 판단한다. 그때까지 task가 내려오면 정상 조정으로 흡수된다.
+          // (동기화 진행 중이면 기존 record도 같은 이유로 보류)
+          if (adopted.has(id) || holdDeletes) {
+            result.skipped++;
+            continue;
+          }
           await this.client.deleteEvent(rec.calendarId, rec.eventId);
           delete records[id];
           result.deleted++;

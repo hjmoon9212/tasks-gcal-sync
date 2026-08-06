@@ -14,10 +14,20 @@ interface PluginData {
   state?: PersistedState; // 구버전 호환: 예전엔 여기 state가 내장됨(현재는 state.json으로 분리)
 }
 
+/** localStorage 키. App.saveLocalStorage가 볼트 단위로 네임스페이스를 붙인다. */
+const STATE_LS_KEY = "tasks-gcal-sync:state";
+
 /**
- * 기기-로컬 state.json 파일 구조(Obsidian Sync 대상 아님).
- * records/syncTokens에 더해 **자격증명(clientId·clientSecret·refreshToken)** 도 여기 보관 →
- * 동기화되는 data.json엔 secret이 남지 않아, Sync 롤백이 자격증명을 옛 값으로 되돌리지 못한다.
+ * 기기-로컬 state 구조. 항목마다 성격이 다르다:
+ *  - **자격증명** = 진실원천. 기기 고유이고 동기화되면 안 된다(v0.3.1의 존재 이유).
+ *  - **records / syncTokens** = 캐시. 매핑도 스냅샷도 이미 GCal 이벤트의
+ *    extendedProperties(tgsTaskId/tgsDue/tgsStart/tgsDone/tgsTitle)에 심겨 있어
+ *    캘린더 스캔 한 번으로 복원된다(SyncEngine.rebuildRecords). 잃어도 된다.
+ *
+ * v0.3.8부터 저장 위치가 플러그인 폴더의 state.json → **localStorage**다.
+ * state.json은 `.obsidian/plugins/...` 안이라 "설치된 커뮤니티 플러그인" 동기화가
+ * 켜진 기기에서는 결국 동기화된다 — 기기-로컬이라는 전제가 거기서 깨져,
+ * 자격증명이 Sync를 타고 기기끼리 파일 단위로 덮어써졌다. localStorage는 동기화되지 않는다.
  */
 interface StateFile {
   records: PersistedState["records"];
@@ -54,7 +64,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
       }),
       async (token) => {
         this.settings.refreshToken = token;
-        await this.saveState(); // refreshToken은 기기-로컬 자격증명 → state.json에만 저장
+        await this.saveState(); // refreshToken은 기기-로컬 자격증명 → 로컬에만 저장
       }
     );
     this.client = new CalendarClient(this.auth);
@@ -108,8 +118,10 @@ export default class TasksGcalSyncPlugin extends Plugin {
     this.app.workspace.onLayoutReady(() => {
       this.setupInterval();
       if (this.settings.syncOnStartup && this.auth.isAuthenticated()) {
-        // 메타데이터 캐시가 준비될 시간을 약간 둠
-        window.setTimeout(() => this.runSync(true), 3000);
+        // 메타데이터 캐시가 준비될 시간을 약간 둠.
+        // 시작 시 1회는 캘린더 전체를 훑어 records를 재구성한다 → record를 잃은
+        // 이벤트(고아)가 시야에 들어와 다음 사이클에 정리된다.
+        window.setTimeout(() => this.runSync(true, { fullScan: true }), 3000);
       }
     });
   }
@@ -162,7 +174,10 @@ export default class TasksGcalSyncPlugin extends Plugin {
     }
   }
 
-  async runSync(silent = false, opts: { pull?: boolean } = {}): Promise<void> {
+  async runSync(
+    silent = false,
+    opts: { pull?: boolean; fullScan?: boolean } = {}
+  ): Promise<void> {
     if (this.syncing) return;
     if (!this.auth.isAuthenticated()) {
       if (!silent) new Notice("먼저 설정에서 Google 인증을 하세요.");
@@ -231,13 +246,20 @@ export default class TasksGcalSyncPlugin extends Plugin {
     }
   }
 
-  /** state.json 경로(플러그인 폴더 내). 설정(data.json)과 분리 — 기기-로컬, Sync 대상 아님. */
-  private stateFilePath(): string {
-    return normalizePath(`${this.manifest.dir}/state.json`);
+  private loadLocalState(): StateFile | null {
+    try {
+      const raw = this.app.loadLocalStorage(STATE_LS_KEY);
+      if (raw === null || raw === undefined || raw === "") return null;
+      return (typeof raw === "string" ? JSON.parse(raw) : raw) as StateFile;
+    } catch (e) {
+      console.error("[tasks-gcal-sync] 로컬 state 로드 실패:", e);
+      return null;
+    }
   }
 
-  private async loadState(): Promise<StateFile | null> {
-    const path = this.stateFilePath();
+  /** 구버전 state.json(플러그인 폴더 내). 자격증명 회수 + 삭제에만 쓴다. */
+  private async loadLegacyStateFile(): Promise<StateFile | null> {
+    const path = normalizePath(`${this.manifest.dir}/state.json`);
     try {
       if (!(await this.app.vault.adapter.exists(path))) return null;
       return JSON.parse(await this.app.vault.adapter.read(path)) as StateFile;
@@ -247,39 +269,52 @@ export default class TasksGcalSyncPlugin extends Plugin {
     }
   }
 
+  /** 남겨두면 Sync를 타고 되살아나 자격증명이 계속 새어나간다 → 이관 후 지운다. */
+  private async removeLegacyStateFile(): Promise<void> {
+    const path = normalizePath(`${this.manifest.dir}/state.json`);
+    try {
+      if (await this.app.vault.adapter.exists(path)) {
+        await this.app.vault.adapter.remove(path);
+        console.log("[tasks-gcal-sync] 구 state.json 이관 완료 → 삭제");
+      }
+    } catch (e) {
+      console.warn("[tasks-gcal-sync] state.json 삭제 실패(무시):", e);
+    }
+  }
+
   private async loadAll(): Promise<void> {
     const data = (await this.loadData()) as PluginData | null;
     this.settings = { ...DEFAULT_SETTINGS, ...(data?.settings ?? {}) };
 
-    // records/syncTokens/자격증명은 기기-로컬 state.json이 진실원천.
-    // 마이그레이션 2경로:
-    //  (a) state.json 없음        → data.json 내장 state에서 1회 이관.
-    //  (b) state.json에 자격증명 없음(구 state.json) + data.json엔 있음
-    //                             → 자격증명을 state.json으로 옮기고 data.json에서 제거.
-    let migrate = false;
-    const sf = await this.loadState();
-    if (sf) {
-      this.state = { records: sf.records ?? {}, syncTokens: sf.syncTokens ?? {} };
-      // state.json에 자격증명이 있으면 그게 기기-로컬 진실원천 → 설정에 덮어씀.
-      if (typeof sf.clientId === "string") this.settings.clientId = sf.clientId;
-      if (typeof sf.clientSecret === "string")
-        this.settings.clientSecret = sf.clientSecret;
-      if (sf.refreshToken !== undefined)
-        this.settings.refreshToken = sf.refreshToken;
-      const credsInState =
-        typeof sf.clientId === "string" ||
-        typeof sf.clientSecret === "string" ||
-        sf.refreshToken !== undefined;
-      const credsInSettings = !!(
-        this.settings.clientId ||
-        this.settings.clientSecret ||
+    // 캐시(records/syncTokens)는 GCal에서 복원되므로 이관할 필요가 없다.
+    // 지켜야 하는 건 자격증명뿐 — 우선순위: localStorage > 구 state.json > data.json.
+    const local = this.loadLocalState();
+    this.state = local
+      ? { records: local.records ?? {}, syncTokens: local.syncTokens ?? {} }
+      : data?.state ?? emptyState(); // 아주 옛 버전: data.json 내장 state
+    const legacy = await this.loadLegacyStateFile();
+
+    // data.json 쪽 값은 가장 낮은 우선순위 — Sync를 타는 곳이라 롤백된 옛 secret일 수 있다.
+    const firstStr = (...v: (string | undefined)[]) => v.find((s) => !!s);
+    const firstDef = <T>(...v: (T | undefined)[]) =>
+      v.find((x) => x !== undefined);
+    this.settings.clientId =
+      firstStr(local?.clientId, legacy?.clientId, this.settings.clientId) ?? "";
+    this.settings.clientSecret =
+      firstStr(
+        local?.clientSecret,
+        legacy?.clientSecret,
+        this.settings.clientSecret
+      ) ?? "";
+    this.settings.refreshToken =
+      firstDef(
+        local?.refreshToken,
+        legacy?.refreshToken,
         this.settings.refreshToken
-      );
-      if (!credsInState && credsInSettings) migrate = true; // (b)
-    } else {
-      this.state = data?.state ?? emptyState(); // (a)
-      migrate = true;
-    }
+      ) ?? null;
+    // localStorage가 비었거나 구 state.json이 남아 있으면 정규화해서 다시 적는다.
+    const migrate = !local || !!legacy;
+
     if (!this.state.syncTokens) this.state.syncTokens = {};
     if (!this.state.records) this.state.records = {};
 
@@ -294,9 +329,11 @@ export default class TasksGcalSyncPlugin extends Plugin {
     }
 
     if (migrate) {
-      await this.saveState(); // state.json 생성/갱신(records/tokens/자격증명)
+      await this.saveState(); // 로컬 state 생성/갱신(자격증명 + 캐시)
       await this.saveSettings(); // data.json을 settings(비밀 제외)만으로 재기록
     }
+    // 로컬 저장이 끝난 뒤에 지운다 — 순서가 반대면 중간에 죽었을 때 자격증명을 잃는다.
+    if (legacy) await this.removeLegacyStateFile();
   }
 
   /** 설정만 data.json에 저장 — 자격증명(clientId·clientSecret·refreshToken)은 제외해 Sync로 새어나가지 않게 한다. */
@@ -308,7 +345,10 @@ export default class TasksGcalSyncPlugin extends Plugin {
     await this.saveData({ settings: safe as PluginSettings });
   }
 
-  /** sync 상태(records/syncTokens) + 자격증명을 기기-로컬 state.json에 저장. sync 루프는 이것만 호출(data.json 안 건드림). */
+  /**
+   * 자격증명 + 캐시(records/syncTokens)를 기기-로컬 localStorage에 저장.
+   * 볼트 파일을 건드리지 않으므로 Obsidian Sync를 타지 않는다.
+   */
   async saveState(): Promise<void> {
     const sf: StateFile = {
       records: this.state.records,
@@ -317,10 +357,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
       clientSecret: this.settings.clientSecret,
       refreshToken: this.settings.refreshToken,
     };
-    await this.app.vault.adapter.write(
-      this.stateFilePath(),
-      JSON.stringify(sf, null, 2)
-    );
+    this.app.saveLocalStorage(STATE_LS_KEY, JSON.stringify(sf));
   }
 
   /** 설정 UI 저장용: 설정(data.json) + 자격증명/state(state.json) 둘 다 기록. */
