@@ -13,6 +13,85 @@ export interface RoutingRule {
   calendarName: string;
 }
 
+/** 동기화 타이밍 프리셋. custom = 세부 값을 직접 만진 상태. */
+export type SyncPreset = "realtime" | "balanced" | "economy" | "manual" | "custom";
+
+/** 프리셋이 정하는 타이밍 값들. 이 6개 밖의 설정은 프리셋과 무관하다. */
+export type TimingSettings = Pick<
+  PluginSettings,
+  | "autoPushOnEdit"
+  | "autoPushDebounceSeconds"
+  | "minSyncIntervalSeconds"
+  | "syncOnWindowSwitch"
+  | "syncOnStartup"
+  | "syncIntervalMinutes"
+>;
+
+export const SYNC_PRESETS: Record<
+  Exclude<SyncPreset, "custom">,
+  { label: string; desc: string; timing: TimingSettings }
+> = {
+  realtime: {
+    label: "실시간",
+    desc: "편집 5초 뒤 반영, 2분마다 확인. 반응은 가장 빠르지만 API 호출이 많다.",
+    timing: {
+      autoPushOnEdit: true,
+      autoPushDebounceSeconds: 5,
+      minSyncIntervalSeconds: 30,
+      syncOnWindowSwitch: true,
+      syncOnStartup: true,
+      syncIntervalMinutes: 2,
+    },
+  },
+  balanced: {
+    label: "균형 (기본)",
+    desc: "편집 20초 뒤 반영, 5분마다 확인, 창 전환 때 즉시. 대부분 이걸로 충분하다.",
+    timing: {
+      autoPushOnEdit: true,
+      autoPushDebounceSeconds: 20,
+      minSyncIntervalSeconds: 60,
+      syncOnWindowSwitch: true,
+      syncOnStartup: true,
+      syncIntervalMinutes: 5,
+    },
+  },
+  economy: {
+    label: "절약",
+    desc: "편집 60초 뒤 반영, 30분마다 확인. 창 전환 때는 여전히 즉시 — 모바일 배터리/데이터 아낄 때.",
+    timing: {
+      autoPushOnEdit: true,
+      autoPushDebounceSeconds: 60,
+      minSyncIntervalSeconds: 300,
+      syncOnWindowSwitch: true,
+      syncOnStartup: true,
+      syncIntervalMinutes: 30,
+    },
+  },
+  manual: {
+    label: "수동만",
+    desc: "리본 아이콘이나 명령으로 직접 실행할 때만 동기화한다.",
+    timing: {
+      autoPushOnEdit: false,
+      autoPushDebounceSeconds: 20,
+      minSyncIntervalSeconds: 60,
+      syncOnWindowSwitch: false,
+      syncOnStartup: false,
+      syncIntervalMinutes: 0,
+    },
+  },
+};
+
+/** 현재 타이밍 값이 어느 프리셋과 일치하는지 — 하나도 안 맞으면 "custom". */
+export function derivePreset(s: PluginSettings): SyncPreset {
+  for (const [key, p] of Object.entries(SYNC_PRESETS)) {
+    const match = (Object.keys(p.timing) as (keyof TimingSettings)[]).every(
+      (k) => s[k] === p.timing[k]
+    );
+    if (match) return key as SyncPreset;
+  }
+  return "custom";
+}
+
 export interface PluginSettings {
   // OAuth (사용자 자신의 Google Cloud 프로젝트 자격증명)
   clientId: string;
@@ -43,12 +122,11 @@ export interface PluginSettings {
   includeOverdue: boolean; // overdue(오늘 이전 미완료)도 동기화
   syncOnStartup: boolean;
   syncIntervalMinutes: number; // 0 = 수동만
+  syncPreset: SyncPreset; // 아래 6개 타이밍 값의 묶음. 하나라도 손대면 "custom"
   autoPushOnEdit: boolean; // task 편집 시 자동 push(Obsidian→GCal, 디바운스)
   autoPushDebounceSeconds: number; // 편집이 멎고 몇 초 뒤에 동기화할지
   minSyncIntervalSeconds: number; // 자동 동기화 최소 간격(수동/리본은 무시). 0 = 제한 없음
-  skipPullOnEdit: boolean; // 편집 트리거는 push만 (pull은 시작/주기/수동에서만)
-  syncOnBlur: boolean; // 창을 벗어날 때(다른 앱/탭으로 전환) 밀린 편집을 즉시 동기화
-  syncOnFocus: boolean; // 창으로 돌아올 때 GCal 변경을 pull (pushOnly면 동작 안 함)
+  syncOnWindowSwitch: boolean; // 창을 벗어날 때 밀린 편집 push + 돌아올 때 GCal pull
 
   // (구버전 호환) 단일 대상 캘린더 — 마이그레이션에만 사용
   targetCalendarId?: string;
@@ -76,12 +154,11 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   includeOverdue: false,
   syncOnStartup: true,
   syncIntervalMinutes: 5,
+  syncPreset: "balanced",
   autoPushOnEdit: true,
   autoPushDebounceSeconds: 20,
   minSyncIntervalSeconds: 60,
-  skipPullOnEdit: false,
-  syncOnBlur: true,
-  syncOnFocus: true,
+  syncOnWindowSwitch: true,
 };
 
 /**

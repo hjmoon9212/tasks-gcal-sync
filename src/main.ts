@@ -1,5 +1,5 @@
 import { Notice, Plugin, TFile, normalizePath } from "obsidian";
-import { DEFAULT_SETTINGS, PluginSettings } from "./settings/Settings";
+import { DEFAULT_SETTINGS, PluginSettings, derivePreset } from "./settings/Settings";
 import { SettingsTab } from "./settings/SettingsTab";
 import { PersistedState, emptyState } from "./sync/StateStore";
 import { GoogleAuth } from "./auth/GoogleAuth";
@@ -12,6 +12,15 @@ import { SyncEngine } from "./sync/SyncEngine";
 interface PluginData {
   settings: PluginSettings;
   state?: PersistedState; // 구버전 호환: 예전엔 여기 state가 내장됨(현재는 state.json으로 분리)
+}
+
+/** ~0.3.11의 타이밍 설정. 지금은 syncPreset + syncOnWindowSwitch로 합쳐졌다. */
+interface LegacyTiming {
+  syncPreset?: string;
+  syncOnWindowSwitch?: boolean;
+  syncOnBlur?: boolean;
+  syncOnFocus?: boolean;
+  skipPullOnEdit?: boolean;
 }
 
 /** localStorage 키. App.saveLocalStorage가 볼트 단위로 네임스페이스를 붙인다. */
@@ -162,10 +171,9 @@ export default class TasksGcalSyncPlugin extends Plugin {
 
     this.autoPushTimer = window.setTimeout(() => {
       this.autoPushTimer = null;
-      // 기본은 양방향 — 편집 직전의 GCal 수정을 못 보고 덮어쓰지 않도록 pull도 함께 한다.
-      // skipPullOnEdit을 켜면 push만 (pull은 시작/주기/수동에서만).
-      // 단방향(pushOnly=on)이면 run() 내부에서 어차피 pull 안 함.
-      this.runSync(true, this.settings.skipPullOnEdit ? { pull: false } : {});
+      // 편집 트리거는 push만 — GCal을 읽지 않아 API 호출이 준다.
+      // pull은 시작/주기/창 복귀에서 한다(GCal을 만지고 돌아오면 복귀 pull이 먼저 받아온다).
+      this.runSync(true, { pull: false });
     }, delay);
   }
 
@@ -184,7 +192,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
    * records는 캐시(GCal의 extendedProperties가 원천)라 상태가 깨지진 않고 다음 동기화에서 복구된다.
    */
   private onLeave(): void {
-    if (!this.settings.syncOnBlur) return;
+    if (!this.settings.syncOnWindowSwitch) return;
     if (!this.dirty) return;
     if (this.syncing) return;
     if (!this.auth.isAuthenticated()) return;
@@ -194,13 +202,14 @@ export default class TasksGcalSyncPlugin extends Plugin {
       window.clearTimeout(this.autoPushTimer);
       this.autoPushTimer = null;
     }
-    // 편집 트리거와 같은 규칙 — skipPullOnEdit이면 push만.
-    this.runSync(true, this.settings.skipPullOnEdit ? { pull: false } : {});
+    // 편집 트리거와 같은 규칙 — push만. 나가는 길이라 빨라야 하고(모바일은 곧 정지),
+    // GCal 쪽 변경은 어차피 돌아올 때 pull한다.
+    this.runSync(true, { pull: false });
   }
 
   /** 창 복귀 — 자리를 비운 사이 GCal에서 바꾼 것(드래그·완료·삭제)을 바로 당겨온다. */
   private onReturn(): void {
-    if (!this.settings.syncOnFocus) return;
+    if (!this.settings.syncOnWindowSwitch) return;
     if (this.settings.pushOnly) return; // 단방향이면 당겨올 게 없다
     if (this.syncing) return;
     if (!this.auth.isAuthenticated()) return;
@@ -338,6 +347,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
   private async loadAll(): Promise<void> {
     const data = (await this.loadData()) as PluginData | null;
     this.settings = { ...DEFAULT_SETTINGS, ...(data?.settings ?? {}) };
+    this.migrateTiming(data?.settings as LegacyTiming | undefined);
 
     // 캐시(records/syncTokens)는 GCal에서 복원되므로 이관할 필요가 없다.
     // 지켜야 하는 건 자격증명뿐 — 우선순위: localStorage > 구 state.json > data.json.
@@ -387,6 +397,27 @@ export default class TasksGcalSyncPlugin extends Plugin {
     }
     // 로컬 저장이 끝난 뒤에 지운다 — 순서가 반대면 중간에 죽었을 때 자격증명을 잃는다.
     if (legacy) await this.removeLegacyStateFile();
+  }
+
+  /**
+   * 타이밍 설정 마이그레이션. 옛 값을 그대로 살려 업그레이드로 동작이 바뀌지 않게 한다.
+   *  - syncOnBlur/syncOnFocus(0.3.11) → syncOnWindowSwitch 하나로. 둘 다 껐을 때만 off.
+   *  - syncPreset이 없던 버전 → 현재 값에서 역산. 어느 프리셋과도 안 맞으면 "custom"으로 남는다.
+   *  - skipPullOnEdit → 삭제(편집 트리거는 항상 push만, pull은 시작/주기/창복귀에서).
+   */
+  private migrateTiming(raw?: LegacyTiming): void {
+    if (
+      raw &&
+      raw.syncOnWindowSwitch === undefined &&
+      (raw.syncOnBlur !== undefined || raw.syncOnFocus !== undefined)
+    ) {
+      this.settings.syncOnWindowSwitch =
+        (raw.syncOnBlur ?? true) || (raw.syncOnFocus ?? true);
+    }
+    if (!raw?.syncPreset) this.settings.syncPreset = derivePreset(this.settings);
+    delete (this.settings as Partial<LegacyTiming>).skipPullOnEdit;
+    delete (this.settings as Partial<LegacyTiming>).syncOnBlur;
+    delete (this.settings as Partial<LegacyTiming>).syncOnFocus;
   }
 
   /** 설정만 data.json에 저장 — 자격증명(clientId·clientSecret·refreshToken)은 제외해 Sync로 새어나가지 않게 한다. */
