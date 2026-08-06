@@ -9,6 +9,7 @@ import {
   addDay,
   addDays,
   daysBetween,
+  fmt,
   genId,
   isoDaysAgo,
   isValidDate,
@@ -160,6 +161,19 @@ export class SyncEngine {
     if (ev.start?.date) return ev.start.date;
     if (ev.start?.dateTime) return ev.start.dateTime.slice(0, 10);
     return undefined;
+  }
+
+  /**
+   * 이벤트가 완료로 바뀐 날(로컬 YYYY-MM-DD). GCal엔 "완료 시각"이 없으므로
+   * 마지막 수정 시각(updated = 사용자가 free/색으로 완료 표시한 시점)을 쓴다.
+   *
+   * 핵심은 정확도가 아니라 **결정성**이다. 이 값은 이벤트에 실려 있으므로 어느 기기가
+   * 언제 pull해도 같은 ✅ 날짜가 나온다 → 기기 간 노트 텍스트가 갈리지 않는다.
+   */
+  private eventDoneDate(ev: GCalEvent | undefined): string | undefined {
+    if (!ev?.updated) return undefined;
+    const d = new Date(ev.updated);
+    return isNaN(d.getTime()) ? undefined : fmt(d);
   }
 
   /** 이벤트에서 due(마감일) 추출: all-day는 end.date(배타적)−1, 시간지정은 end 날짜(없으면 start). */
@@ -489,8 +503,17 @@ export class SyncEngine {
   async run(
     opts: { pull?: boolean; fullScan?: boolean } = {}
   ): Promise<SyncResult> {
+    // 볼트가 아직 동기화 중이면 이번 run은 **노트를 건드리지 않는다**.
+    // 뒤처진 사본에 pull 결과를 쓰면 (a) 다른 기기가 방금 만든 task의 이벤트를 지우거나
+    // (b) 갈라진 두 사본에 서로 다른 텍스트가 써져 Sync 병합이 블록을 중복시킨다.
+    // pull을 끄면 gc.* 판정이 전부 false가 되어 노트 쓰기 경로 자체가 안 열린다.
+    const holdWrites = this.vaultBehind();
+    if (holdWrites) {
+      console.log("[tasks-gcal-sync] 볼트 동기화 중 → 이번 run은 노트 쓰기/삭제 보류");
+    }
     // pushOnly면 항상 단방향(Obsidian→GCal). 아니면 opts.pull로 제어(편집 자동 push는 pull:false).
-    const doPull = !this.settings.pushOnly && opts.pull !== false;
+    const doPull =
+      !this.settings.pushOnly && opts.pull !== false && !holdWrites;
     if (!this.settings.defaultCalendarId && this.settings.rules.length === 0) {
       throw new Error("설정에서 기본 캘린더 또는 라우팅 규칙을 먼저 지정하세요.");
     }
@@ -498,11 +521,22 @@ export class SyncEngine {
     const tasks = await this.repo.getTasks();
     const tasksById = new Map<string, VaultTask>();
     const existingIds = new Set<string>();
+    // 같은 🆔가 두 줄 이상이면 병합이 덜 끝난 노트다(Sync가 블록을 중복시킨 경우 등).
+    // 어느 줄이 정본인지 알 수 없으므로 그 id는 이번 run에서 통째로 건드리지 않는다 —
+    // 임의의 줄에 쓰면 중복이 조용히 누적된다.
+    const dupIds = new Set<string>();
     for (const t of tasks) {
-      if (t.id) {
-        tasksById.set(t.id, t);
-        existingIds.add(t.id);
-      }
+      if (!t.id) continue;
+      if (existingIds.has(t.id)) dupIds.add(t.id);
+      tasksById.set(t.id, t);
+      existingIds.add(t.id);
+    }
+    for (const id of dupIds) {
+      const where = tasks
+        .filter((t) => t.id === id)
+        .map((t) => `${t.path}:${t.line + 1}`)
+        .join(", ");
+      console.warn(`[tasks-gcal-sync] 🆔 ${id} 중복 → 건너뜀: ${where}`);
     }
 
     const records = this.state.records;
@@ -527,12 +561,6 @@ export class SyncEngine {
         ? await this.rebuildRecords()
         : new Set<string>();
 
-    // 볼트가 뒤처진 상태면 이번 run에선 삭제를 하지 않는다(다음 사이클로).
-    const holdDeletes = this.vaultBehind();
-    if (holdDeletes) {
-      console.log("[tasks-gcal-sync] 볼트 동기화 중 → 이번 run은 삭제 보류");
-    }
-
     // ---- PULL: 우리가 record를 가진 캘린더들의 변경분 가져오기 ----
     const pulled = new Map<string, CalPull>();
     if (doPull) {
@@ -556,6 +584,12 @@ export class SyncEngine {
       const evCancelled = calData?.cancelledEventIds.has(rec.eventId) ?? false;
 
       try {
+        // 🆔가 중복된 노트 → 정본을 특정할 수 없으니 읽지도 쓰지도 않는다.
+        // (특히 아래 "task 없음 → 삭제"로 새지 않도록 이 검사가 먼저 와야 한다)
+        if (dupIds.has(id)) {
+          result.skipped++;
+          continue;
+        }
         // 같은 run에서 이 파일에 반복 회차가 삽입됨 → task.line이 밀려 오손상 위험.
         // 이 task의 반영은 스킵하고 다음 사이클(신규 read)에서 처리.
         if (task && dirtyFiles.has(task.path)) {
@@ -569,7 +603,7 @@ export class SyncEngine {
           // 볼트가 아직 안 따라잡았을 뿐일 수 있으므로, record만 남겨두고 다음
           // 사이클에 판단한다. 그때까지 task가 내려오면 정상 조정으로 흡수된다.
           // (동기화 진행 중이면 기존 record도 같은 이유로 보류)
-          if (adopted.has(id) || holdDeletes) {
+          if (adopted.has(id) || holdWrites) {
             result.skipped++;
             continue;
           }
@@ -583,6 +617,10 @@ export class SyncEngine {
         // due 없이 patch하면 addDay(undefined)=NaN 날짜로 GCal 400이 매 sync 반복됨.
         // (예: 템플릿이 due 없이 #task를 만들거나 사용자가 📅를 지운 경우)
         if (!isValidDate(task.due)) {
+          if (holdWrites) {
+            result.skipped++;
+            continue;
+          }
           await this.client.deleteEvent(rec.calendarId, rec.eventId);
           delete records[id];
           result.deleted++;
@@ -676,7 +714,7 @@ export class SyncEngine {
             const structural = await this.completion.complete(
               task,
               this.writer,
-              today
+              this.eventDoneDate(ev) ?? today
             );
             // 반복 회차가 삽입돼 줄이 늘면 이 파일의 이후 쓰기를 미룬다.
             if (structural) dirtyFiles.add(task.path);
@@ -747,6 +785,7 @@ export class SyncEngine {
     // ---- 2) record 없는 새 task → 생성 ----
     for (const t of tasks) {
       if (!isValidDate(t.due)) continue; // due 없음/형식오류 → 스킵(잘못된 이벤트 생성 방지)
+      if (t.id && dupIds.has(t.id)) continue; // 🆔 중복 노트 → 정본 불명, 손대지 않음
       if (t.id && records[t.id]) continue; // 이미 처리됨
       // 이번 run에 구조 변경(반복 회차 삽입)된 파일 → 캐시된 line이 밀렸으므로
       // 새 회차 이벤트 생성은 다음 사이클(신규 read)로 미룬다.
