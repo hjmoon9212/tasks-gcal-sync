@@ -42,6 +42,12 @@ const doneEvent = (id: string, done: boolean, updated: string): Ev => ({
   },
 });
 
+/** GCal에서 지워진 이벤트가 pull 응답에 실려 오는 모양. */
+const cancelledEvent = (id: string): Ev => ({
+  id: "ev-" + id,
+  status: "cancelled",
+});
+
 const task = (id: string, checked: boolean, due = TODAY) => ({
   id,
   checked,
@@ -68,12 +74,12 @@ function harness(opts: {
     patch: [] as any[],
     insert: [] as any[],
     del: [] as string[],
+    removeDue: [] as string[],
     complete: [] as string[],
     uncomplete: [] as string[],
   };
   const settings: PluginSettings = {
     ...DEFAULT_SETTINGS,
-    pushOnly: false,
     defaultCalendarId: CAL,
     defaultCalendarName: "Test",
     ...opts.settings,
@@ -102,6 +108,9 @@ function harness(opts: {
     findByTaskId: async () => [],
   };
   const writer: any = {
+    removeDue: async (t: any) => {
+      calls.removeDue.push(t.id);
+    },
     setDue: async () => {},
     setStart: async () => {},
     removeStart: async () => {},
@@ -263,6 +272,47 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     // fail-open 상한: 계속 뒤처짐이면 결국 통과시킨다
     for (let i = 0; i < 6; i++) await h.engine.run();
     eq(h.calls.patch.length >= 1, true, "fail-open 상한 초과 후에는 통과");
+  }
+
+  // ── 8) GCal에서 이벤트를 지워도 **완료된** 줄의 📅는 건드리지 않는다.
+  //     반복(🔁) task는 회차마다 별도 이벤트가 쌓여 캘린더 정리가 잦은데, 그때마다
+  //     완료 회차의 due가 노트에서 사라졌다(2026-08-07).
+  {
+    const h = harness({
+      tasks: [task("A1", true)],
+      events: [cancelledEvent("A1")],
+      records: { A1: rec({ done: true }) },
+    });
+    await h.engine.run();
+    eq(h.calls.removeDue, [], "완료 줄: 이벤트가 지워져도 📅 유지");
+    eq(h.state.records.A1, undefined, "완료 줄: record는 정리");
+  }
+
+  // ── 9) 미완료 줄은 기존대로 미일정화한다
+  {
+    const h = harness({
+      tasks: [task("A1", false)],
+      events: [cancelledEvent("A1")],
+      records: { A1: rec() },
+    });
+    await h.engine.run();
+    eq(h.calls.removeDue, ["A1"], "미완료 줄: 미일정화");
+    eq(h.state.records.A1, undefined, "미완료 줄: record 정리");
+  }
+
+  // ── 10) 콜드 스타트에서는 미일정화도 보류한다
+  //      (남의 기기가 중복정리·캘린더이동으로 만든 cancelled일 수 있다)
+  {
+    const h = harness({
+      tasks: [task("A1", false)],
+      events: [cancelledEvent("A1")],
+      records: { A1: rec() },
+    });
+    (h.engine as any).loadedAt = Date.now();
+    (h.engine as any).pullCycleDone = false;
+    await h.engine.run();
+    eq(h.calls.removeDue, [], "콜드 스타트: 미일정화 보류");
+    eq(h.state.records.A1 !== undefined, true, "콜드 스타트: record 유지");
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

@@ -725,6 +725,21 @@ export class SyncEngine {
 
         // GCal에서 이벤트 삭제됨 → task 미일정화(📅 제거)
         if (evCancelled) {
+          // **완료된 줄의 📅는 기록이다.** 반복(🔁) task는 회차마다 별도 🆔·이벤트가
+          // 쌓이므로 캘린더에서 지난 완료 이벤트를 정리하는 건 자연스러운 조작인데,
+          // 그때마다 완료 회차의 due가 노트에서 지워졌다(2026-08-07). 완료 + 과거 due는
+          // 아래 생성 루프의 inWindow에서 걸러지므로 record만 지워도 이벤트는 안 되살아난다.
+          if (task.checked) {
+            delete records[id];
+            continue;
+          }
+          // 미완료 task만 실제로 미일정화한다. 단, 다른 파괴적 경로와 같은 가드를 건다 —
+          // 볼트가 뒤처졌거나(holdWrites·coldHold) 이번 스캔에서 처음 본 record라면
+          // 남의 기기가 만든 cancelled(중복정리·캘린더이동)를 근거로 지우는 것일 수 있다.
+          if (holdWrites || coldHold || adopted.has(id)) {
+            result.skipped++;
+            continue;
+          }
           await this.writer.removeDue(task);
           delete records[id];
           result.pulled++;
