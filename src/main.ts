@@ -14,10 +14,10 @@ interface PluginData {
   state?: PersistedState; // 구버전 호환: 예전엔 여기 state가 내장됨(현재는 state.json으로 분리)
 }
 
-/** ~0.3.11의 타이밍 설정. 지금은 syncPreset + syncOnWindowSwitch로 합쳐졌다. */
+/** 지금은 없는 옛 타이밍 설정들(≤0.3.12). 남아 있으면 지우기만 한다. */
 interface LegacyTiming {
   syncPreset?: string;
-  syncOnWindowSwitch?: boolean;
+  syncOnWindowSwitch?: boolean; // 창 전환 트리거(0.3.11~0.3.12) — 0.3.13에서 제거
   syncOnBlur?: boolean;
   syncOnFocus?: boolean;
   skipPullOnEdit?: boolean;
@@ -60,7 +60,6 @@ export default class TasksGcalSyncPlugin extends Plugin {
   private intervalId: number | null = null;
   private autoPushTimer: number | null = null;
   private lastSyncAt = 0; // 마지막 동기화 "완료" 시각(ms) — 최소 간격 계산 기준
-  private dirty = false; // 마지막 동기화 이후 task 파일이 바뀌었는가 (창 이탈 트리거 조건)
   private statusBar!: HTMLElement;
 
   async onload(): Promise<void> {
@@ -92,13 +91,15 @@ export default class TasksGcalSyncPlugin extends Plugin {
       () => this.saveState()
     );
 
+    // 수동 실행은 force — 사용자가 명시적으로 요청한 것이므로 콜드 스타트/뒤처짐 보류를
+    // 우회한다(자동 트리거만 보류 대상).
     this.addRibbonIcon("calendar-clock", "Tasks → Google Calendar 동기화", () =>
-      this.runSync()
+      this.runSync(false, { force: true })
     );
     this.addCommand({
       id: "sync-now",
       name: "지금 동기화 (Tasks → Google Calendar)",
-      callback: () => this.runSync(),
+      callback: () => this.runSync(false, { force: true }),
     });
     this.addCommand({
       id: "backfill-ids",
@@ -121,22 +122,9 @@ export default class TasksGcalSyncPlugin extends Plugin {
       this.app.vault.on("modify", (file) => {
         if (!(file instanceof TFile) || file.extension !== "md") return;
         if (this.writer.wroteRecently(file.path, 10_000)) return;
-        this.dirty = true;
         this.scheduleAutoPush();
       })
     );
-
-    // 창을 벗어날 때 밀린 편집을 즉시 밀어내고, 돌아올 때 GCal 변경을 당겨온다.
-    // (GCal을 보러 나갔다 돌아오는 왕복이 디바운스·주기를 기다리지 않게 된다)
-    //  - 'focusout'이 아니라 window의 'blur'를 쓴다 — focusout은 에디터 안에서 커서가
-    //    옮겨갈 때마다 버블링돼 수십 번 터진다.
-    //  - 모바일 웹뷰는 blur/focus가 안 오는 대신 visibilitychange가 온다.
-    this.registerDomEvent(window, "blur", () => this.onLeave());
-    this.registerDomEvent(window, "focus", () => this.onReturn());
-    this.registerDomEvent(document, "visibilitychange", () => {
-      if (document.hidden) this.onLeave();
-      else this.onReturn();
-    });
 
     this.app.workspace.onLayoutReady(() => {
       this.setupInterval();
@@ -171,9 +159,9 @@ export default class TasksGcalSyncPlugin extends Plugin {
 
     this.autoPushTimer = window.setTimeout(() => {
       this.autoPushTimer = null;
-      // 편집 트리거는 push만 — GCal을 읽지 않아 API 호출이 준다.
-      // pull은 시작/주기/창 복귀에서 한다(GCal을 만지고 돌아오면 복귀 pull이 먼저 받아온다).
-      this.runSync(true, { pull: false });
+      // 편집 트리거도 pull을 함께 한다(0.3.13~). 증분 pull은 캘린더당 목록 호출 1회로 싸고,
+      // 원격을 안 보고 미는 run은 "로컬 무조건 승"이 되어 GCal의 최신 변경을 덮어쓴다.
+      this.runSync(true);
     }, delay);
   }
 
@@ -181,40 +169,6 @@ export default class TasksGcalSyncPlugin extends Plugin {
   private cooldownRemaining(): number {
     const cooldown = Math.max(0, this.settings.minSyncIntervalSeconds) * 1000;
     return Math.max(0, this.lastSyncAt + cooldown - Date.now());
-  }
-
-  /**
-   * 창 이탈(다른 앱으로 전환 / 모바일 백그라운드) — 밀린 편집을 디바운스 기다리지 않고 즉시 push.
-   * 편집이 없었으면(dirty=false) 아무것도 하지 않는다. alt-tab이 잦아도 API를 두드리지 않게 하는 핵심.
-   * 최소 간격이 안 지났으면 그냥 넘긴다 — 편집 트리거가 이미 예약해 둔 타이머가 곧 처리한다.
-   *
-   * 모바일 주의: 백그라운드 진입 후 웹뷰 JS가 수 초 내 정지될 수 있어 요청이 중간에 끊길 수 있다.
-   * records는 캐시(GCal의 extendedProperties가 원천)라 상태가 깨지진 않고 다음 동기화에서 복구된다.
-   */
-  private onLeave(): void {
-    if (!this.settings.syncOnWindowSwitch) return;
-    if (!this.dirty) return;
-    if (this.syncing) return;
-    if (!this.auth.isAuthenticated()) return;
-    if (this.cooldownRemaining() > 0) return;
-
-    if (this.autoPushTimer !== null) {
-      window.clearTimeout(this.autoPushTimer);
-      this.autoPushTimer = null;
-    }
-    // 편집 트리거와 같은 규칙 — push만. 나가는 길이라 빨라야 하고(모바일은 곧 정지),
-    // GCal 쪽 변경은 어차피 돌아올 때 pull한다.
-    this.runSync(true, { pull: false });
-  }
-
-  /** 창 복귀 — 자리를 비운 사이 GCal에서 바꾼 것(드래그·완료·삭제)을 바로 당겨온다. */
-  private onReturn(): void {
-    if (!this.settings.syncOnWindowSwitch) return;
-    if (this.settings.pushOnly) return; // 단방향이면 당겨올 게 없다
-    if (this.syncing) return;
-    if (!this.auth.isAuthenticated()) return;
-    if (this.cooldownRemaining() > 0) return;
-    this.runSync(true);
   }
 
   setupInterval(): void {
@@ -235,7 +189,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
 
   async runSync(
     silent = false,
-    opts: { pull?: boolean; fullScan?: boolean } = {}
+    opts: { pull?: boolean; fullScan?: boolean; force?: boolean } = {}
   ): Promise<void> {
     if (this.syncing) return;
     if (!this.auth.isAuthenticated()) {
@@ -243,9 +197,6 @@ export default class TasksGcalSyncPlugin extends Plugin {
       return;
     }
     this.syncing = true;
-    // 시작 시점에 내린다 — 도는 도중 들어온 편집은 이 회차가 못 읽었을 수 있으니
-    // 다시 dirty로 남아 다음 트리거를 타야 한다.
-    this.dirty = false;
     this.statusBar.setText("GCal ⟳");
     try {
       const r = await this.engine.run(opts);
@@ -400,24 +351,21 @@ export default class TasksGcalSyncPlugin extends Plugin {
   }
 
   /**
-   * 타이밍 설정 마이그레이션. 옛 값을 그대로 살려 업그레이드로 동작이 바뀌지 않게 한다.
-   *  - syncOnBlur/syncOnFocus(0.3.11) → syncOnWindowSwitch 하나로. 둘 다 껐을 때만 off.
-   *  - syncPreset이 없던 버전 → 현재 값에서 역산. 어느 프리셋과도 안 맞으면 "custom"으로 남는다.
-   *  - skipPullOnEdit → 삭제(편집 트리거는 항상 push만, pull은 시작/주기/창복귀에서).
+   * 타이밍 설정 마이그레이션.
+   *  - syncPreset이 없던 버전 → 현재 값에서 역산해 업그레이드가 동작을 바꾸지 않게 한다.
+   *    어느 프리셋과도 안 맞으면 "custom"으로 남는다.
+   *  - 없어진 옵션(skipPullOnEdit · syncOnBlur/Focus · syncOnWindowSwitch)은 지우기만 한다.
+   *    다음 저장 때 data.json에서 빠진다.
    */
   private migrateTiming(raw?: LegacyTiming): void {
-    if (
-      raw &&
-      raw.syncOnWindowSwitch === undefined &&
-      (raw.syncOnBlur !== undefined || raw.syncOnFocus !== undefined)
-    ) {
-      this.settings.syncOnWindowSwitch =
-        (raw.syncOnBlur ?? true) || (raw.syncOnFocus ?? true);
-    }
     if (!raw?.syncPreset) this.settings.syncPreset = derivePreset(this.settings);
-    delete (this.settings as Partial<LegacyTiming>).skipPullOnEdit;
-    delete (this.settings as Partial<LegacyTiming>).syncOnBlur;
-    delete (this.settings as Partial<LegacyTiming>).syncOnFocus;
+    const dead: (keyof LegacyTiming)[] = [
+      "skipPullOnEdit",
+      "syncOnBlur",
+      "syncOnFocus",
+      "syncOnWindowSwitch",
+    ];
+    for (const k of dead) delete (this.settings as Partial<LegacyTiming>)[k];
   }
 
   /** 설정만 data.json에 저장 — 자격증명(clientId·clientSecret·refreshToken)은 제외해 Sync로 새어나가지 않게 한다. */

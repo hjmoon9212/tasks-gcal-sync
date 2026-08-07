@@ -16,13 +16,12 @@ export interface RoutingRule {
 /** 동기화 타이밍 프리셋. custom = 세부 값을 직접 만진 상태. */
 export type SyncPreset = "realtime" | "balanced" | "economy" | "manual" | "custom";
 
-/** 프리셋이 정하는 타이밍 값들. 이 6개 밖의 설정은 프리셋과 무관하다. */
+/** 프리셋이 정하는 타이밍 값들. 이 5개 밖의 설정은 프리셋과 무관하다. */
 export type TimingSettings = Pick<
   PluginSettings,
   | "autoPushOnEdit"
   | "autoPushDebounceSeconds"
   | "minSyncIntervalSeconds"
-  | "syncOnWindowSwitch"
   | "syncOnStartup"
   | "syncIntervalMinutes"
 >;
@@ -38,31 +37,28 @@ export const SYNC_PRESETS: Record<
       autoPushOnEdit: true,
       autoPushDebounceSeconds: 5,
       minSyncIntervalSeconds: 30,
-      syncOnWindowSwitch: true,
       syncOnStartup: true,
       syncIntervalMinutes: 2,
     },
   },
   balanced: {
     label: "균형 (기본)",
-    desc: "편집 20초 뒤 반영, 5분마다 확인, 창 전환 때 즉시. 대부분 이걸로 충분하다.",
+    desc: "편집 20초 뒤 반영, 5분마다 확인. 대부분 이걸로 충분하다.",
     timing: {
       autoPushOnEdit: true,
       autoPushDebounceSeconds: 20,
       minSyncIntervalSeconds: 60,
-      syncOnWindowSwitch: true,
       syncOnStartup: true,
       syncIntervalMinutes: 5,
     },
   },
   economy: {
     label: "절약",
-    desc: "편집 60초 뒤 반영, 30분마다 확인. 창 전환 때는 여전히 즉시 — 모바일 배터리/데이터 아낄 때.",
+    desc: "편집 60초 뒤 반영, 30분마다 확인 — 모바일 배터리/데이터 아낄 때.",
     timing: {
       autoPushOnEdit: true,
       autoPushDebounceSeconds: 60,
       minSyncIntervalSeconds: 300,
-      syncOnWindowSwitch: true,
       syncOnStartup: true,
       syncIntervalMinutes: 30,
     },
@@ -74,7 +70,6 @@ export const SYNC_PRESETS: Record<
       autoPushOnEdit: false,
       autoPushDebounceSeconds: 20,
       minSyncIntervalSeconds: 60,
-      syncOnWindowSwitch: false,
       syncOnStartup: false,
       syncIntervalMinutes: 0,
     },
@@ -122,11 +117,10 @@ export interface PluginSettings {
   includeOverdue: boolean; // overdue(오늘 이전 미완료)도 동기화
   syncOnStartup: boolean;
   syncIntervalMinutes: number; // 0 = 수동만
-  syncPreset: SyncPreset; // 아래 6개 타이밍 값의 묶음. 하나라도 손대면 "custom"
+  syncPreset: SyncPreset; // 아래 5개 타이밍 값의 묶음. 하나라도 손대면 "custom"
   autoPushOnEdit: boolean; // task 편집 시 자동 push(Obsidian→GCal, 디바운스)
   autoPushDebounceSeconds: number; // 편집이 멎고 몇 초 뒤에 동기화할지
   minSyncIntervalSeconds: number; // 자동 동기화 최소 간격(수동/리본은 무시). 0 = 제한 없음
-  syncOnWindowSwitch: boolean; // 창을 벗어날 때 밀린 편집 push + 돌아올 때 GCal pull
 
   // (구버전 호환) 단일 대상 캘린더 — 마이그레이션에만 사용
   targetCalendarId?: string;
@@ -158,7 +152,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   autoPushOnEdit: true,
   autoPushDebounceSeconds: 20,
   minSyncIntervalSeconds: 60,
-  syncOnWindowSwitch: true,
 };
 
 /**

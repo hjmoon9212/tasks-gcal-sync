@@ -39,7 +39,22 @@ interface CalPull {
  *        같은 필드가 양쪽에서 바뀐 경우에만 GCal을 채택(직접 조작한 화면)하고 warn을 남긴다.
  *  매핑 스냅샷(records)으로 어느 쪽 어느 필드가 바뀌었는지 판정.
  */
+/** 콜드 스타트 push 잠금이 풀리는 최소 시간(ms). pull 1회 완주 + 이 시간 둘 다 필요. */
+const COLD_START_MS = 60_000;
+/** done 회귀를 처음 본 뒤 실제로 push하기까지 최소 대기(ms). 그 사이 Sync가 정착한다. */
+const UNCHECK_HOLD_MS = 60_000;
+/** vaultBehind가 계속 참일 때 보류를 포기하고 통과시키는 상한. */
+const BEHIND_MAX_MS = 10 * 60_000;
+const BEHIND_MAX_RUNS = 5;
+
 export class SyncEngine {
+  /** 플러그인 로드 시각. 콜드 스타트 판정 기준(인스턴스는 로드마다 새로 만들어진다). */
+  private readonly loadedAt = Date.now();
+  /** 알려진 캘린더 전부를 예외 없이 pull한 run이 한 번 끝났는가. */
+  private pullCycleDone = false;
+  private behindSince: number | null = null;
+  private behindRuns = 0;
+
   constructor(
     private app: App,
     private settings: PluginSettings,
@@ -191,17 +206,21 @@ export class SyncEngine {
   private async pushUpdate(
     rec: { calendarId: string; eventId: string; due: string; start?: string },
     task: VaultTask,
-    id: string
+    id: string,
+    doneOverride?: boolean
   ): Promise<GCalEvent> {
+    // done 회귀를 보류한 채 다른 필드(날짜·제목)만 올리는 경우 — 완료 상태는 기존 값으로
+    // 고정한다. 안 그러면 제목 push에 미완료가 딸려가 보류가 무의미해진다.
+    const t = doneOverride === undefined ? task : { ...task, checked: doneOverride };
     const patch: Partial<GCalEvent> = {
-      summary: this.summary(task),
-      description: this.noteText(id, task),
+      summary: this.summary(t),
+      description: this.noteText(id, t),
       // 마지막 push 스냅샷을 이벤트에 갱신 기록(기기 간 상태 복원용).
-      extendedProperties: { private: this.privateProps(id, task) },
+      extendedProperties: { private: this.privateProps(id, t) },
     };
-    const color = this.doneColor(task);
+    const color = this.doneColor(t);
     if (color !== undefined) patch.colorId = color; // 완료=완료색, 미완료=null(기본색 복귀)
-    const transp = this.doneTransparency(task);
+    const transp = this.doneTransparency(t);
     if (transp !== undefined) patch.transparency = transp; // 완료=free, 미완료=busy
     const startDate = this.spanStart(task);
     const dateChanged =
@@ -273,6 +292,8 @@ export class SyncEngine {
       done: p.tgsDone != null ? p.tgsDone === "1" : t.checked,
       title: p.tgsTitle ?? this.titleBase(t),
       gcalUpdated: ev.updated,
+      // 이벤트에서 만든 기준선은 원격의 복사본이다 → 신뢰 불가(StateStore 주석 참고).
+      baselineTrusted: false,
     };
   }
 
@@ -295,6 +316,7 @@ export class SyncEngine {
       done: p.tgsDone === "1",
       title: p.tgsTitle ?? this.gcalTitleBase(ev),
       gcalUpdated: ev.updated,
+      baselineTrusted: false, // 위와 같은 이유
     };
   }
 
@@ -385,6 +407,50 @@ export class SyncEngine {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * vaultBehind 보류가 너무 오래 이어지면 포기하고 통과시킨다(**fail-open 상한**).
+   *
+   * `vaultBehind()`는 비공식 API의 상태 문자열에 기대고, Sync를 수동 일시정지해두면
+   * `pause === true`가 영구히 참이다. 상한이 없으면 동기화가 조용히 영영 멈춘다.
+   * 가드가 기능을 끄는 쪽으로 실패하면 안 된다 — 0.3.9→0.3.10에서 배운 것.
+   */
+  private behindBudgetExceeded(): boolean {
+    if (this.behindSince === null) {
+      this.behindSince = Date.now();
+      this.behindRuns = 0;
+    }
+    this.behindRuns++;
+    const over =
+      Date.now() - this.behindSince > BEHIND_MAX_MS ||
+      this.behindRuns > BEHIND_MAX_RUNS;
+    if (over) {
+      console.warn(
+        "[tasks-gcal-sync] 볼트 뒤처짐 판정이 계속됨 → 상한 초과, 이번 run은 통과시킴"
+      );
+    }
+    return over;
+  }
+
+  private resetBehindBudget(): void {
+    this.behindSince = null;
+    this.behindRuns = 0;
+  }
+
+  /**
+   * 지금 push해도 되는가(콜드 스타트 잠금).
+   *
+   * 플러그인이 막 로드된 직후의 노트는 Obsidian Sync가 아직 내려쓰는 중일 수 있다.
+   * 그 상태로 push하면 다른 기기의 최신 변경을 **낡은 로컬 상태로 덮어쓴다.**
+   * "Sync 완료를 감지"하는 방법은 비공식 API뿐이고 fail-open이어야 하므로 순서를
+   * 보장할 수 없다 → 대신 **첫 행동을 무해하게** 만든다: pull 한 사이클을 완주하고
+   * 로드 후 최소 시간이 지나기 전까지 원격에 쓰지 않는다.
+   */
+  private pushArmed(): boolean {
+    if (Date.now() - this.loadedAt < COLD_START_MS) return false;
+    // 단방향(pushOnly)이면 pull 사이클이 영영 오지 않으므로 시간 하한만 적용한다.
+    return this.pullCycleDone || this.settings.pushOnly;
   }
 
   private buildEvent(t: VaultTask, id: string): GCalEvent {
@@ -508,15 +574,38 @@ export class SyncEngine {
   }
 
   async run(
-    opts: { pull?: boolean; fullScan?: boolean } = {}
+    opts: { pull?: boolean; fullScan?: boolean; force?: boolean } = {}
   ): Promise<SyncResult> {
-    // 볼트가 아직 동기화 중이면 이번 run은 **노트를 건드리지 않는다**.
-    // 뒤처진 사본에 pull 결과를 쓰면 (a) 다른 기기가 방금 만든 task의 이벤트를 지우거나
-    // (b) 갈라진 두 사본에 서로 다른 텍스트가 써져 Sync 병합이 블록을 중복시킨다.
-    // pull을 끄면 gc.* 판정이 전부 false가 되어 노트 쓰기 경로 자체가 안 열린다.
-    const holdWrites = this.vaultBehind();
+    const empty: SyncResult = {
+      created: 0,
+      updated: 0,
+      moved: 0,
+      deleted: 0,
+      pulled: 0,
+      skipped: 0,
+    };
+
+    // 볼트가 아직 동기화 중이면 **run 전체를 건너뛴다**(0.3.13~).
+    // 예전엔 pull만 껐는데, 그러면 gc.* 판정이 전부 false가 되어 "로컬만 바뀜"으로
+    // 결론나고 **낡은 로컬 상태가 그대로 GCal로 올라갔다** — 보호 장치를 끄면서
+    // 파괴 경로는 열어두는 구조였다. 읽지 못할 때는 쓰지도 않는다.
+    const behind = this.vaultBehind();
+    const overBudget = behind && this.behindBudgetExceeded();
+    if (behind && !overBudget && !opts.force) {
+      console.log("[tasks-gcal-sync] 볼트 동기화 중 → 이번 run 보류");
+      return { ...empty, skipped: 1 };
+    }
+    if (!behind) this.resetBehindBudget();
+    // 상한 초과 시엔 뒤처짐 판정을 무시하고 평소대로 돈다(fail-open).
+    // 수동 실행(force)만 "뒤처진 채 강행"이므로 노트 쓰기/삭제는 계속 보류한다.
+    const holdWrites = behind && !overBudget;
     if (holdWrites) {
-      console.log("[tasks-gcal-sync] 볼트 동기화 중 → 이번 run은 노트 쓰기/삭제 보류");
+      console.log("[tasks-gcal-sync] 볼트 동기화 중 강행 → 노트 쓰기/삭제 보류");
+    }
+    // 콜드 스타트 잠금: 로드 직후에는 원격에 아무것도 쓰지 않는다(pushArmed 주석 참고).
+    const coldHold = !opts.force && !this.pushArmed();
+    if (coldHold) {
+      console.log("[tasks-gcal-sync] 콜드 스타트 → 이번 run은 pull 전용");
     }
     // pushOnly면 항상 단방향(Obsidian→GCal). 아니면 opts.pull로 제어(편집 자동 push는 pull:false).
     const doPull =
@@ -569,15 +658,17 @@ export class SyncEngine {
         : new Set<string>();
 
     // ---- PULL: 우리가 record를 가진 캘린더들의 변경분 가져오기 ----
-    const pulled = new Map<string, CalPull>();
+    const pullByCal = new Map<string, CalPull>();
+    let pullOk = doPull;
     if (doPull) {
       const calIds = new Set<string>();
       for (const id of Object.keys(records)) calIds.add(records[id].calendarId);
       for (const cal of calIds) {
         try {
-          pulled.set(cal, await this.pullCalendar(cal));
+          pullByCal.set(cal, await this.pullCalendar(cal));
         } catch (e) {
           console.error("[tasks-gcal-sync] pull 실패:", cal, e);
+          pullOk = false; // 한 캘린더라도 못 읽었으면 콜드 스타트 잠금을 풀지 않는다
         }
       }
     }
@@ -586,7 +677,7 @@ export class SyncEngine {
     for (const id of Object.keys(records)) {
       const rec = records[id];
       const task = tasksById.get(id);
-      const calData = pulled.get(rec.calendarId);
+      const calData = pullByCal.get(rec.calendarId);
       const ev = calData?.byTaskId.get(id);
       const evCancelled = calData?.cancelledEventIds.has(rec.eventId) ?? false;
 
@@ -610,7 +701,7 @@ export class SyncEngine {
           // 볼트가 아직 안 따라잡았을 뿐일 수 있으므로, record만 남겨두고 다음
           // 사이클에 판단한다. 그때까지 task가 내려오면 정상 조정으로 흡수된다.
           // (동기화 진행 중이면 기존 record도 같은 이유로 보류)
-          if (adopted.has(id) || holdWrites) {
+          if (adopted.has(id) || holdWrites || coldHold) {
             result.skipped++;
             continue;
           }
@@ -660,20 +751,39 @@ export class SyncEngine {
         const gcalChanged =
           !!ev && !!ev.updated && ev.updated !== rec.gcalUpdated;
 
+        // 이벤트를 손에 쥐었으면 완료 상태는 gcalChanged와 무관하게 읽을 수 있다.
+        // (가짜 기준선 복구 판정에 쓴다 — 그때는 updated 비교가 무의미하다)
+        const evDone = ev ? this.isGcalDone(ev) : undefined;
+
         const gcalDate = gcalChanged ? this.eventDueDate(ev!) : undefined; // 다중일 블록은 끝(배타적−1)
         const gcalStart = gcalChanged ? this.eventStartDate(ev!) : undefined;
-        const gcalDone = gcalChanged ? this.isGcalDone(ev!) : false;
         const gcalTitle = gcalChanged ? this.gcalTitleBase(ev!) : undefined;
         // 이벤트에서 날짜를 못 읽으면(파싱 실패·혼합형) 날짜 계열은 아예 손대지 않는다.
         // 예전엔 이 경우에도 else로 떨어져 task의 🛫를 근거 없이 지웠다.
         const datesOk = !!gcalDate;
         const gcalSpanStart = datesOk ? gcalStart ?? gcalDate : undefined;
 
+        // ── 가짜 기준선 복구 ──
+        // 이벤트에서 복원한 record는 baseline ≡ 원격이라 gcalChanged가 영원히 false다.
+        // 그 상태에서 노트가 스테일하면(원격 완료 · 노트 미체크) "로컬이 체크를 풀었다"로
+        // 읽혀 ✅가 GCal에서 지워진다 — 2026-08-06 롤백 사고의 실제 경로.
+        // 신뢰 못 하는 기준선일 때는 원격의 **현재값을 노트와 직접** 비교하고,
+        // 정보를 잃지 않는 방향(원격 완료 → 노트 복구)으로만 적용한다.
+        const trusted = rec.baselineTrusted !== false;
+        const staleUncheck = !trusted && evDone === true && !task.checked;
+        if (staleUncheck) {
+          console.warn(
+            `[tasks-gcal-sync] 기준선 불신 + 원격 완료 → 노트 복구: ${id} (${task.path}:${
+              task.line + 1
+            })`
+          );
+        }
+
         const gc = {
           due: gcalChanged && datesOk && gcalDate !== rec.due,
           start:
             gcalChanged && datesOk && gcalSpanStart !== (rec.start ?? rec.due),
-          done: gcalChanged && gcalDone !== rec.done,
+          done: (gcalChanged && evDone !== rec.done) || staleUncheck,
           title: gcalChanged && !!gcalTitle && gcalTitle !== rec.title,
         };
 
@@ -717,7 +827,7 @@ export class SyncEngine {
         }
         // 완료는 맨 마지막 — 반복 완료가 줄을 삽입해 구조를 바꿀 수 있다.
         if (takeGcal("done")) {
-          if (gcalDone) {
+          if (evDone) {
             const structural = await this.completion.complete(
               task,
               this.writer,
@@ -726,7 +836,7 @@ export class SyncEngine {
             // 반복 회차가 삽입돼 줄이 늘면 이 파일의 이후 쓰기를 미룬다.
             if (structural) dirtyFiles.add(task.path);
           } else await this.completion.uncomplete(task, this.writer);
-          mDone = gcalDone;
+          mDone = !!evDone;
           pulled = true;
         }
 
@@ -738,18 +848,51 @@ export class SyncEngine {
         }
         if (pulled) result.pulled++;
 
+        // ── done 회귀(완료 → 미완료) 보류 ──
+        // 가장 파괴적인 push다. 노트가 최신이라는 확신이 없으면 미룬다. 두 겹:
+        //  (a) 이번 run이 그 캘린더를 **실제로 읽지 못했으면** 무기한 보류.
+        //      "이벤트 객체가 없다"가 아니라 "pull을 못 했다"가 기준이다 — 증분 pull에서
+        //      변경 없는 이벤트는 원래 응답에 안 온다. 그걸 근거로 삼으면 정상적인
+        //      체크 해제가 영영 안 올라간다.
+        //  (b) 읽었더라도 **한 사이클 재확인**한다(2단계 삭제 가드와 같은 패턴).
+        //      그 사이 Obsidian Sync가 정착하면 회귀 자체가 사라진다.
+        const remoteUnknown = !doPull || !pullByCal.has(rec.calendarId);
+        const doneRegress = obs.done && !task.checked && rec.done && !gc.done;
+        let holdDone = false;
+        if (doneRegress) {
+          if (remoteUnknown) {
+            holdDone = true;
+            console.warn(`[tasks-gcal-sync] done 회귀 보류(원격 미확인): ${id}`);
+          } else {
+            if (rec.uncheckSeenAt === undefined) rec.uncheckSeenAt = Date.now();
+            holdDone = Date.now() - rec.uncheckSeenAt < UNCHECK_HOLD_MS;
+            if (holdDone) {
+              console.log(`[tasks-gcal-sync] done 회귀 → 다음 사이클에 재확인: ${id}`);
+            }
+          }
+        } else if (rec.uncheckSeenAt !== undefined) {
+          delete rec.uncheckSeenAt;
+        }
+        // 보류 중이면 병합 결과의 완료 상태도 예전 값이다 — 스냅샷에 미완료가 기록되면
+        // 다음 run에서 "회귀 없음"으로 읽혀 보류가 그대로 무산된다.
+        if (holdDone) mDone = rec.done;
+
         // ── 2) push: GCal이 가져가지 않은 Obsidian 변경이 남아 있으면 올린다 ──
         const pushNeeded =
           (obs.due && !gc.due) ||
           (obs.start && !gc.start) ||
-          (obs.done && !gc.done) ||
+          (obs.done && !gc.done && !holdDone) ||
           (obs.title && !gc.title);
 
         // 반복 완료로 줄이 밀린 파일은 이번 run에서 더 쓰지 않는다(다음 사이클에서 신규 read).
-        if (pushNeeded && !dirtyFiles.has(task.path)) {
+        let pushed = false;
+        if (pushNeeded && !dirtyFiles.has(task.path) && !coldHold) {
+          // done을 보류 중이면 완료 상태만 기존 값으로 고정해서 올린다 —
+          // 안 그러면 날짜/제목 push에 미완료가 딸려가 보류가 무의미해진다.
+          const pushTask = holdDone ? { ...task, checked: rec.done } : task;
           mDue = task.due!;
           mStart = this.spanStart(task);
-          mDone = task.checked;
+          mDone = pushTask.checked;
           mTitle = this.titleBase(task);
 
           const target = resolveCalendar(task.tags, this.settings);
@@ -762,27 +905,45 @@ export class SyncEngine {
             }
             const newEv = await this.client.insertEvent(
               target.id,
-              this.buildEvent(task, id)
+              this.buildEvent(pushTask, id)
             );
             rec.eventId = newEv.id!;
             rec.calendarId = target.id;
             rec.gcalUpdated = newEv.updated; // 우리 push의 updated 저장 → 다음 pull에서 self-echo 제외
             result.moved++;
           } else {
-            const updatedEv = await this.pushUpdate(rec, task, id);
+            const updatedEv = await this.pushUpdate(
+              rec,
+              task,
+              id,
+              holdDone ? rec.done : undefined
+            );
             rec.gcalUpdated = updatedEv.updated;
             result.updated++;
           }
+          pushed = true;
         } else if (gcalChanged) {
           // push하지 않았으면 GCal의 현재 updated가 다음 비교 기준.
           rec.gcalUpdated = ev!.updated;
         }
 
-        // ── 3) 스냅샷을 병합 결과로 갱신 ──
-        rec.due = mDue;
-        rec.start = mStart;
-        rec.done = mDone;
-        rec.title = mTitle;
+        // ── 3) 스냅샷 갱신 ──
+        // **올리지 못한 로컬 변경은 스냅샷에 기록하지 않는다.** 여기서 로컬 값으로 덮으면
+        // "이미 반영됨"으로 남아 그 변경이 영영 안 올라간다(보류·콜드 스타트·구조 변경 스킵).
+        if (pushed || !pushNeeded) {
+          rec.due = mDue;
+          rec.start = mStart;
+          rec.done = mDone;
+          rec.title = mTitle;
+        } else {
+          // 부분 반영: pull이 실제로 고친 필드만 기록한다.
+          if (gc.due) rec.due = mDue;
+          if (gc.start) rec.start = mStart;
+          if (gc.done) rec.done = mDone;
+          if (gc.title) rec.title = mTitle;
+        }
+        // 원격을 실제로 본 run에서만 기준선을 승격한다.
+        if (ev) rec.baselineTrusted = true;
       } catch (e) {
         console.error("[tasks-gcal-sync] reconcile 실패:", id, e);
         result.skipped++;
@@ -833,6 +994,13 @@ export class SyncEngine {
         }
       }
 
+      // 콜드 스타트에는 새 이벤트를 만들지 않는다. 노트가 아직 안 내려왔을 뿐인데
+      // 만들면 다른 기기가 이미 만든 것과 겹치거나, 곧 사라질 task의 이벤트가 남는다.
+      if (coldHold) {
+        result.skipped++;
+        continue;
+      }
+
       let id = t.id;
       if (!id) {
         id = genId(existingIds);
@@ -868,6 +1036,9 @@ export class SyncEngine {
         result.skipped++;
       }
     }
+
+    // pull을 예외 없이 끝냈으면 콜드 스타트 잠금을 푼다(시간 하한은 pushArmed가 따로 본다).
+    if (pullOk) this.pullCycleDone = true;
 
     await this.saveState();
     return result;

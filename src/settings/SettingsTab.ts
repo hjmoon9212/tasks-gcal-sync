@@ -435,18 +435,6 @@ export class SettingsTab extends PluginSettingTab {
         })
       );
 
-    new Setting(timingBox)
-      .setName("창 전환 시 동기화")
-      .setDesc(
-        "다른 앱으로 나갈 때 밀린 편집을 대기 없이 밀어 올리고, 돌아올 때 GCal에서 바뀐 것(드래그·완료·삭제)을 당겨온다. 편집이 없었으면 나갈 때 아무것도 하지 않는다. 모바일은 백그라운드에서 실행이 끊길 수 있어 나갈 때 동기화가 보장되진 않는다(다음 동기화에서 복구)."
-      )
-      .addToggle((t) =>
-        t.setValue(s.syncOnWindowSwitch).onChange(async (v) => {
-          s.syncOnWindowSwitch = v;
-          await this.saveTiming();
-        })
-      );
-
     new Setting(timingBox).setName("시작 시 동기화").addToggle((t) =>
       t.setValue(s.syncOnStartup).onChange(async (v) => {
         s.syncOnStartup = v;

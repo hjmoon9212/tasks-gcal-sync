@@ -13,6 +13,26 @@ export interface SyncRecord {
   done: boolean; // 마지막으로 push한 완료 상태
   title: string; // 마지막으로 push한 정제 제목
   gcalUpdated?: string; // 우리가 마지막으로 본 이벤트 updated(RFC3339). GCal 외부 수정 감지 + LWW 비교용
+
+  /**
+   * 이 스냅샷이 **실제 합의 기록**인가.
+   *
+   * records는 두 역할을 겸한다 — 매핑(🆔→eventId)과 기준선(마지막 합의 상태). 매핑은
+   * 이벤트의 tgs*로 언제든 복원되지만 **기준선은 복원되지 않는다.** tgs*는 "마지막으로
+   * 누가 push했는가"이지 "이 기기가 마지막으로 합의한 값"이 아니기 때문이다.
+   * 그래서 이벤트에서 복원한 record는 baseline ≡ 원격이 되어 3-way 비교가 2-way로
+   * 붕괴하고(원격이 영원히 "안 바뀜"으로 읽힌다), 스테일한 노트가 항상 이긴다.
+   *
+   * false = 이벤트에서 복원한 가짜 기준선. 원격을 실제로 본 run에서 true로 승격한다.
+   * (undefined = 이 필드가 없던 버전의 record → 신뢰하는 쪽으로 읽는다)
+   */
+  baselineTrusted?: boolean;
+
+  /**
+   * done 회귀(완료 → 미완료)를 **처음 관측한** 시각(ms). 회귀는 가장 파괴적인 push라
+   * 한 사이클 늦춰 재확인한다(2단계 삭제 가드와 같은 패턴). 회귀가 아니게 되면 지운다.
+   */
+  uncheckSeenAt?: number;
 }
 
 export interface PersistedState {
