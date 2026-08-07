@@ -449,8 +449,7 @@ export class SyncEngine {
    */
   private pushArmed(): boolean {
     if (Date.now() - this.loadedAt < COLD_START_MS) return false;
-    // 단방향(pushOnly)이면 pull 사이클이 영영 오지 않으므로 시간 하한만 적용한다.
-    return this.pullCycleDone || this.settings.pushOnly;
+    return this.pullCycleDone;
   }
 
   private buildEvent(t: VaultTask, id: string): GCalEvent {
@@ -607,9 +606,8 @@ export class SyncEngine {
     if (coldHold) {
       console.log("[tasks-gcal-sync] 콜드 스타트 → 이번 run은 pull 전용");
     }
-    // pushOnly면 항상 단방향(Obsidian→GCal). 아니면 opts.pull로 제어(편집 자동 push는 pull:false).
-    const doPull =
-      !this.settings.pushOnly && opts.pull !== false && !holdWrites;
+    // 동기화는 항상 양방향. opts.pull로만 끌 수 있고(내부 호출용), 뒤처진 볼트면 보류.
+    const doPull = opts.pull !== false && !holdWrites;
     if (!this.settings.defaultCalendarId && this.settings.rules.length === 0) {
       throw new Error("설정에서 기본 캘린더 또는 라우팅 규칙을 먼저 지정하세요.");
     }

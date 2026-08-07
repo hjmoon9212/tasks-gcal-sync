@@ -4,13 +4,13 @@ Obsidian Tasks(📅 due date가 있는 `#task`)를 Google Calendar **종일 이�
 
 - **Obsidian = 할일 원천, Google Calendar = 조작 화면**(드래그·반복·타임블록은 GCal 앱이 담당)
 - 멀티볼트: 볼트마다 설치 + 볼트별로 다른 구글 캘린더에 매핑 → GCal 한 화면이 통합 뷰
-- 서버 없음. Obsidian이 열려 있을 때 동기화. 인증 토큰은 기기 로컬(`state.json`)에 저장.
+- 서버 없음. Obsidian이 열려 있을 때 동기화. 자격증명은 기기 로컬 **localStorage**에 저장(v0.3.8~, Obsidian Sync를 타지 않음).
 
-## 현재 상태 (v0.3.2)
-- ✅ **단방향(Obsidian → GCal)**: due task를 종일 이벤트로 생성/갱신, 완료=색상/free/접두사(`#done` 폴백), 삭제·미일정화 반영.
-- ✅ **양방향(GCal → Obsidian)**: `syncToken` 증분 pull로 날짜 이동/완료/삭제 감지, LWW 충돌 해결. (기본은 `pushOnly: true` = 안전하게 단방향 출고, 설정에서 양방향 전환)
+## 현재 상태 (v0.3.14)
+- ✅ **Obsidian → GCal**: due task를 종일 이벤트로 생성/갱신, 완료=색상/free/접두사(`#done` 폴백), 삭제·미일정화 반영.
+- ✅ **GCal → Obsidian**: `syncToken` 증분 pull로 날짜 이동/완료/삭제 감지. **항상 양방향**이며 충돌은 필드 단위로 병합한다(단방향 옵션은 0.3.14에서 제거).
 - ✅ **멀티캘린더 라우팅**: `#gcal/<이름>` 태그로 task별 대상 캘린더 지정, 볼트별 기본 캘린더.
-- ✅ **멀티기기 견고화**: 자격증명·records·syncTokens를 기기 로컬 `state.json`에 격리(Sync 롤백/토큰 오염 차단) + GCal 이벤트에 마지막 push 스냅샷 임베드(records 유실/충돌 시 재구성).
+- ✅ **멀티기기 견고화**: 자격증명·records·syncTokens를 기기 로컬 localStorage에 격리 + GCal 이벤트에 마지막 push 스냅샷 임베드 → records는 캘린더에서 재구성 가능한 캐시다.
 - ⏳ **남음**: 반복 task(🔁) 미완료 해제 처리, 모바일 실기기 검증.
 
 ---
@@ -52,20 +52,20 @@ Obsidian Tasks(📅 due date가 있는 `#task`)를 Google Calendar **종일 이�
    - Global filter(기본 `#task`), 완료 prefix(기본 `#done`), 동기화 주기 등 확인.
 3. 리본의 달력 아이콘 또는 명령어 **"지금 동기화"** 실행.
 
-> **모바일**: 인증 UI가 없다. 데스크탑에서 인증한 뒤 그 기기의 `state.json`(자격증명 포함)을 모바일 기기의 같은 플러그인 폴더로 옮겨야 access token을 silent 발급할 수 있다.
+> **모바일**: 인증 UI가 없다. 자격증명은 기기 로컬 localStorage에 있어 파일로 옮길 수 없으므로, 각 기기에서 설정 화면에 Client ID/Secret을 넣고 인증해야 한다.
 
 ## 동작 규칙
 - 대상: `#task` + 📅 due 가 있는 task. **새 이벤트 생성 범위**: 오늘 이후 due(+ `includeOverdue` 시 미완료 overdue). 이미 record가 있는 항목은 범위와 무관하게 계속 reconcile.
 - 완료 표시(OR 결합): **색상**(`doneColorId`, 기본 8) · **free/한가함**(`doneOnFree`, 기본 on) · 제목 접두사(미완료 ☐ / 완료 ☑️) · `#done` 폴백.
 - 🆔 없는 task는 첫 동기화 때 6자리 ID를 자동 부여(Tasks 표준 필드, Morgen 비의존). `findByTaskId`로 기기 간 중복 생성 방지(adoption).
 - task의 due 변경 → 이벤트 날짜 갱신. 🛫 start가 있으면 start~due 다중일. task 삭제/due 제거 → 이벤트 삭제.
-- 양방향(pushOnly=off): GCal에서 날짜 이동/완료/삭제 시 파일 mtime vs event.updated **LWW**로 반영.
+- 양방향: GCal에서 날짜 이동/완료/삭제 시 필드(due/start/done/title) 단위로 병합. 같은 필드가 양쪽에서 바뀐 경우에만 GCal을 채택하고 warn을 남긴다.
 
 ## 명령 / 견고성
 - 리본 달력 아이콘 또는 명령 **지금 동기화**.
 - **🆔 백필** — 기존 이벤트 설명에 🆔 주입(구 데이터 정리).
 - **중복 이벤트 정리(cleanup-duplicates)** — 같은 task의 GCal 중복 이벤트 삭제(하나만 유지). *record 없는 orphan 이벤트는 대상 아님.*
-- 자동 push(편집 디바운스 4초), 시작 시 동기화, N분 주기(기본 5, 0=수동).
+- 타이밍은 각 항목을 직접 설정한다(프리셋 없음): 편집 시 자동 동기화 · 편집 후 대기(초) · 최소 간격(초) · 시작 시 동기화 · 주기(분, 0=끔).
 
 ## 알려진 한계
 - **반복 task(🔁) 미완료 해제**: `uncomplete`가 Tasks API를 쓰지 않아, 이미 생성된 다음 회차가 남는다.

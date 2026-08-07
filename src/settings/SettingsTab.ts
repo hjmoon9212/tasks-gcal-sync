@@ -1,18 +1,5 @@
-import {
-  App,
-  DropdownComponent,
-  Notice,
-  PluginSettingTab,
-  Setting,
-} from "obsidian";
+import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type TasksGcalSyncPlugin from "../main";
-import { SYNC_PRESETS, SyncPreset, derivePreset } from "./Settings";
-
-/** 프리셋 설명. custom은 프리셋 표에 없으니 따로. */
-function presetDesc(p: SyncPreset): string {
-  if (p === "custom") return "세부 값을 직접 설정한 상태.";
-  return SYNC_PRESETS[p].desc;
-}
 
 /** Google Calendar 이벤트 색(colorId 1~11). */
 const GCAL_COLORS: { id: string; name: string }[] = [
@@ -31,26 +18,10 @@ const GCAL_COLORS: { id: string; name: string }[] = [
 
 export class SettingsTab extends PluginSettingTab {
   /** 접힘 상태는 화면 상태일 뿐이라 저장하지 않는다(설정 창을 닫으면 초기값으로). */
-  private showTiming = false;
   private showDoneDetails = false;
-  private presetDrop?: DropdownComponent;
-  private presetSetting?: Setting;
 
   constructor(app: App, private plugin: TasksGcalSyncPlugin) {
     super(app, plugin);
-    this.showTiming = plugin.settings.syncPreset === "custom";
-  }
-
-  /**
-   * 세부 타이밍 값 저장 — 값이 프리셋과 어긋났으면 방식 표시를 '직접 설정'으로 되돌린다.
-   * 다시 그리지 않는다(텍스트 입력 중 포커스가 날아가므로) — 드롭다운만 제자리에서 갱신.
-   */
-  private async saveTiming(): Promise<void> {
-    const s = this.plugin.settings;
-    s.syncPreset = derivePreset(s);
-    this.presetDrop?.setValue(s.syncPreset);
-    this.presetSetting?.setDesc(presetDesc(s.syncPreset));
-    await this.plugin.saveAll();
   }
 
   /** '세부 설정 보기' 토글 + 그 아래 접히는 컨테이너. 반환된 곳에 Setting을 넣는다. */
@@ -327,18 +298,6 @@ export class SettingsTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("단방향 (Obsidian → GCal)")
-      .setDesc(
-        "켜면 GCal 쪽 변경을 무시하고 Obsidian → GCal만. 끄면 양방향(충돌 시 '최근 수정이 이김' LWW로 자동 해소) — GCal에서 고친 날짜/완료가 더 최근이면 그게 반영됨."
-      )
-      .addToggle((t) =>
-        t.setValue(s.pushOnly).onChange(async (v) => {
-          s.pushOnly = v;
-          await this.plugin.saveAll();
-        })
-      );
-
-    new Setting(containerEl)
       .setName("Overdue 포함")
       .setDesc("오늘 이전인데 아직 미완료인 task도 동기화.")
       .addToggle((t) =>
@@ -367,49 +326,21 @@ export class SettingsTab extends PluginSettingTab {
       );
 
     // ---- 4. 동기화 타이밍 ----
-    // 언제 도는지는 값 6개가 얽혀 있어 하나씩 고르면 헷갈린다 → 프리셋 하나로 정하고,
-    // 직접 만지고 싶을 때만 세부를 편다. 세부를 하나라도 바꾸면 방식이 '직접 설정'이 된다.
     containerEl.createEl("h3", { text: "4. 동기화 타이밍" });
 
-    this.presetSetting = new Setting(containerEl)
-      .setName("동기화 방식")
-      .setDesc(presetDesc(s.syncPreset))
-      .addDropdown((d) => {
-        this.presetDrop = d;
-        for (const [key, p] of Object.entries(SYNC_PRESETS)) d.addOption(key, p.label);
-        d.addOption("custom", "직접 설정");
-        d.setValue(s.syncPreset);
-        d.onChange(async (v) => {
-          const preset = v as SyncPreset;
-          if (preset !== "custom") Object.assign(s, SYNC_PRESETS[preset].timing);
-          else this.showTiming = true; // 직접 설정을 골랐으면 세부를 펴 준다
-          s.syncPreset = preset;
-          await this.plugin.saveAll();
-          this.plugin.setupInterval();
-          this.display(); // 세부 값이 통째로 바뀌므로 다시 그린다
-        });
-      });
-
-    const timingBox = this.collapsible(
-      containerEl,
-      "값을 직접 조정한다. 하나라도 바꾸면 방식이 '직접 설정'으로 바뀐다.",
-      this.showTiming,
-      (v) => (this.showTiming = v)
-    );
-
-    new Setting(timingBox)
+    new Setting(containerEl)
       .setName("편집 시 자동 동기화")
       .setDesc(
-        "task를 수정하면 잠시 뒤 자동으로 밀어 올린다(push만 — GCal 쪽 변경은 시작/주기/창 복귀에서 받아온다)."
+        "task를 수정하면 잠시 뒤 자동으로 밀어 올린다(push만 — GCal 쪽 변경은 시작/주기에서 받아온다)."
       )
       .addToggle((t) =>
         t.setValue(s.autoPushOnEdit).onChange(async (v) => {
           s.autoPushOnEdit = v;
-          await this.saveTiming();
+          await this.plugin.saveAll();
         })
       );
 
-    new Setting(timingBox)
+    new Setting(containerEl)
       .setName("편집 후 대기(초)")
       .setDesc(
         "편집이 멎고 이 시간이 지나면 동기화. 길수록 연속 작업(날짜 → 시작일 → 우선순위)이 한 번으로 합쳐진다."
@@ -418,11 +349,11 @@ export class SettingsTab extends PluginSettingTab {
         t.setValue(String(s.autoPushDebounceSeconds)).onChange(async (v) => {
           const n = parseInt(v, 10);
           s.autoPushDebounceSeconds = isNaN(n) || n < 0 ? 0 : n;
-          await this.saveTiming();
+          await this.plugin.saveAll();
         })
       );
 
-    new Setting(timingBox)
+    new Setting(containerEl)
       .setName("자동 동기화 최소 간격(초)")
       .setDesc(
         "직전 동기화 후 이 시간 안에는 자동으로 다시 돌지 않는다(자동 트리거만 해당, 수동/리본은 항상 즉시). 0이면 제한 없음."
@@ -431,25 +362,25 @@ export class SettingsTab extends PluginSettingTab {
         t.setValue(String(s.minSyncIntervalSeconds)).onChange(async (v) => {
           const n = parseInt(v, 10);
           s.minSyncIntervalSeconds = isNaN(n) || n < 0 ? 0 : n;
-          await this.saveTiming();
+          await this.plugin.saveAll();
         })
       );
 
-    new Setting(timingBox).setName("시작 시 동기화").addToggle((t) =>
+    new Setting(containerEl).setName("시작 시 동기화").addToggle((t) =>
       t.setValue(s.syncOnStartup).onChange(async (v) => {
         s.syncOnStartup = v;
-        await this.saveTiming();
+        await this.plugin.saveAll();
       })
     );
 
-    new Setting(timingBox)
+    new Setting(containerEl)
       .setName("자동 동기화 주기(분)")
       .setDesc("0이면 주기 동기화 없음.")
       .addText((t) =>
         t.setValue(String(s.syncIntervalMinutes)).onChange(async (v) => {
           const n = parseInt(v, 10);
           s.syncIntervalMinutes = isNaN(n) || n < 0 ? 0 : n;
-          await this.saveTiming();
+          await this.plugin.saveAll();
           this.plugin.setupInterval();
         })
       );

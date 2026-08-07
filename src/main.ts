@@ -1,5 +1,5 @@
 import { Notice, Plugin, TFile, normalizePath } from "obsidian";
-import { DEFAULT_SETTINGS, PluginSettings, derivePreset } from "./settings/Settings";
+import { DEFAULT_SETTINGS, PluginSettings } from "./settings/Settings";
 import { SettingsTab } from "./settings/SettingsTab";
 import { PersistedState, emptyState } from "./sync/StateStore";
 import { GoogleAuth } from "./auth/GoogleAuth";
@@ -14,9 +14,10 @@ interface PluginData {
   state?: PersistedState; // 구버전 호환: 예전엔 여기 state가 내장됨(현재는 state.json으로 분리)
 }
 
-/** 지금은 없는 옛 타이밍 설정들(≤0.3.12). 남아 있으면 지우기만 한다. */
-interface LegacyTiming {
-  syncPreset?: string;
+/** 지금은 없는 옛 설정들. 남아 있으면 지우기만 한다. */
+interface LegacySettings {
+  syncPreset?: string; // 타이밍 프리셋(≤0.3.13) — 0.3.14에서 제거, 값은 직접 설정만
+  pushOnly?: boolean; // 단방향 모드(≤0.3.13) — 0.3.14에서 제거, 항상 양방향
   syncOnWindowSwitch?: boolean; // 창 전환 트리거(0.3.11~0.3.12) — 0.3.13에서 제거
   syncOnBlur?: boolean;
   syncOnFocus?: boolean;
@@ -298,7 +299,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
   private async loadAll(): Promise<void> {
     const data = (await this.loadData()) as PluginData | null;
     this.settings = { ...DEFAULT_SETTINGS, ...(data?.settings ?? {}) };
-    this.migrateTiming(data?.settings as LegacyTiming | undefined);
+    this.migrateTiming();
 
     // 캐시(records/syncTokens)는 GCal에서 복원되므로 이관할 필요가 없다.
     // 지켜야 하는 건 자격증명뿐 — 우선순위: localStorage > 구 state.json > data.json.
@@ -351,21 +352,20 @@ export default class TasksGcalSyncPlugin extends Plugin {
   }
 
   /**
-   * 타이밍 설정 마이그레이션.
-   *  - syncPreset이 없던 버전 → 현재 값에서 역산해 업그레이드가 동작을 바꾸지 않게 한다.
-   *    어느 프리셋과도 안 맞으면 "custom"으로 남는다.
-   *  - 없어진 옵션(skipPullOnEdit · syncOnBlur/Focus · syncOnWindowSwitch)은 지우기만 한다.
-   *    다음 저장 때 data.json에서 빠진다.
+   * 없어진 옵션을 settings에서 떼어낸다. 다음 저장 때 data.json에서도 빠진다.
+   * 값은 읽지 않는다 — 타이밍은 각 항목을 직접 설정하고(프리셋 없음),
+   * 동기화는 항상 양방향이다(단방향 없음). 기존 값이 남아 있어도 무시한다.
    */
-  private migrateTiming(raw?: LegacyTiming): void {
-    if (!raw?.syncPreset) this.settings.syncPreset = derivePreset(this.settings);
-    const dead: (keyof LegacyTiming)[] = [
+  private migrateTiming(): void {
+    const dead: (keyof LegacySettings)[] = [
       "skipPullOnEdit",
       "syncOnBlur",
       "syncOnFocus",
       "syncOnWindowSwitch",
+      "syncPreset",
+      "pushOnly",
     ];
-    for (const k of dead) delete (this.settings as Partial<LegacyTiming>)[k];
+    for (const k of dead) delete (this.settings as Partial<LegacySettings>)[k];
   }
 
   /** 설정만 data.json에 저장 — 자격증명(clientId·clientSecret·refreshToken)은 제외해 Sync로 새어나가지 않게 한다. */
