@@ -32,11 +32,11 @@ export interface PluginSettings {
 
   // 동작
   globalFilter: string; // 기본 #task
-  doneTag: string; // 완료 표시 prefix, 기본 #done (doneColorId 미설정 시 폴백)
+  doneTag: string; // 완료 이벤트 제목에 붙일 표시, 기본 #done (색·접두사를 둘 다 껐을 때의 폴백)
   todoPrefix: string; // 미완료 task 이벤트 제목 접두사(예: ☐). "" = 없음
   donePrefix: string; // 완료 task 이벤트 제목 접두사(예: ☑️). "" = 없음
   recurringPrefix: string; // 🔁 반복(🔁) task 이벤트 제목 아이콘(예: 🔁). "" = 표시 안 함
-  doneColorId: string; // 완료 색(1~11). 이 색이면 완료로 간주. "" = 색 완료 비활성(제목 #done 폴백)
+  doneColorId: string; // 완료 task 이벤트를 칠할 색(1~11). **표시 전용** — 읽지 않는다(v0.4.0). "" = 색 안 건드림
   deepLink: "off" | "note" | "line"; // 이벤트 설명에 Obsidian 딥링크 추가. line은 Advanced URI 플러그인 필요
   includeOverdue: boolean; // overdue(오늘 이전 미완료)도 동기화
 

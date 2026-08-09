@@ -397,6 +397,45 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     eq(patch.colorId, "8", "이벤트 색이 완료색으로");
   }
 
+  // -- 20) 완료일(✅)은 이벤트에 실린다
+  {
+    const h = harness({
+      tasks: [{ ...task("A1", true), done: "2026-08-07" }],
+      events: [doneEvent("A1", false, "200")],
+      records: { A1: rec({ gcalUpdated: "200" }) },
+    });
+    await h.engine.run();
+    eq(h.calls.patch.length, 1, "완료를 push");
+    eq(
+      h.calls.patch[0].patch.extendedProperties.private.tgsDoneAt,
+      "2026-08-07",
+      "완료일을 이벤트에 싣는다"
+    );
+  }
+
+  // -- 21) 해제 push엔 완료일 키를 빼서, 이벤트에 직전 완료일이 남게 한다
+  //    노트에서 실수로 풀려도 "언제 완료였는지"를 잃지 않는 유일한 사본이다(2026-08-09 CISS).
+  {
+    const h = harness({
+      tasks: [task("A1", false)],
+      events: [doneEvent("A1", true, "200")],
+      records: {
+        A1: rec({
+          done: true,
+          gcalUpdated: "200",
+          uncheckSeenAt: Date.now() - 120_000,
+        }),
+      },
+    });
+    await h.engine.run();
+    eq(h.calls.patch.length, 1, "대기 뒤 해제를 push");
+    eq(
+      "tgsDoneAt" in h.calls.patch[0].patch.extendedProperties.private,
+      false,
+      "해제 push엔 완료일 키를 안 보낸다"
+    );
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   if (fail > 0) process.exit(1);
 })();

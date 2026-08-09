@@ -15,7 +15,7 @@ export class PluginSettingTab {}
 export class Setting {}
 export const Platform = { isDesktopApp: true, isMobile: false };
 export function normalizePath(p: string): string {
-  return p.replace(/\/g, "/");
+  return p.replace(/\\/g, "/");
 }
 export async function requestUrl(_opts: unknown): Promise<never> {
   throw new Error("requestUrl은 테스트에서 호출되면 안 됩니다 (스텁을 주입하세요).");

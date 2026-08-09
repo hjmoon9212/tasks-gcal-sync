@@ -1,4 +1,4 @@
-import { App } from "obsidian";
+import { App, Notice } from "obsidian";
 import { PluginSettings, resolveCalendar } from "../settings/Settings";
 import { PersistedState, SyncRecord } from "./StateStore";
 import { TaskRepository, VaultTask } from "../data/TaskRepository";
@@ -200,10 +200,10 @@ export class SyncEngine {
   /**
    * 날짜는 건드리지 않고 표현만 다시 찍는다.
    *
-   * GCal에서 완료색으로 바꾸면 pull이 노트를 [x]로 만들지만, 그 완료가 이벤트의 제목
-   * 접두사(☐→☑️)에는 반영되지 않았다 — "GCal이 이긴 필드는 되돌려 쓰지 않는다"는 규칙에
-   * 표현 갱신까지 딸려 들어갔기 때문. 제목으로 완료를 보는 모바일에서는 미완료로 보였다.
-   * 날짜를 안 보내므로 GCal이 방금 정한 일정을 되돌릴 위험이 없다.
+   * GCal에서 날짜·제목을 고쳐 그쪽이 이긴 run에서는 push할 것이 없어 이벤트의 표현
+   * (제목 접두사 ☐/☑️·완료색)이 낡은 채로 남는다. 제목으로 상태를 보는 모바일에서
+   * 그게 그대로 드러나므로 한 번 더 찍는다. 날짜를 안 보내므로 GCal이 방금 정한
+   * 일정을 되돌릴 위험이 없다.
    */
   private pushPresentation(
     rec: { calendarId: string; eventId: string },
@@ -268,7 +268,7 @@ export class SyncEngine {
    * patch 시에도 항상 전체 세트를 넣어 키 누락을 방지한다.
    */
   private privateProps(id: string, t: VaultTask): Record<string, string> {
-    return {
+    const p: Record<string, string> = {
       tgsTaskId: id,
       tgsSource: "tasks-gcal-sync",
       tgsVault: this.app.vault.getName(),
@@ -277,6 +277,12 @@ export class SyncEngine {
       tgsDone: t.checked ? "1" : "0",
       tgsTitle: this.titleBase(t),
     };
+    // 완료일(✅)은 **있을 때만** 싣는다. patch는 키 단위로 병합되므로 이 키를 안 보내면
+    // 이벤트엔 직전 완료일이 그대로 남는다 — 노트에서 체크가 풀려도 "언제 완료였는지"가
+    // 남는 유일한 사본이다. 다시 체크하면 Tasks가 오늘 날짜를 쓰므로 원래 날짜는
+    // 노트만으로는 복구되지 않는다(2026-08-09 CISS).
+    if (t.done) p.tgsDoneAt = t.done;
+    return p;
   }
 
   /**
@@ -735,6 +741,12 @@ export class SyncEngine {
         );
         rec.gcalUpdated = updatedEv.updated;
         c.result.updated++;
+      }
+      // 완료 해제가 실제로 GCal에 올라간 순간. 되돌리기 힘든 방향이라 조용히 넘기지 않는다 —
+      // 노트에서 실수로 풀린 걸 이틀 뒤에 발견한 사고가 있었다(2026-08-09 CISS).
+      if (rec.done && !pushTask.checked) {
+        new Notice(`GCal 완료 해제: ${this.titleBase(task)}`, 8000);
+        console.warn(`[tasks-gcal-sync] 완료 해제를 GCal에 반영: ${id} ${where}`);
       }
       pushed = true;
     } else if (plan.gcalChanged) {

@@ -295,7 +295,7 @@ export class SettingsTab extends PluginSettingTab {
         })
       );
 
-    // 완료 색·free를 둘 다 꺼야 쓰이는 폴백이라 평소엔 접어 둔다.
+    // 완료 색과 제목 접두사를 둘 다 꺼야 쓰이는 폴백이라 평소엔 접어 둔다.
     const doneBox = this.collapsible(
       containerEl,
       "완료 색과 제목 접두사를 둘 다 껐을 때만 쓰이는 폴백 설정.",
