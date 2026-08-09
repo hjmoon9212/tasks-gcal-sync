@@ -24,6 +24,12 @@ export interface SyncResult {
   deleted: number;
   pulled: number; // GCal → Obsidian 반영 건수
   skipped: number;
+  /**
+   * done 회귀 보류가 걸려 이 시간(ms) 뒤에 다시 돌면 반영될 것이 있다.
+   * 없으면 undefined. 호출부(main)가 후속 run을 예약한다 — 안 그러면 체크 해제가
+   * 다음 주기(기본 5분)까지 GCal에 안 올라가 "아무 변화가 없다"로 보인다.
+   */
+  retryAfterMs?: number;
 }
 
 interface CalPull {
@@ -203,15 +209,11 @@ export class SyncEngine {
    *  - 제목/완료만 바뀌면 summary/description만 patch → 시간(타임블록) 보존.
    *  - 날짜가 바뀌면: 시간지정 이벤트는 시각 유지한 채 날짜만 이동, 종일이면 종일로.
    */
-  private async pushUpdate(
-    rec: { calendarId: string; eventId: string; due: string; start?: string },
-    task: VaultTask,
-    id: string,
-    doneOverride?: boolean
-  ): Promise<GCalEvent> {
-    // done 회귀를 보류한 채 다른 필드(날짜·제목)만 올리는 경우 — 완료 상태는 기존 값으로
-    // 고정한다. 안 그러면 제목 push에 미완료가 딸려가 보류가 무의미해진다.
-    const t = doneOverride === undefined ? task : { ...task, checked: doneOverride };
+  /**
+   * 날짜를 뺀 "표현" patch — 제목(체크박스·반복 아이콘) · 설명 · 완료색 · free · 스냅샷.
+   * pushUpdate와 아래 pushPresentation이 공유한다.
+   */
+  private presentationPatch(id: string, t: VaultTask): Partial<GCalEvent> {
     const patch: Partial<GCalEvent> = {
       summary: this.summary(t),
       description: this.noteText(id, t),
@@ -222,6 +224,39 @@ export class SyncEngine {
     if (color !== undefined) patch.colorId = color; // 완료=완료색, 미완료=null(기본색 복귀)
     const transp = this.doneTransparency(t);
     if (transp !== undefined) patch.transparency = transp; // 완료=free, 미완료=busy
+    return patch;
+  }
+
+  /**
+   * 날짜는 건드리지 않고 표현만 다시 찍는다.
+   *
+   * GCal에서 free(한가함)로 완료하면 pull이 노트를 [x]로 만들지만, 그 완료가 이벤트의
+   * 제목 접두사(☐→☑️)나 완료색에는 반영되지 않았다 — "GCal이 이긴 필드는 되돌려 쓰지
+   * 않는다"는 규칙에 표현 갱신까지 딸려 들어갔기 때문. 캘린더에서는 여전히 미완료로 보였다.
+   * 날짜를 안 보내므로 GCal이 방금 정한 일정을 되돌릴 위험이 없다.
+   */
+  private pushPresentation(
+    rec: { calendarId: string; eventId: string },
+    task: VaultTask,
+    id: string
+  ): Promise<GCalEvent> {
+    return this.client.patchEvent(
+      rec.calendarId,
+      rec.eventId,
+      this.presentationPatch(id, task)
+    );
+  }
+
+  private async pushUpdate(
+    rec: { calendarId: string; eventId: string; due: string; start?: string },
+    task: VaultTask,
+    id: string,
+    doneOverride?: boolean
+  ): Promise<GCalEvent> {
+    // done 회귀를 보류한 채 다른 필드(날짜·제목)만 올리는 경우 — 완료 상태는 기존 값으로
+    // 고정한다. 안 그러면 제목 push에 미완료가 딸려가 보류가 무의미해진다.
+    const t = doneOverride === undefined ? task : { ...task, checked: doneOverride };
+    const patch = this.presentationPatch(id, t);
     const startDate = this.spanStart(task);
     const dateChanged =
       task.due !== rec.due || startDate !== (rec.start ?? rec.due);
@@ -900,8 +935,12 @@ export class SyncEngine {
             console.warn(`[tasks-gcal-sync] done 회귀 보류(원격 미확인): ${id}`);
           } else {
             if (rec.uncheckSeenAt === undefined) rec.uncheckSeenAt = Date.now();
-            holdDone = Date.now() - rec.uncheckSeenAt < UNCHECK_HOLD_MS;
+            const waited = Date.now() - rec.uncheckSeenAt;
+            holdDone = waited < UNCHECK_HOLD_MS;
             if (holdDone) {
+              // 보류가 풀리는 시점에 한 번 더 돌도록 호출부에 알린다.
+              const left = UNCHECK_HOLD_MS - waited + 2_000;
+              result.retryAfterMs = Math.min(result.retryAfterMs ?? left, left);
               console.log(`[tasks-gcal-sync] done 회귀 → 다음 사이클에 재확인: ${id}`);
             }
           }
@@ -919,9 +958,20 @@ export class SyncEngine {
           (obs.done && !gc.done && !holdDone) ||
           (obs.title && !gc.title);
 
+        // GCal이 이긴 변경만 있어 push할 게 없더라도, **이벤트의 표현은 다시 찍는다.**
+        // GCal에서 free(한가함)로 완료하면 노트는 [x]가 되는데 이벤트 제목은 ☐, 색은
+        // 기본색 그대로여서 캘린더에서 미완료로 보였다. 날짜 없는 patch라 안전하다.
+        //
+        // 단 **사용자가 GCal에서 실제로 뭔가 바꾼 경우(gcalChanged)로 한정**한다.
+        // 가짜 기준선 복구(staleUncheck)는 원격이 안 바뀐 상태에서 노트만 되살리는 것이라,
+        // 거기서 원격에 쓰기 시작하면 "확신 없으면 원격을 건드리지 않는다"는 0.3.13의
+        // 보장이 무너진다.
+        const normalizeNeeded = !pushNeeded && pulled && gcalChanged;
+
         // 반복 완료로 줄이 밀린 파일은 이번 run에서 더 쓰지 않는다(다음 사이클에서 신규 read).
+        const canWriteRemote = !dirtyFiles.has(task.path) && !coldHold;
         let pushed = false;
-        if (pushNeeded && !dirtyFiles.has(task.path) && !coldHold) {
+        if ((pushNeeded || normalizeNeeded) && canWriteRemote) {
           // done을 보류 중이면 완료 상태만 기존 값으로 고정해서 올린다 —
           // 안 그러면 날짜/제목 push에 미완료가 딸려가 보류가 무의미해진다.
           const pushTask = holdDone ? { ...task, checked: rec.done } : task;
@@ -931,7 +981,11 @@ export class SyncEngine {
           mTitle = this.titleBase(task);
 
           const target = resolveCalendar(task.tags, this.settings);
-          if (target && target.id !== rec.calendarId) {
+          if (!pushNeeded) {
+            const updatedEv = await this.pushPresentation(rec, pushTask, id);
+            rec.gcalUpdated = updatedEv.updated;
+            result.updated++;
+          } else if (target && target.id !== rec.calendarId) {
             // 대상 캘린더 변경 → 이동
             try {
               await this.client.deleteEvent(rec.calendarId, rec.eventId);
@@ -965,18 +1019,20 @@ export class SyncEngine {
         // ── 3) 스냅샷 갱신 ──
         // **올리지 못한 로컬 변경은 스냅샷에 기록하지 않는다.** 여기서 로컬 값으로 덮으면
         // "이미 반영됨"으로 남아 그 변경이 영영 안 올라간다(보류·콜드 스타트·구조 변경 스킵).
-        if (pushed || !pushNeeded) {
+        if (pushed || (!pushNeeded && !normalizeNeeded)) {
           rec.due = mDue;
           rec.start = mStart;
           rec.done = mDone;
           rec.title = mTitle;
-        } else {
+        } else if (pushNeeded) {
           // 부분 반영: pull이 실제로 고친 필드만 기록한다.
           if (gc.due) rec.due = mDue;
           if (gc.start) rec.start = mStart;
           if (gc.done) rec.done = mDone;
           if (gc.title) rec.title = mTitle;
         }
+        // normalizeNeeded인데 못 찍었으면(구조 변경·콜드 스타트) 스냅샷을 그대로 둔다 →
+        // 다음 사이클에 "로컬이 바뀐 것"으로 읽혀 push되고, 그때 표현이 맞춰진다.
         // 원격을 실제로 본 run에서만 기준선을 승격한다.
         if (ev) rec.baselineTrusted = true;
       } catch (e) {

@@ -60,6 +60,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
   private syncing = false;
   private intervalId: number | null = null;
   private autoPushTimer: number | null = null;
+  private followUpTimer: number | null = null;
   private lastSyncAt = 0; // 마지막 동기화 "완료" 시각(ms) — 최소 간격 계산 기준
   private statusBar!: HTMLElement;
 
@@ -141,6 +142,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
   onunload(): void {
     if (this.intervalId !== null) window.clearInterval(this.intervalId);
     if (this.autoPushTimer !== null) window.clearTimeout(this.autoPushTimer);
+    if (this.followUpTimer !== null) window.clearTimeout(this.followUpTimer);
   }
 
   /**
@@ -201,6 +203,9 @@ export default class TasksGcalSyncPlugin extends Plugin {
     this.statusBar.setText("GCal ⟳");
     try {
       const r = await this.engine.run(opts);
+      // 체크 해제는 한 사이클 보류한다(롤백 사고 대비). 보류가 풀리는 시점에 한 번 더
+      // 돌지 않으면 다음 주기(기본 5분)까지 GCal이 그대로라 "아무 일도 안 일어난다"로 보인다.
+      if (r.retryAfterMs) this.scheduleFollowUp(r.retryAfterMs);
       if (!silent || r.created || r.updated || r.moved || r.deleted || r.pulled) {
         const msg =
           `GCal 동기화: +${r.created} ~${r.updated} ↔${r.moved} -${r.deleted} ⬇${r.pulled}` +
@@ -217,6 +222,15 @@ export default class TasksGcalSyncPlugin extends Plugin {
       this.syncing = false;
       this.lastSyncAt = Date.now(); // 최소 간격은 "완료" 시각 기준 (실패해도 연타 방지)
     }
+  }
+
+  /** 보류가 풀리는 시점에 후속 동기화 1회. 겹치면 마지막 것만 남는다. */
+  private scheduleFollowUp(delay: number): void {
+    if (this.followUpTimer !== null) window.clearTimeout(this.followUpTimer);
+    this.followUpTimer = window.setTimeout(() => {
+      this.followUpTimer = null;
+      this.runSync(true);
+    }, delay);
   }
 
   private nowHM(): string {

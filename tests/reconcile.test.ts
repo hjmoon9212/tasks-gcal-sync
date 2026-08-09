@@ -122,10 +122,12 @@ function harness(opts: {
   const completion: any = {
     complete: async (t: any) => {
       calls.complete.push(t.id);
+      t.checked = true; // 실제 writer가 쓰기 후 파싱 필드를 갱신하는 것과 같게
       return false;
     },
     uncomplete: async (t: any) => {
       calls.uncomplete.push(t.id);
+      t.checked = false;
     },
   };
   const engine = new SyncEngine(
@@ -375,6 +377,52 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     await h.engine.run({ fullScan: true });
     eq(h.state.records.Y8 !== undefined, true, "tgsVault 없는 옛 이벤트: 입양");
     eq(h.calls.del, [], "입양 직후 run에서는 지우지 않는다");
+  }
+
+  // -- 16) GCal에서 free(한가함)로 완료 → 노트를 [x]로 만들고, **이벤트 표현도 정규화**한다.
+  //     예전엔 노트만 완료되고 이벤트는 ☐·기본색 그대로라 캘린더에서 미완료로 보였다.
+  {
+    const ev = doneEvent("A1", false, "300");
+    ev.transparency = "transparent"; // free로만 완료 표시(색·제목은 미완료 그대로)
+    const h = harness({
+      tasks: [task("A1", false)],
+      events: [ev],
+      records: { A1: rec({ gcalUpdated: "100" }) },
+    });
+    await h.engine.run();
+    eq(h.calls.complete, ["A1"], "free 완료: 노트를 [x]로");
+    eq(h.calls.patch.length, 1, "free 완료: 이벤트 표현 정규화 push");
+    const patch = h.calls.patch[0].patch;
+    eq(patch.summary, "☑️ 샘플", "정규화: 제목 접두사가 완료로");
+    eq(patch.colorId, "8", "정규화: 완료색");
+    eq(patch.transparency, "transparent", "정규화: free 유지");
+    eq(patch.start, undefined, "정규화: 날짜는 건드리지 않는다");
+    eq(patch.end, undefined, "정규화: 날짜는 건드리지 않는다");
+    eq(h.state.records.A1.done, true, "정규화: 스냅샷 완료");
+  }
+
+  // -- 17) 노트에서 체크 해제 → 보류 후 push할 때 free/완료색이 실제로 풀린다.
+  //     그리고 보류가 풀리는 시점을 호출부에 알려 후속 run이 예약되게 한다
+  //     (안 그러면 다음 주기까지 GCal이 그대로라 "아무 일도 없다"로 보인다).
+  {
+    const ev = doneEvent("A1", true, "200");
+    const h = harness({
+      tasks: [task("A1", false)],
+      events: [ev],
+      records: { A1: rec({ done: true, gcalUpdated: "200" }) },
+    });
+    const first = await h.engine.run();
+    eq(h.calls.patch.length, 0, "해제 첫 관측: 보류");
+    eq(typeof first.retryAfterMs, "number", "보류 시 재시도 시각을 알린다");
+
+    h.state.records.A1.uncheckSeenAt = Date.now() - 120_000;
+    const second = await h.engine.run();
+    eq(h.calls.patch.length, 1, "대기 뒤 push");
+    const patch = h.calls.patch[0].patch;
+    eq(patch.summary, "☐ 샘플", "해제: 제목 접두사 미완료로");
+    eq(patch.colorId, null, "해제: 완료색 제거");
+    eq(patch.transparency, "opaque", "해제: 바쁨으로 복귀");
+    eq(second.retryAfterMs, undefined, "push했으면 재시도 예약 없음");
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

@@ -6,7 +6,7 @@ Obsidian Tasks(📅 due date가 있는 `#task`)를 Google Calendar **종일 이�
 - 멀티볼트: 볼트마다 설치 + 볼트별로 다른 구글 캘린더에 매핑 → GCal 한 화면이 통합 뷰
 - 서버 없음. Obsidian이 열려 있을 때 동기화. 자격증명은 기기 로컬 **localStorage**에 저장(v0.3.8~, Obsidian Sync를 타지 않음).
 
-## 현재 상태 (v0.3.16)
+## 현재 상태 (v0.3.17)
 - ✅ **Obsidian → GCal**: due task를 종일 이벤트로 생성/갱신, 완료=색상/free/접두사(`#done` 폴백), 삭제·미일정화 반영.
 - ✅ **GCal → Obsidian**: `syncToken` 증분 pull로 날짜 이동/완료/삭제 감지. **항상 양방향**이며 충돌은 필드 단위로 병합한다(단방향 옵션은 0.3.14에서 제거).
 - ✅ **멀티캘린더 라우팅**: `#gcal/<이름>` 태그로 task별 대상 캘린더 지정, 볼트별 기본 캘린더.
