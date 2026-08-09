@@ -1,12 +1,12 @@
 {
   "name": "tasks-gcal-sync",
-  "version": "0.3.17",
+  "version": "0.3.18",
   "description": "Sync Obsidian Tasks to Google Calendar (all-day events, two-way, #done prefix).",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "test": "node esbuild.test.mjs && node .test-build/taskline.test.js && node .test-build/reconcile.test.js",
+    "test": "node esbuild.test.mjs",
     "version-bump": "node version-bump.mjs"
   },
   "keywords": [

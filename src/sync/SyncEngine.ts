@@ -6,6 +6,16 @@ import { CalendarClient, GCalEvent } from "../gcal/CalendarClient";
 import { TaskWriter } from "../write/TaskWriter";
 import { CompletionHandler } from "../write/CompletionHandler";
 import {
+  decideReconcile,
+  Field,
+  LocalView,
+  MergePlan,
+  RemoteView,
+  RunGuards,
+  Snapshot,
+  TaskState,
+} from "./reconcile";
+import {
   addDay,
   addDays,
   daysBetween,
@@ -626,6 +636,203 @@ export class SyncEngine {
     return { byTaskId, cancelledEventIds };
   }
 
+  /** 조정 판단에 넘길 노트 상태. due가 유효하지 않으면 별도 상태로 구분한다. */
+  private taskState(task?: VaultTask): TaskState {
+    if (!task) return { kind: "missing" };
+    if (!isValidDate(task.due)) return { kind: "due-invalid" };
+    return { kind: "ok", local: this.localView(task) };
+  }
+
+  private localView(t: VaultTask): LocalView {
+    return {
+      due: t.due!,
+      start: this.spanStart(t),
+      done: t.checked,
+      title: this.titleBase(t),
+      hasStart: !!t.start,
+    };
+  }
+
+  /** 이벤트를 판단에 쓸 순수 값으로 환원. 설정 의존(완료 판정·제목 접두사)은 여기서 끝난다. */
+  private remoteView(ev?: GCalEvent): RemoteView | undefined {
+    if (!ev) return undefined;
+    const due = this.eventDueDate(ev); // 다중일 블록은 끝(배타적−1)
+    return {
+      updated: ev.updated,
+      done: this.isGcalDone(ev),
+      due,
+      start: due ? this.eventStartDate(ev) ?? due : undefined,
+      title: this.gcalTitleBase(ev),
+    };
+  }
+
+  /** 스냅샷 한 필드를 옮긴다. record(start가 optional)와 Snapshot 둘 다 대상이 된다. */
+  private assignSnapshot(
+    dst: { due: string; start?: string; done: boolean; title: string },
+    f: Field,
+    src: Snapshot
+  ): void {
+    if (f === "due") dst.due = src.due;
+    else if (f === "start") dst.start = src.start;
+    else if (f === "done") dst.done = src.done;
+    else dst.title = src.title;
+  }
+
+  /** 병합 결정을 실행한다: 노트에 pull 반영 → 필요하면 push → 스냅샷 갱신. */
+  private async applyMerge(c: {
+    plan: MergePlan;
+    id: string;
+    rec: SyncRecord;
+    task: VaultTask;
+    ev?: GCalEvent;
+    result: SyncResult;
+    dirtyFiles: Set<string>;
+    today: string;
+    coldHold: boolean;
+  }): Promise<void> {
+    const { plan, id, rec, task } = c;
+    const where = `${task.path}:${task.line + 1}`;
+
+    if (plan.staleUncheck) {
+      console.warn(
+        `[tasks-gcal-sync] 기준선 불신 + 원격 완료 → 노트 복구: ${id} (${where})`
+      );
+    }
+
+    // ── 1) pull: GCal이 이긴 필드만 노트에 반영 ──
+    // writer가 쓰기 후 task의 파싱 필드까지 갱신하므로, 아래 push는 병합된 값을 올린다.
+    const applied: Field[] = [];
+    const p = plan.pull;
+    if (p.setDue !== undefined) {
+      await this.writer.setDue(task, p.setDue);
+      applied.push("due");
+    }
+    if (p.start) {
+      if (p.start.write === "set") await this.writer.setStart(task, p.start.value);
+      else if (p.start.write === "remove") await this.writer.removeStart(task);
+      applied.push("start");
+    }
+    if (p.title) {
+      try {
+        await this.writer.replaceTitle(task, p.title.from, p.title.to);
+        applied.push("title");
+      } catch (e) {
+        console.warn("[tasks-gcal-sync] 제목 pull skip:", id, e);
+      }
+    }
+    // 완료는 맨 마지막 — 반복 완료가 줄을 삽입해 구조를 바꿀 수 있다.
+    if (p.done !== undefined) {
+      if (p.done) {
+        const structural = await this.completion.complete(
+          task,
+          this.writer,
+          this.eventDoneDate(c.ev) ?? c.today
+        );
+        // 반복 회차가 삽입돼 줄이 늘면 이 파일의 이후 쓰기를 미룬다.
+        if (structural) c.dirtyFiles.add(task.path);
+      } else {
+        await this.completion.uncomplete(task, this.writer);
+      }
+      applied.push("done");
+    }
+
+    if (plan.conflicts.length) {
+      console.warn(
+        `[tasks-gcal-sync] 충돌 → GCal 채택 (${plan.conflicts.join(", ")}):`,
+        where
+      );
+    }
+    if (applied.length) c.result.pulled++;
+
+    if (plan.uncheckSeen === "set") rec.uncheckSeenAt = Date.now();
+    else if (plan.uncheckSeen === "clear") delete rec.uncheckSeenAt;
+    if (plan.holdReason === "remote-unknown") {
+      console.warn(`[tasks-gcal-sync] done 회귀 보류(원격 미확인): ${id}`);
+    } else if (plan.holdReason === "recheck") {
+      console.log(`[tasks-gcal-sync] done 회귀 → 다음 사이클에 재확인: ${id}`);
+    }
+    if (plan.retryAfterMs !== undefined) {
+      c.result.retryAfterMs = Math.min(
+        c.result.retryAfterMs ?? plan.retryAfterMs,
+        plan.retryAfterMs
+      );
+    }
+
+    // ── 2) push: GCal이 가져가지 않은 Obsidian 변경, 또는 표현 정규화 ──
+    const normalizeNeeded = plan.normalizeIfPulled && applied.length > 0;
+    // 반복 완료로 줄이 밀린 파일은 이번 run에서 더 쓰지 않는다(다음 사이클에서 신규 read).
+    const canWriteRemote = !c.dirtyFiles.has(task.path) && !c.coldHold;
+
+    const m: Snapshot = { ...plan.merged };
+    // pull이 실패한 필드는 노트가 안 바뀌었으므로 스냅샷도 노트 현재값이다.
+    for (const f of plan.pulledFields) {
+      if (!applied.includes(f)) this.assignSnapshot(m, f, plan.local);
+    }
+
+    let pushed = false;
+    if ((plan.pushNeeded || normalizeNeeded) && canWriteRemote) {
+      // done을 보류 중이면 완료 상태만 기존 값으로 고정해서 올린다 —
+      // 안 그러면 날짜/제목 push에 미완료가 딸려가 보류가 무의미해진다.
+      const pushTask = plan.holdDone ? { ...task, checked: rec.done } : task;
+      m.due = task.due!;
+      m.start = this.spanStart(task);
+      m.done = pushTask.checked;
+      m.title = this.titleBase(task);
+
+      const target = resolveCalendar(task.tags, this.settings);
+      if (!plan.pushNeeded) {
+        const updatedEv = await this.pushPresentation(rec, pushTask, id);
+        rec.gcalUpdated = updatedEv.updated;
+        c.result.updated++;
+      } else if (target && target.id !== rec.calendarId) {
+        // 대상 캘린더 변경 → 이동
+        try {
+          await this.client.deleteEvent(rec.calendarId, rec.eventId);
+        } catch (e) {
+          console.warn("[tasks-gcal-sync] 이동 중 삭제 실패(무시):", e);
+        }
+        const newEv = await this.client.insertEvent(
+          target.id,
+          this.buildEvent(pushTask, id)
+        );
+        rec.eventId = newEv.id!;
+        rec.calendarId = target.id;
+        rec.gcalUpdated = newEv.updated; // 우리 push의 updated 저장 → 다음 pull에서 self-echo 제외
+        c.result.moved++;
+      } else {
+        const updatedEv = await this.pushUpdate(
+          rec,
+          task,
+          id,
+          plan.holdDone ? rec.done : undefined
+        );
+        rec.gcalUpdated = updatedEv.updated;
+        c.result.updated++;
+      }
+      pushed = true;
+    } else if (plan.gcalChanged) {
+      // push하지 않았으면 GCal의 현재 updated가 다음 비교 기준.
+      rec.gcalUpdated = c.ev!.updated;
+    }
+
+    // ── 3) 스냅샷 갱신 ──
+    // **올리지 못한 변경은 스냅샷에 기록하지 않는다.** 여기서 덮으면 "이미 반영됨"으로
+    // 남아 그 변경이 영영 안 올라간다(보류·콜드 스타트·구조 변경 스킵).
+    if (pushed || (!plan.pushNeeded && !normalizeNeeded)) {
+      rec.due = m.due;
+      rec.start = m.start;
+      rec.done = m.done;
+      rec.title = m.title;
+    } else if (plan.pushNeeded) {
+      // 부분 반영: pull이 실제로 고친 필드만 기록한다.
+      for (const f of applied) this.assignSnapshot(rec, f, m);
+    }
+    // normalizeNeeded인데 못 찍었으면 스냅샷을 그대로 둔다 →
+    // 다음 사이클에 "로컬이 바뀐 것"으로 읽혀 push되고, 그때 표현이 맞춰진다.
+
+    if (plan.promoteBaseline) rec.baselineTrusted = true;
+  }
+
   async run(
     opts: { pull?: boolean; fullScan?: boolean; force?: boolean } = {}
   ): Promise<SyncResult> {
@@ -726,6 +933,16 @@ export class SyncEngine {
     }
 
     // ---- 1) 기존 record 양방향 조정 ----
+    // 판단은 전부 reconcile.ts의 순수 함수가 한다. 여기서는 그 결정을 실행만 한다.
+    const guards = new RunGuards({
+      dupIds,
+      dirtyFiles,
+      adopted,
+      holdWrites,
+      coldHold,
+      pulledCalendars: new Set(pullByCal.keys()),
+    });
+
     for (const id of Object.keys(records)) {
       const rec = records[id];
       const task = tasksById.get(id);
@@ -734,307 +951,49 @@ export class SyncEngine {
       const evCancelled = calData?.cancelledEventIds.has(rec.eventId) ?? false;
 
       try {
-        // 🆔가 중복된 노트 → 정본을 특정할 수 없으니 읽지도 쓰지도 않는다.
-        // (특히 아래 "task 없음 → 삭제"로 새지 않도록 이 검사가 먼저 와야 한다)
-        if (dupIds.has(id)) {
-          result.skipped++;
-          continue;
-        }
-        // 같은 run에서 이 파일에 반복 회차가 삽입됨 → task.line이 밀려 오손상 위험.
-        // 이 task의 반영은 스킵하고 다음 사이클(신규 read)에서 처리.
-        if (task && dirtyFiles.has(task.path)) {
-          result.skipped++;
+        const plan = decideReconcile({
+          rec,
+          task: this.taskState(task),
+          remote: this.remoteView(ev),
+          evCancelled,
+          guards: guards.for(id, rec.calendarId, task?.path),
+          now: Date.now(),
+          uncheckHoldMs: UNCHECK_HOLD_MS,
+        });
+
+        if (plan.kind === "merge") {
+          await this.applyMerge({
+            plan,
+            id,
+            rec,
+            task: task!,
+            ev,
+            result,
+            dirtyFiles,
+            today,
+            coldHold,
+          });
           continue;
         }
 
-        // Obsidian에서 task 사라짐 → 이벤트 삭제
-        if (!task) {
-          // 2단계 삭제: 이번 스캔에서 **처음 본** 이벤트는 지우지 않는다.
-          // 볼트가 아직 안 따라잡았을 뿐일 수 있으므로, record만 남겨두고 다음
-          // 사이클에 판단한다. 그때까지 task가 내려오면 정상 조정으로 흡수된다.
-          // (동기화 진행 중이면 기존 record도 같은 이유로 보류)
-          if (adopted.has(id) || holdWrites || coldHold) {
+        switch (plan.kind) {
+          case "skip":
             result.skipped++;
-            continue;
-          }
-          await this.client.deleteEvent(rec.calendarId, rec.eventId);
-          delete records[id];
-          result.deleted++;
-          continue;
-        }
-
-        // task는 있으나 📅(due)를 잃음 → 미일정화(이벤트 제거, record 삭제).
-        // due 없이 patch하면 addDay(undefined)=NaN 날짜로 GCal 400이 매 sync 반복됨.
-        // (예: 템플릿이 due 없이 #task를 만들거나 사용자가 📅를 지운 경우)
-        if (!isValidDate(task.due)) {
-          // 다른 파괴적 경로와 같은 3종 가드. 볼트가 뒤처졌거나(holdWrites) 로드 직후이거나
-          // (coldHold) 이번 스캔에서 처음 본 record면(adopted), 📅가 있는 줄이 아직 안
-          // 내려왔을 뿐일 수 있다 — 그 상태로 지우면 남의 기기가 만든 일정을 없앤다.
-          if (holdWrites || coldHold || adopted.has(id)) {
-            result.skipped++;
-            continue;
-          }
-          await this.client.deleteEvent(rec.calendarId, rec.eventId);
-          delete records[id];
-          result.deleted++;
-          continue;
-        }
-
-        // GCal에서 이벤트 삭제됨 → task 미일정화(📅 제거)
-        if (evCancelled) {
-          // **완료된 줄의 📅는 기록이다.** 반복(🔁) task는 회차마다 별도 🆔·이벤트가
-          // 쌓이므로 캘린더에서 지난 완료 이벤트를 정리하는 건 자연스러운 조작인데,
-          // 그때마다 완료 회차의 due가 노트에서 지워졌다(2026-08-07). 완료 + 과거 due는
-          // 아래 생성 루프의 inWindow에서 걸러지므로 record만 지워도 이벤트는 안 되살아난다.
-          if (task.checked) {
+            break;
+          case "delete-event":
+            await this.client.deleteEvent(rec.calendarId, rec.eventId);
             delete records[id];
-            continue;
-          }
-          // 미완료 task만 실제로 미일정화한다. 단, 다른 파괴적 경로와 같은 가드를 건다 —
-          // 볼트가 뒤처졌거나(holdWrites·coldHold) 이번 스캔에서 처음 본 record라면
-          // 남의 기기가 만든 cancelled(중복정리·캘린더이동)를 근거로 지우는 것일 수 있다.
-          if (holdWrites || coldHold || adopted.has(id)) {
-            result.skipped++;
-            continue;
-          }
-          await this.writer.removeDue(task);
-          delete records[id];
-          result.pulled++;
-          continue;
+            result.deleted++;
+            break;
+          case "drop-record":
+            delete records[id];
+            break;
+          case "unschedule":
+            await this.writer.removeDue(task!);
+            delete records[id];
+            result.pulled++;
+            break;
         }
-
-        const obsTitle = this.titleBase(task);
-        const obsStart = this.spanStart(task);
-
-        // ── 어느 쪽에서 무엇이 바뀌었나: 필드별로 판정한다 ──
-        // 기준은 양쪽 모두 마지막 동기화 스냅샷(rec). 필드를 따로 보기 때문에
-        // "Obsidian에서 ✅ + GCal에서 날짜 이동"처럼 겹치지 않는 변경은 둘 다 살아남는다.
-        const obs = {
-          due: task.due !== rec.due,
-          start: obsStart !== (rec.start ?? rec.due),
-          done: task.checked !== rec.done,
-          title: obsTitle !== rec.title,
-        };
-
-        // GCal 외부 수정 감지: 증분 pull에 이벤트가 왔고 그 updated가
-        // 우리가 마지막으로 본 값(rec.gcalUpdated)과 다름 → 우리 push가 아닌 사용자 수정.
-        const gcalChanged =
-          !!ev && !!ev.updated && ev.updated !== rec.gcalUpdated;
-
-        // 이벤트를 손에 쥐었으면 완료 상태는 gcalChanged와 무관하게 읽을 수 있다.
-        // (가짜 기준선 복구 판정에 쓴다 — 그때는 updated 비교가 무의미하다)
-        const evDone = ev ? this.isGcalDone(ev) : undefined;
-
-        const gcalDate = gcalChanged ? this.eventDueDate(ev!) : undefined; // 다중일 블록은 끝(배타적−1)
-        const gcalStart = gcalChanged ? this.eventStartDate(ev!) : undefined;
-        const gcalTitle = gcalChanged ? this.gcalTitleBase(ev!) : undefined;
-        // 이벤트에서 날짜를 못 읽으면(파싱 실패·혼합형) 날짜 계열은 아예 손대지 않는다.
-        // 예전엔 이 경우에도 else로 떨어져 task의 🛫를 근거 없이 지웠다.
-        const datesOk = !!gcalDate;
-        const gcalSpanStart = datesOk ? gcalStart ?? gcalDate : undefined;
-
-        // ── 가짜 기준선 복구 ──
-        // 이벤트에서 복원한 record는 baseline ≡ 원격이라 gcalChanged가 영원히 false다.
-        // 그 상태에서 노트가 스테일하면(원격 완료 · 노트 미체크) "로컬이 체크를 풀었다"로
-        // 읽혀 ✅가 GCal에서 지워진다 — 2026-08-06 롤백 사고의 실제 경로.
-        // 신뢰 못 하는 기준선일 때는 원격의 **현재값을 노트와 직접** 비교하고,
-        // 정보를 잃지 않는 방향(원격 완료 → 노트 복구)으로만 적용한다.
-        const trusted = rec.baselineTrusted !== false;
-        const staleUncheck = !trusted && evDone === true && !task.checked;
-        if (staleUncheck) {
-          console.warn(
-            `[tasks-gcal-sync] 기준선 불신 + 원격 완료 → 노트 복구: ${id} (${task.path}:${
-              task.line + 1
-            })`
-          );
-        }
-
-        const gc = {
-          due: gcalChanged && datesOk && gcalDate !== rec.due,
-          start:
-            gcalChanged && datesOk && gcalSpanStart !== (rec.start ?? rec.due),
-          done: (gcalChanged && evDone !== rec.done) || staleUncheck,
-          title: gcalChanged && !!gcalTitle && gcalTitle !== rec.title,
-        };
-
-        // 같은 필드가 양쪽 다 바뀐 경우에만 승자가 필요하다 → GCal 채택(직접 조작한 화면).
-        const conflicts: string[] = [];
-        const takeGcal = (f: "due" | "start" | "done" | "title"): boolean => {
-          if (!gc[f]) return false;
-          if (obs[f]) conflicts.push(f);
-          return true;
-        };
-
-        // 병합 결과(스냅샷 갱신용). 초기값 = Obsidian 현재 상태.
-        let mDue = task.due!;
-        let mStart = obsStart;
-        let mDone = task.checked;
-        let mTitle = obsTitle;
-
-        // ── 1) pull: GCal이 이긴 필드만 노트에 반영 ──
-        // writer가 쓰기 후 task의 파싱 필드까지 갱신하므로, 아래 push는 병합된 값을 올린다.
-        let pulled = false;
-
-        if (takeGcal("due")) {
-          await this.writer.setDue(task, gcalDate!);
-          mDue = gcalDate!;
-          pulled = true;
-        }
-        if (takeGcal("start")) {
-          if (gcalSpanStart! < mDue) await this.writer.setStart(task, gcalSpanStart!);
-          else if (task.start) await this.writer.removeStart(task); // GCal이 단일일로 바꿈
-          mStart = gcalSpanStart!;
-          pulled = true;
-        }
-        if (takeGcal("title")) {
-          try {
-            await this.writer.replaceTitle(task, this.titleBase(task), gcalTitle!);
-            mTitle = gcalTitle!;
-            pulled = true;
-          } catch (e) {
-            console.warn("[tasks-gcal-sync] 제목 pull skip:", id, e);
-          }
-        }
-        // 완료는 맨 마지막 — 반복 완료가 줄을 삽입해 구조를 바꿀 수 있다.
-        if (takeGcal("done")) {
-          if (evDone) {
-            const structural = await this.completion.complete(
-              task,
-              this.writer,
-              this.eventDoneDate(ev) ?? today
-            );
-            // 반복 회차가 삽입돼 줄이 늘면 이 파일의 이후 쓰기를 미룬다.
-            if (structural) dirtyFiles.add(task.path);
-          } else await this.completion.uncomplete(task, this.writer);
-          mDone = !!evDone;
-          pulled = true;
-        }
-
-        if (conflicts.length) {
-          console.warn(
-            `[tasks-gcal-sync] 충돌 → GCal 채택 (${conflicts.join(", ")}):`,
-            `${task.path}:${task.line + 1}`
-          );
-        }
-        if (pulled) result.pulled++;
-
-        // ── done 회귀(완료 → 미완료) 보류 ──
-        // 가장 파괴적인 push다. 노트가 최신이라는 확신이 없으면 미룬다. 두 겹:
-        //  (a) 이번 run이 그 캘린더를 **실제로 읽지 못했으면** 무기한 보류.
-        //      "이벤트 객체가 없다"가 아니라 "pull을 못 했다"가 기준이다 — 증분 pull에서
-        //      변경 없는 이벤트는 원래 응답에 안 온다. 그걸 근거로 삼으면 정상적인
-        //      체크 해제가 영영 안 올라간다.
-        //  (b) 읽었더라도 **한 사이클 재확인**한다(2단계 삭제 가드와 같은 패턴).
-        //      그 사이 Obsidian Sync가 정착하면 회귀 자체가 사라진다.
-        const remoteUnknown = !doPull || !pullByCal.has(rec.calendarId);
-        const doneRegress = obs.done && !task.checked && rec.done && !gc.done;
-        let holdDone = false;
-        if (doneRegress) {
-          if (remoteUnknown) {
-            holdDone = true;
-            console.warn(`[tasks-gcal-sync] done 회귀 보류(원격 미확인): ${id}`);
-          } else {
-            if (rec.uncheckSeenAt === undefined) rec.uncheckSeenAt = Date.now();
-            const waited = Date.now() - rec.uncheckSeenAt;
-            holdDone = waited < UNCHECK_HOLD_MS;
-            if (holdDone) {
-              // 보류가 풀리는 시점에 한 번 더 돌도록 호출부에 알린다.
-              const left = UNCHECK_HOLD_MS - waited + 2_000;
-              result.retryAfterMs = Math.min(result.retryAfterMs ?? left, left);
-              console.log(`[tasks-gcal-sync] done 회귀 → 다음 사이클에 재확인: ${id}`);
-            }
-          }
-        } else if (rec.uncheckSeenAt !== undefined) {
-          delete rec.uncheckSeenAt;
-        }
-        // 보류 중이면 병합 결과의 완료 상태도 예전 값이다 — 스냅샷에 미완료가 기록되면
-        // 다음 run에서 "회귀 없음"으로 읽혀 보류가 그대로 무산된다.
-        if (holdDone) mDone = rec.done;
-
-        // ── 2) push: GCal이 가져가지 않은 Obsidian 변경이 남아 있으면 올린다 ──
-        const pushNeeded =
-          (obs.due && !gc.due) ||
-          (obs.start && !gc.start) ||
-          (obs.done && !gc.done && !holdDone) ||
-          (obs.title && !gc.title);
-
-        // GCal이 이긴 변경만 있어 push할 게 없더라도, **이벤트의 표현은 다시 찍는다.**
-        // GCal에서 free(한가함)로 완료하면 노트는 [x]가 되는데 이벤트 제목은 ☐, 색은
-        // 기본색 그대로여서 캘린더에서 미완료로 보였다. 날짜 없는 patch라 안전하다.
-        //
-        // 단 **사용자가 GCal에서 실제로 뭔가 바꾼 경우(gcalChanged)로 한정**한다.
-        // 가짜 기준선 복구(staleUncheck)는 원격이 안 바뀐 상태에서 노트만 되살리는 것이라,
-        // 거기서 원격에 쓰기 시작하면 "확신 없으면 원격을 건드리지 않는다"는 0.3.13의
-        // 보장이 무너진다.
-        const normalizeNeeded = !pushNeeded && pulled && gcalChanged;
-
-        // 반복 완료로 줄이 밀린 파일은 이번 run에서 더 쓰지 않는다(다음 사이클에서 신규 read).
-        const canWriteRemote = !dirtyFiles.has(task.path) && !coldHold;
-        let pushed = false;
-        if ((pushNeeded || normalizeNeeded) && canWriteRemote) {
-          // done을 보류 중이면 완료 상태만 기존 값으로 고정해서 올린다 —
-          // 안 그러면 날짜/제목 push에 미완료가 딸려가 보류가 무의미해진다.
-          const pushTask = holdDone ? { ...task, checked: rec.done } : task;
-          mDue = task.due!;
-          mStart = this.spanStart(task);
-          mDone = pushTask.checked;
-          mTitle = this.titleBase(task);
-
-          const target = resolveCalendar(task.tags, this.settings);
-          if (!pushNeeded) {
-            const updatedEv = await this.pushPresentation(rec, pushTask, id);
-            rec.gcalUpdated = updatedEv.updated;
-            result.updated++;
-          } else if (target && target.id !== rec.calendarId) {
-            // 대상 캘린더 변경 → 이동
-            try {
-              await this.client.deleteEvent(rec.calendarId, rec.eventId);
-            } catch (e) {
-              console.warn("[tasks-gcal-sync] 이동 중 삭제 실패(무시):", e);
-            }
-            const newEv = await this.client.insertEvent(
-              target.id,
-              this.buildEvent(pushTask, id)
-            );
-            rec.eventId = newEv.id!;
-            rec.calendarId = target.id;
-            rec.gcalUpdated = newEv.updated; // 우리 push의 updated 저장 → 다음 pull에서 self-echo 제외
-            result.moved++;
-          } else {
-            const updatedEv = await this.pushUpdate(
-              rec,
-              task,
-              id,
-              holdDone ? rec.done : undefined
-            );
-            rec.gcalUpdated = updatedEv.updated;
-            result.updated++;
-          }
-          pushed = true;
-        } else if (gcalChanged) {
-          // push하지 않았으면 GCal의 현재 updated가 다음 비교 기준.
-          rec.gcalUpdated = ev!.updated;
-        }
-
-        // ── 3) 스냅샷 갱신 ──
-        // **올리지 못한 로컬 변경은 스냅샷에 기록하지 않는다.** 여기서 로컬 값으로 덮으면
-        // "이미 반영됨"으로 남아 그 변경이 영영 안 올라간다(보류·콜드 스타트·구조 변경 스킵).
-        if (pushed || (!pushNeeded && !normalizeNeeded)) {
-          rec.due = mDue;
-          rec.start = mStart;
-          rec.done = mDone;
-          rec.title = mTitle;
-        } else if (pushNeeded) {
-          // 부분 반영: pull이 실제로 고친 필드만 기록한다.
-          if (gc.due) rec.due = mDue;
-          if (gc.start) rec.start = mStart;
-          if (gc.done) rec.done = mDone;
-          if (gc.title) rec.title = mTitle;
-        }
-        // normalizeNeeded인데 못 찍었으면(구조 변경·콜드 스타트) 스냅샷을 그대로 둔다 →
-        // 다음 사이클에 "로컬이 바뀐 것"으로 읽혀 push되고, 그때 표현이 맞춰진다.
-        // 원격을 실제로 본 run에서만 기준선을 승격한다.
-        if (ev) rec.baselineTrusted = true;
       } catch (e) {
         console.error("[tasks-gcal-sync] reconcile 실패:", id, e);
         result.skipped++;

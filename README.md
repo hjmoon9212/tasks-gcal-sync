@@ -6,12 +6,12 @@ Obsidian Tasks(📅 due date가 있는 `#task`)를 Google Calendar **종일 이�
 - 멀티볼트: 볼트마다 설치 + 볼트별로 다른 구글 캘린더에 매핑 → GCal 한 화면이 통합 뷰
 - 서버 없음. Obsidian이 열려 있을 때 동기화. 자격증명은 기기 로컬 **localStorage**에 저장(v0.3.8~, Obsidian Sync를 타지 않음).
 
-## 현재 상태 (v0.3.17)
+## 현재 상태 (v0.3.18)
 - ✅ **Obsidian → GCal**: due task를 종일 이벤트로 생성/갱신, 완료=색상/free/접두사(`#done` 폴백), 삭제·미일정화 반영.
 - ✅ **GCal → Obsidian**: `syncToken` 증분 pull로 날짜 이동/완료/삭제 감지. **항상 양방향**이며 충돌은 필드 단위로 병합한다(단방향 옵션은 0.3.14에서 제거).
 - ✅ **멀티캘린더 라우팅**: `#gcal/<이름>` 태그로 task별 대상 캘린더 지정, 볼트별 기본 캘린더.
 - ✅ **멀티기기 견고화**: 자격증명·records·syncTokens를 기기 로컬 localStorage에 격리 + GCal 이벤트에 마지막 push 스냅샷 임베드 → records는 캘린더에서 재구성 가능한 캐시다.
-- ⏳ **남음**: 반복 task(🔁) 미완료 해제 처리, 모바일 신규 인증 경로(아래 '알려진 한계'), 조정 루프 구조 분해.
+- ⏳ **남음**: 반복 task(🔁) 미완료 해제 처리, 모바일 신규 인증 경로(아래 '알려진 한계'), 스캔 비용 축소.
 
 ---
 
@@ -85,7 +85,8 @@ npm run version-bump 0.3.3   # manifest/package/versions.json 버전 일괄 통�
 ```
 테스트는 `esbuild.test.mjs`가 `tests/*.test.ts`를 `.test-build/`로 묶어 node로 돌린다(별도 러너 의존성 없음). `obsidian` 모듈은 `tests/obsidian-stub.ts`로 alias된다. CI(`.github/workflows/ci.yml`)와 릴리스(`release.yml`) 모두 `npm run build && npm test`를 돌리므로 **테스트가 깨지면 Release가 만들어지지 않는다.**
 - `src/data/TaskLine.ts` — 이모지 줄 파싱/수술적 재작성(순수 함수). 테스트: `tests/taskline.test.ts`.
-- `src/sync/SyncEngine.ts` — 동기화 로직(push + pull). 이벤트 스냅샷(`privateProps`)·record 복원(`recordFromEvent`)으로 기기 간 상태 견고화.
+- `src/sync/reconcile.ts` — **조정 판단(순수 함수)**. 무엇을 pull/push/삭제할지, 어떤 가드가 걸리는지를 I/O 없이 결정한다. 파괴적 동작 허용 여부는 `destructiveAllowed` 한 곳에만 있다. 테스트: `tests/decide.test.ts`(결정표).
+- `src/sync/SyncEngine.ts` — 그 결정의 **실행**(GCal 호출·노트 쓰기) + 이벤트 스냅샷(`privateProps`)·record 복원(`recordFromEvent`)으로 기기 간 상태 견고화. 테스트: `tests/reconcile.test.ts`(스텁으로 run() 구동).
 - `src/main.ts` — 플러그인 진입점. 설정은 `data.json`, 자격증명·records·syncTokens는 기기 로컬 **localStorage**에 저장(구 `state.json`은 로드 시 1회 이관 후 삭제).
 
 ### 상태 저장 위치

@@ -8,6 +8,7 @@
  */
 import esbuild from "esbuild";
 import { readdirSync } from "fs";
+import { spawnSync } from "child_process";
 import path from "path";
 
 const OUT = ".test-build";
@@ -31,3 +32,12 @@ await esbuild.build({
   logLevel: "info",
   alias: { obsidian: path.resolve("tests/obsidian-stub.ts") },
 });
+
+// 번들된 순서대로 실행. 하나라도 실패하면 그 자리에서 멈춘다(테스트가 process.exit(1)).
+for (const entry of entryPoints) {
+  const out = path.join(OUT, path.basename(entry).replace(/\.ts$/, ".js"));
+  console.log(`
+=== ${entry} ===`);
+  const r = spawnSync(process.execPath, [out], { stdio: "inherit" });
+  if (r.status !== 0) process.exit(r.status ?? 1);
+}
