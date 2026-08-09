@@ -6,7 +6,7 @@ Obsidian Tasks(📅 due date가 있는 `#task`)를 Google Calendar **종일 이�
 - 멀티볼트: 볼트마다 설치 + 볼트별로 다른 구글 캘린더에 매핑 → GCal 한 화면이 통합 뷰
 - 서버 없음. Obsidian이 열려 있을 때 동기화. 자격증명은 기기 로컬 **localStorage**에 저장(v0.3.8~, Obsidian Sync를 타지 않음).
 
-## 현재 상태 (v0.4.4)
+## 현재 상태 (v0.4.5)
 - ✅ **Obsidian → GCal**: due task를 종일 이벤트로 생성/갱신, 완료 표시(색상/제목 접두사/`#done` 폴백), 삭제·미일정화 반영.
 - ✅ **GCal → Obsidian**: `syncToken` 증분 pull로 **날짜 이동·제목 변경·삭제**를 감지해 노트에 반영. 충돌은 필드 단위로 병합한다.
 - 🔒 **완료는 Obsidian이 소유**(v0.4.0~): 노트 → 이벤트 한 방향으로만 흐른다. 캘린더에서 색이나 제목을 바꿔도 노트는 바뀌지 않는다.
@@ -14,6 +14,7 @@ Obsidian Tasks(📅 due date가 있는 `#task`)를 Google Calendar **종일 이�
 - ✅ **멀티기기 견고화**: 자격증명·records·syncTokens를 기기 로컬 localStorage에 격리 + GCal 이벤트에 마지막 push 스냅샷 임베드 → records는 캘린더에서 재구성 가능한 캐시다.
 - 🖥️ **데스크탑 전용**(v0.4.1~): `isDesktopOnly: true` — 모바일에서는 로드되지 않는다. 노트 편집은 Obsidian Sync 가, GCal 반영은 상시 켜진 데스크톱이 맡는다.
 - ⏳ **남음**: API 호출 병렬화, 완료된 지난 이벤트 자동 정리.
+- 🔁 **재시도**: 429·5xx 와 **403 사용량 초과**(권한 오류와 본문 `reason` 으로 구분)를 지수 백오프 + 지터로 최대 3회. `Retry-After` 가 오면 그걸 따른다.
 
 ---
 

@@ -25,6 +25,38 @@ export interface CalendarListEntry {
 const TRANSIENT = new Set([429, 500, 502, 503, 504]);
 const MAX_RETRY = 3;
 
+/**
+ * Google 은 **사용량 초과를 403 으로도 준다.** 상태코드만 보면 권한 오류와 구별이 안 돼서
+ * 그동안 재시도 없이 그 항목만 조용히 빠졌다. 본문의 `reason` 으로 갈라낸다 —
+ * 권한 오류(`forbidden`·`insufficientPermissions`)를 재시도하면 무의미하게 늦어질 뿐이다.
+ */
+const RATE_LIMIT_REASON =
+  /"reason"\s*:\s*"(rateLimitExceeded|userRateLimitExceeded|quotaExceeded)"/;
+
+/** 이 응답을 다시 시도해도 되는가. (순수 함수 — 테스트가 표로 고정한다) */
+export function isRetryable(status: number, body: string): boolean {
+  if (TRANSIENT.has(status)) return true;
+  if (status === 403) return RATE_LIMIT_REASON.test(body);
+  return false;
+}
+
+/**
+ * 다음 시도까지 기다릴 시간(ms).
+ *
+ * `Retry-After` 가 오면 그걸 따르고(상한 60초), 아니면 지수 백오프에 **±50% 지터**를
+ * 준다. 지터가 없으면 같은 run 의 여러 호출이 **동시에 깨어나 또 몰려간다** — 호출을
+ * 병렬화할수록 심해진다.
+ */
+export function backoffMs(
+  attempt: number,
+  retryAfter?: string | number | null,
+  rand: number = Math.random()
+): number {
+  const ra = Number(retryAfter);
+  if (Number.isFinite(ra) && ra > 0) return Math.min(ra * 1000, 60_000);
+  return Math.round(1000 * Math.pow(2, attempt) * (0.5 + rand)); // 1s·2s·4s ±50%
+}
+
 export class CalendarClient {
   constructor(private auth: GoogleAuth) {}
 
@@ -32,7 +64,7 @@ export class CalendarClient {
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  /** requestUrl + 일시 오류(429/5xx) 지수 백오프 재시도. */
+  /** requestUrl + 일시 오류(429/5xx/403 사용량초과) 지수 백오프 재시도. */
   private async fetchWithRetry(opts: {
     url: string;
     method: string;
@@ -42,9 +74,10 @@ export class CalendarClient {
     let lastResp: any;
     for (let attempt = 0; attempt <= MAX_RETRY; attempt++) {
       lastResp = await requestUrl({ ...opts, throw: false });
-      if (!TRANSIENT.has(lastResp.status)) return lastResp;
+      if (!isRetryable(lastResp.status, String(lastResp.text ?? ""))) return lastResp;
       if (attempt < MAX_RETRY) {
-        const wait = 1000 * Math.pow(2, attempt); // 1s, 2s, 4s
+        const h = lastResp.headers ?? {};
+        const wait = backoffMs(attempt, h["retry-after"] ?? h["Retry-After"]);
         console.warn(
           `[tasks-gcal-sync] GCal ${lastResp.status} 재시도 ${attempt + 1}/${MAX_RETRY} (${wait}ms)`
         );
