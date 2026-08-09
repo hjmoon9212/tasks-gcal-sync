@@ -392,7 +392,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
     this.app.saveLocalStorage(STATE_LS_KEY, JSON.stringify(sf));
   }
 
-  /** 설정 UI 저장용: 설정(data.json) + 자격증명/state(state.json) 둘 다 기록. */
+  /** 설정 UI 저장용: 설정(data.json) + 자격증명/state(기기 로컬 localStorage) 둘 다 기록. */
   async saveAll(): Promise<void> {
     await this.saveSettings();
     await this.saveState();

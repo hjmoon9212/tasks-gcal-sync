@@ -6,12 +6,12 @@ Obsidian Tasks(📅 due date가 있는 `#task`)를 Google Calendar **종일 이�
 - 멀티볼트: 볼트마다 설치 + 볼트별로 다른 구글 캘린더에 매핑 → GCal 한 화면이 통합 뷰
 - 서버 없음. Obsidian이 열려 있을 때 동기화. 자격증명은 기기 로컬 **localStorage**에 저장(v0.3.8~, Obsidian Sync를 타지 않음).
 
-## 현재 상태 (v0.3.14)
+## 현재 상태 (v0.3.16)
 - ✅ **Obsidian → GCal**: due task를 종일 이벤트로 생성/갱신, 완료=색상/free/접두사(`#done` 폴백), 삭제·미일정화 반영.
 - ✅ **GCal → Obsidian**: `syncToken` 증분 pull로 날짜 이동/완료/삭제 감지. **항상 양방향**이며 충돌은 필드 단위로 병합한다(단방향 옵션은 0.3.14에서 제거).
 - ✅ **멀티캘린더 라우팅**: `#gcal/<이름>` 태그로 task별 대상 캘린더 지정, 볼트별 기본 캘린더.
 - ✅ **멀티기기 견고화**: 자격증명·records·syncTokens를 기기 로컬 localStorage에 격리 + GCal 이벤트에 마지막 push 스냅샷 임베드 → records는 캘린더에서 재구성 가능한 캐시다.
-- ⏳ **남음**: 반복 task(🔁) 미완료 해제 처리, 모바일 실기기 검증.
+- ⏳ **남음**: 반복 task(🔁) 미완료 해제 처리, 모바일 신규 인증 경로(아래 '알려진 한계'), 조정 루프 구조 분해.
 
 ---
 
@@ -52,7 +52,7 @@ Obsidian Tasks(📅 due date가 있는 `#task`)를 Google Calendar **종일 이�
    - Global filter(기본 `#task`), 완료 prefix(기본 `#done`), 동기화 주기 등 확인.
 3. 리본의 달력 아이콘 또는 명령어 **"지금 동기화"** 실행.
 
-> **모바일**: 인증 UI가 없다. 자격증명은 기기 로컬 localStorage에 있어 파일로 옮길 수 없으므로, 각 기기에서 설정 화면에 Client ID/Secret을 넣고 인증해야 한다.
+> **모바일**: 대화형 인증(루프백 서버)이 **데스크탑 전용**이고 자격증명은 기기 로컬 localStorage라 파일로 옮길 수도 없다. 즉 **모바일에서 새로 인증할 수단이 현재 없다** — 이미 인증된 기기는 그대로 동작하지만, 앱을 재설치하거나 토큰이 만료되면 막힌다. 설정에 refresh token을 직접 붙여넣는 경로는 다음 버전 예정.
 
 ## 동작 규칙
 - 대상: `#task` + 📅 due 가 있는 task. **새 이벤트 생성 범위**: 오늘 이후 due(+ `includeOverdue` 시 미완료 overdue). 이미 record가 있는 항목은 범위와 무관하게 계속 reconcile.
@@ -68,8 +68,10 @@ Obsidian Tasks(📅 due date가 있는 `#task`)를 Google Calendar **종일 이�
 - 타이밍은 각 항목을 직접 설정한다(프리셋 없음): 편집 시 자동 동기화 · 편집 후 대기(초) · 최소 간격(초) · 시작 시 동기화 · 주기(분, 0=끔).
 
 ## 알려진 한계
+- **모바일 신규 인증 불가**: 대화형 인증이 데스크탑 전용(node 루프백 서버). 이미 받은 refresh token으로만 동작한다.
 - **반복 task(🔁) 미완료 해제**: `uncomplete`가 Tasks API를 쓰지 않아, 이미 생성된 다음 회차가 남는다.
 - **orphan 이벤트**: record 포인터 없이 GCal에만 남은 이벤트는 자동 정리하지 않음(무해).
+- **이벤트 설명 덮어쓰기**: 매 push마다 description을 플러그인 형식으로 전면 교체하므로, GCal에서 이벤트에 적은 메모는 보존되지 않는다.
 
 ---
 
@@ -78,22 +80,23 @@ Obsidian Tasks(📅 due date가 있는 `#task`)를 Google Calendar **종일 이�
 npm install
 npm run dev                  # 워치 빌드
 npm run build                # 타입체크 + 프로덕션 번들 → main.js
+npm test                     # esbuild로 tests/*.test.ts 번들 → node 실행
 npm run version-bump 0.3.3   # manifest/package/versions.json 버전 일괄 통일
-node tests/taskline.test.ts  # (tsx 필요) 파서/날짜 헬퍼 테스트
 ```
+테스트는 `esbuild.test.mjs`가 `tests/*.test.ts`를 `.test-build/`로 묶어 node로 돌린다(별도 러너 의존성 없음). `obsidian` 모듈은 `tests/obsidian-stub.ts`로 alias된다. CI(`.github/workflows/ci.yml`)와 릴리스(`release.yml`) 모두 `npm run build && npm test`를 돌리므로 **테스트가 깨지면 Release가 만들어지지 않는다.**
 - `src/data/TaskLine.ts` — 이모지 줄 파싱/수술적 재작성(순수 함수). 테스트: `tests/taskline.test.ts`.
 - `src/sync/SyncEngine.ts` — 동기화 로직(push + pull). 이벤트 스냅샷(`privateProps`)·record 복원(`recordFromEvent`)으로 기기 간 상태 견고화.
-- `src/main.ts` — 플러그인 진입점. 설정은 `data.json`, 자격증명·records·syncTokens는 기기 로컬 `state.json`에 저장.
+- `src/main.ts` — 플러그인 진입점. 설정은 `data.json`, 자격증명·records·syncTokens는 기기 로컬 **localStorage**에 저장(구 `state.json`은 로드 시 1회 이관 후 삭제).
 
 ### 상태 저장 위치
 | 데이터 | 위치 | Sync 대상 | 이유 |
 |---|---|:---:|---|
 | settings(비밀 제외) | `data.json` | ✅ | Obsidian Sync로 기기 전파 |
-| 자격증명(clientId·secret·refreshToken) | `state.json` | ❌ | secret이 Sync로 새거나 롤백되지 않게 기기 로컬 격리 |
-| records(task↔event 매핑) | `state.json` | ❌ | 유실 시 이벤트 스냅샷으로 재구성 가능 |
-| syncTokens(증분 pull) | `state.json` | ❌ | 기기별 단일 소비자 — 공유 시 서로 토큰 오염 |
+| 자격증명(clientId·secret·refreshToken) | localStorage | ❌ | secret이 Sync로 새거나 롤백되지 않게 기기 로컬 격리 |
+| records(task↔event 매핑) | localStorage | ❌ | 유실 시 이벤트 스냅샷(`tgs*`)으로 재구성 가능 |
+| syncTokens(증분 pull) | localStorage | ❌ | 기기별 단일 소비자 — 공유 시 서로 토큰 오염 |
 
-> `state.json`은 `.gitignore` 대상이자 Obsidian Sync 대상이 아니다. 기기마다 각자 인증(또는 파일 이관)이 필요하다.
+> localStorage는 볼트 파일이 아니라 Obsidian Sync를 타지 않는다(v0.3.8~). 이전 버전이 쓰던 `<pluginDir>/state.json`은 플러그인 폴더 안이라 "설치된 커뮤니티 플러그인" 동기화가 켜진 기기에서 결국 동기화돼 자격증명이 덮어써졌다 — 지금은 로드 시 1회 이관하고 파일을 지운다. **기기마다 각자 인증이 필요하다.**
 
 ---
 

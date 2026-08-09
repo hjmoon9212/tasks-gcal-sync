@@ -22,10 +22,11 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Build plugin
+      - name: Build & test plugin
         run: |
           npm ci
           npm run build
+          npm test
 
       - name: Create release
         env:

@@ -63,7 +63,7 @@ export class GoogleAuth {
   async authenticateInteractive(): Promise<void> {
     if (!Platform.isDesktopApp) {
       throw new Error(
-        "모바일에서는 대화형 인증을 할 수 없습니다. 데스크탑에서 인증한 뒤 자격증명(state.json)을 이 기기로 옮겨야 합니다."
+        "모바일에서는 대화형 인증을 할 수 없습니다(루프백 서버가 데스크탑 전용). 자격증명은 기기 로컬 localStorage에 있어 파일로 옮길 수도 없습니다 — 데스크탑에서 인증하세요."
       );
     }
     const { clientId, clientSecret } = this.getCreds();

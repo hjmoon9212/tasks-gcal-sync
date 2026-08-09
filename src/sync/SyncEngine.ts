@@ -275,6 +275,21 @@ export class SyncEngine {
   }
 
   /**
+   * 이 볼트가 만든 이벤트인가.
+   *
+   * 매핑키(tgsTaskId)는 볼트 안에서만 유일하다 — 볼트 두 개가 같은 캘린더를 쓰면
+   * (`#gcal/` 라우팅은 태그 한 줄로 그렇게 된다) 남의 볼트 이벤트를 record로 입양하고,
+   * 우리 볼트엔 대응 task가 없으므로 다음 사이클에 "task 없음 → 삭제"로 지워버린다.
+   * tgsVault를 심어만 두고 아무도 읽지 않던 구멍(~0.3.15).
+   *
+   * tgsVault가 없는 옛 이벤트는 통과시킨다 — 다음 push에서 자연 backfill된다.
+   */
+  private isOurs(ev: GCalEvent): boolean {
+    const v = ev.extendedProperties?.private?.tgsVault;
+    return !v || v === this.app.vault.getName();
+  }
+
+  /**
    * GCal 이벤트에 심긴 스냅샷으로 record를 복원한다(구버전 이벤트엔 없으므로 현재 task값 폴백).
    * 기기 간 records 유실 시 "마지막 동기화 상태"를 되살려 잘못된 방향 판정을 막는다.
    */
@@ -365,6 +380,7 @@ export class SyncEngine {
       for (const ev of items) {
         const tid = ev.extendedProperties?.private?.tgsTaskId;
         if (!tid || ev.status === "cancelled") continue;
+        if (!this.isOurs(ev)) continue; // 다른 볼트의 이벤트 — 입양하면 지워버린다
         if (this.state.records[tid]) continue; // 이미 알고 있음
         const rec = this.recordFromEventOnly(ev, cal);
         if (!rec) continue;
@@ -501,7 +517,10 @@ export class SyncEngine {
       if (!target) continue;
       let evs: GCalEvent[];
       try {
-        evs = await this.client.findByTaskId(target.id, t.id);
+        // 다른 볼트의 이벤트는 "중복"이 아니다 — 지우면 남의 일정을 없앤다.
+        evs = (await this.client.findByTaskId(target.id, t.id)).filter((e) =>
+          this.isOurs(e)
+        );
       } catch (e) {
         console.warn("[tasks-gcal-sync] 중복 조회 실패:", t.id, e);
         continue;
@@ -567,7 +586,7 @@ export class SyncEngine {
         continue;
       }
       const tid = ev.extendedProperties?.private?.tgsTaskId;
-      if (tid) byTaskId.set(tid, ev);
+      if (tid && this.isOurs(ev)) byTaskId.set(tid, ev);
     }
     return { byTaskId, cancelledEventIds };
   }
@@ -713,7 +732,10 @@ export class SyncEngine {
         // due 없이 patch하면 addDay(undefined)=NaN 날짜로 GCal 400이 매 sync 반복됨.
         // (예: 템플릿이 due 없이 #task를 만들거나 사용자가 📅를 지운 경우)
         if (!isValidDate(task.due)) {
-          if (holdWrites) {
+          // 다른 파괴적 경로와 같은 3종 가드. 볼트가 뒤처졌거나(holdWrites) 로드 직후이거나
+          // (coldHold) 이번 스캔에서 처음 본 record면(adopted), 📅가 있는 줄이 아직 안
+          // 내려왔을 뿐일 수 있다 — 그 상태로 지우면 남의 기기가 만든 일정을 없앤다.
+          if (holdWrites || coldHold || adopted.has(id)) {
             result.skipped++;
             continue;
           }
@@ -983,7 +1005,9 @@ export class SyncEngine {
       // → records(data.json)가 기기 간 늦게 동기화돼도 중복이 안 생김.
       if (t.id) {
         try {
-          const existing = await this.client.findByTaskId(target.id, t.id);
+          const existing = (
+            await this.client.findByTaskId(target.id, t.id)
+          ).filter((e) => this.isOurs(e));
           if (existing.length > 0) {
             const [keep, ...dupes] = existing;
             // 이벤트에 심긴 스냅샷으로 복원 → 다음 sync에서 어느 쪽이 바뀌었는지 정확 판정.
@@ -1016,7 +1040,9 @@ export class SyncEngine {
 
       let id = t.id;
       if (!id) {
-        id = genId(existingIds);
+        // 후보군에 records의 id도 넣는다. existingIds는 이번 run에 파싱된 task의 🆔뿐이라,
+        // 파일이 아직 안 내려온 기기에서는 records에만 남은 id가 그대로 재발급될 수 있다.
+        id = genId(new Set([...existingIds, ...Object.keys(records)]));
         try {
           await this.writer.ensureId(t, id);
         } catch (e) {

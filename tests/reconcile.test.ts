@@ -34,6 +34,7 @@ const doneEvent = (id: string, done: boolean, updated: string): Ev => ({
   extendedProperties: {
     private: {
       tgsTaskId: id,
+      tgsVault: "vault",
       tgsDue: TODAY,
       tgsStart: TODAY,
       tgsDone: done ? "1" : "0",
@@ -313,6 +314,67 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     await h.engine.run();
     eq(h.calls.removeDue, [], "콜드 스타트: 미일정화 보류");
     eq(h.state.records.A1 !== undefined, true, "콜드 스타트: record 유지");
+  }
+
+  // -- 11) due를 잃은 task: 평상시엔 이벤트를 지운다(400 무한반복 방지, 0.3.5)
+  {
+    const h = harness({
+      tasks: [{ ...task("A1", false), due: undefined }],
+      events: [doneEvent("A1", false, "200")],
+      records: { A1: rec() },
+    });
+    await h.engine.run();
+    eq(h.calls.del, ["ev-A1"], "due 유실: 이벤트 삭제");
+    eq(h.state.records.A1, undefined, "due 유실: record 정리");
+  }
+
+  // -- 12) 같은 상황이라도 콜드 스타트에는 지우지 않는다.
+  //     📅가 있는 줄이 아직 Sync로 안 내려왔을 뿐일 수 있다 — 다른 파괴 경로와 같은 가드.
+  {
+    const h = harness({
+      tasks: [{ ...task("A1", false), due: undefined }],
+      events: [doneEvent("A1", false, "200")],
+      records: { A1: rec() },
+    });
+    (h.engine as any).loadedAt = Date.now();
+    (h.engine as any).pullCycleDone = false;
+    await h.engine.run();
+    eq(h.calls.del, [], "콜드 스타트: due 유실이어도 삭제 보류");
+    eq(h.state.records.A1 !== undefined, true, "콜드 스타트: record 유지");
+  }
+
+  // -- 13) 이번 스캔에서 처음 주운 record(adopted)도 같은 이유로 보류한다
+  {
+    const h = harness({
+      tasks: [{ ...task("A1", false), due: undefined }],
+      events: [doneEvent("A1", false, "200")],
+      records: {}, // 비어 있음 → run()이 rebuildRecords로 입양
+    });
+    await h.engine.run();
+    eq(h.calls.del, [], "입양 직후: due 유실이어도 삭제 보류");
+    eq(h.state.records.A1 !== undefined, true, "입양 직후: record 유지");
+  }
+
+  // -- 14) 다른 볼트가 만든 이벤트는 입양하지도, 지우지도 않는다.
+  //     매핑키(tgsTaskId)는 볼트 안에서만 유일하다 — 같은 캘린더를 공유하면
+  //     남의 이벤트를 record로 삼고 "task 없음 → 삭제"로 지워버린다.
+  {
+    const foreign = doneEvent("Z9", false, "200");
+    foreign.extendedProperties.private.tgsVault = "other-vault";
+    const h = harness({ tasks: [], events: [foreign], records: {} });
+    await h.engine.run({ fullScan: true });
+    eq(h.state.records.Z9, undefined, "다른 볼트 이벤트: 입양 안 함");
+    eq(h.calls.del, [], "다른 볼트 이벤트: 삭제 안 함");
+  }
+
+  // -- 15) tgsVault가 없는 옛 이벤트는 종전대로 입양한다(backfill 전 데이터)
+  {
+    const legacy = doneEvent("Y8", false, "200");
+    delete legacy.extendedProperties.private.tgsVault;
+    const h = harness({ tasks: [], events: [legacy], records: {} });
+    await h.engine.run({ fullScan: true });
+    eq(h.state.records.Y8 !== undefined, true, "tgsVault 없는 옛 이벤트: 입양");
+    eq(h.calls.del, [], "입양 직후 run에서는 지우지 않는다");
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);
