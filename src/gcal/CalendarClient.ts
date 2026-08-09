@@ -8,7 +8,6 @@ export interface GCalEvent {
   summary?: string;
   description?: string;
   colorId?: string | null; // 1~11 (Google 이벤트 색). null=색 제거(기본색 복귀).
-  transparency?: string; // "opaque"=busy(바쁨, 기본) | "transparent"=free(한가함)
   status?: string; // "confirmed" | "cancelled"
   start?: { date?: string; dateTime?: string; timeZone?: string };
   end?: { date?: string; dateTime?: string; timeZone?: string };

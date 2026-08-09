@@ -313,8 +313,8 @@ function mergePlan(i: DecideInput, local: LocalView): MergePlan {
     conflicts,
     pushNeeded,
     // GCal이 이긴 변경만 있어 push할 게 없더라도 **이벤트의 표현은 다시 찍는다.**
-    // free(한가함)로 완료하면 노트는 [x]가 되는데 이벤트 제목은 ☐, 색은 기본색 그대로여서
-    // 캘린더에서 미완료로 보였다(0.3.17). 단 사용자가 GCal에서 실제로 뭔가 바꾼
+    // 캘린더에서 완료색으로 바꾸면 노트는 [x]가 되는데 이벤트 제목은 ☐ 그대로여서
+    // 모바일에서는 미완료로 보였다(0.3.17). 단 사용자가 GCal에서 실제로 뭔가 바꾼
     // 경우로 한정한다 — staleUncheck는 원격이 안 바뀐 상태라, 거기서 원격에 쓰기
     // 시작하면 "확신 없으면 원격을 안 건드린다"는 0.3.13의 보장이 무너진다.
     normalizeIfPulled: !pushNeeded && gcalChanged,

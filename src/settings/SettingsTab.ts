@@ -255,21 +255,9 @@ export class SettingsTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("free(한가함)로 완료")
-      .setDesc(
-        "캘린더에서 이벤트를 '한가함(free)'으로 바꾸면 완료 처리(다시 '바쁨'으로 되돌리면 완료 취소). 색과 함께 OR로 동작 — 아이폰 기본 캘린더처럼 색은 못 바꿔도 표시 형식(바쁨/한가함)은 바꿀 수 있는 환경용."
-      )
-      .addToggle((t) =>
-        t.setValue(s.doneOnFree).onChange(async (v) => {
-          s.doneOnFree = v;
-          await this.plugin.saveAll();
-        })
-      );
-
-    new Setting(containerEl)
       .setName("완료 색")
       .setDesc(
-        "캘린더 앱에서 이벤트를 이 색으로 바꾸면 Obsidian에서 완료 처리(되돌리면 완료 취소). '끄기' 선택 시 제목 #done 방식으로 폴백."
+        "캘린더 앱에서 이벤트를 이 색으로 바꾸면 Obsidian에서 완료 처리(되돌리면 완료 취소). 이게 GCal 쪽 완료 제스처다. '끄기' 선택 시 제목 #done 방식으로 폴백."
       )
       .addDropdown((d) => {
         d.addOption("", "끄기 (제목 #done)");
@@ -310,14 +298,14 @@ export class SettingsTab extends PluginSettingTab {
     // 완료 색·free를 둘 다 꺼야 쓰이는 폴백이라 평소엔 접어 둔다.
     const doneBox = this.collapsible(
       containerEl,
-      "완료 색과 free를 둘 다 껐을 때만 쓰이는 폴백 설정.",
+      "완료 색을 껐을 때만 쓰이는 폴백 설정.",
       this.showDoneDetails,
       (v) => (this.showDoneDetails = v)
     );
 
     new Setting(doneBox)
       .setName("완료 표시 태그 (#done 폴백용)")
-      .setDesc("완료 색이 '끄기'이고 free 완료도 꺼져 있을 때 — 완료 task 제목 앞에 붙는 태그.")
+      .setDesc("완료 색이 '끄기'일 때 — 완료 task 제목 앞에 붙는 태그.")
       .addText((t) =>
         t.setValue(s.doneTag).onChange(async (v) => {
           s.doneTag = v.trim() || "#done";

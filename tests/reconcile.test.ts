@@ -27,7 +27,6 @@ const doneEvent = (id: string, done: boolean, updated: string): Ev => ({
   updated,
   status: "confirmed",
   colorId: done ? "8" : undefined,
-  transparency: done ? "transparent" : "opaque",
   summary: (done ? "☑️ " : "☐ ") + "샘플",
   start: { date: TODAY },
   end: { date: "2026-08-07" },
@@ -379,23 +378,23 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     eq(h.calls.del, [], "입양 직후 run에서는 지우지 않는다");
   }
 
-  // -- 16) GCal에서 free(한가함)로 완료 → 노트를 [x]로 만들고, **이벤트 표현도 정규화**한다.
-  //     예전엔 노트만 완료되고 이벤트는 ☐·기본색 그대로라 캘린더에서 미완료로 보였다.
+  // -- 16) GCal에서 완료색으로 바꿈 → 노트를 [x]로 만들고, **이벤트 표현도 정규화**한다.
+  //     예전엔 노트만 완료되고 이벤트 제목은 ☐ 그대로라 모바일에서 미완료로 보였다.
   {
     const ev = doneEvent("A1", false, "300");
-    ev.transparency = "transparent"; // free로만 완료 표시(색·제목은 미완료 그대로)
+    ev.colorId = "8"; // 색만 완료로 바꿈(제목은 ☐ 그대로)
     const h = harness({
       tasks: [task("A1", false)],
       events: [ev],
       records: { A1: rec({ gcalUpdated: "100" }) },
     });
     await h.engine.run();
-    eq(h.calls.complete, ["A1"], "free 완료: 노트를 [x]로");
-    eq(h.calls.patch.length, 1, "free 완료: 이벤트 표현 정규화 push");
+    eq(h.calls.complete, ["A1"], "색 완료: 노트를 [x]로");
+    eq(h.calls.patch.length, 1, "색 완료: 이벤트 표현 정규화 push");
     const patch = h.calls.patch[0].patch;
     eq(patch.summary, "☑️ 샘플", "정규화: 제목 접두사가 완료로");
     eq(patch.colorId, "8", "정규화: 완료색");
-    eq(patch.transparency, "transparent", "정규화: free 유지");
+    eq(patch.transparency, undefined, "정규화: 바쁨/한가함은 건드리지 않는다");
     eq(patch.start, undefined, "정규화: 날짜는 건드리지 않는다");
     eq(patch.end, undefined, "정규화: 날짜는 건드리지 않는다");
     eq(h.state.records.A1.done, true, "정규화: 스냅샷 완료");
@@ -421,7 +420,7 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     const patch = h.calls.patch[0].patch;
     eq(patch.summary, "☐ 샘플", "해제: 제목 접두사 미완료로");
     eq(patch.colorId, null, "해제: 완료색 제거");
-    eq(patch.transparency, "opaque", "해제: 바쁨으로 복귀");
+    eq(patch.transparency, undefined, "해제: 바쁨/한가함은 건드리지 않는다");
     eq(second.retryAfterMs, undefined, "push했으면 재시도 예약 없음");
   }
 

@@ -6,8 +6,8 @@ Obsidian Tasks(📅 due date가 있는 `#task`)를 Google Calendar **종일 이�
 - 멀티볼트: 볼트마다 설치 + 볼트별로 다른 구글 캘린더에 매핑 → GCal 한 화면이 통합 뷰
 - 서버 없음. Obsidian이 열려 있을 때 동기화. 자격증명은 기기 로컬 **localStorage**에 저장(v0.3.8~, Obsidian Sync를 타지 않음).
 
-## 현재 상태 (v0.3.18)
-- ✅ **Obsidian → GCal**: due task를 종일 이벤트로 생성/갱신, 완료=색상/free/접두사(`#done` 폴백), 삭제·미일정화 반영.
+## 현재 상태 (v0.3.19)
+- ✅ **Obsidian → GCal**: due task를 종일 이벤트로 생성/갱신, 완료=색상/제목 접두사(`#done` 폴백), 삭제·미일정화 반영.
 - ✅ **GCal → Obsidian**: `syncToken` 증분 pull로 날짜 이동/완료/삭제 감지. **항상 양방향**이며 충돌은 필드 단위로 병합한다(단방향 옵션은 0.3.14에서 제거).
 - ✅ **멀티캘린더 라우팅**: `#gcal/<이름>` 태그로 task별 대상 캘린더 지정, 볼트별 기본 캘린더.
 - ✅ **멀티기기 견고화**: 자격증명·records·syncTokens를 기기 로컬 localStorage에 격리 + GCal 이벤트에 마지막 push 스냅샷 임베드 → records는 캘린더에서 재구성 가능한 캐시다.
@@ -56,7 +56,8 @@ Obsidian Tasks(📅 due date가 있는 `#task`)를 Google Calendar **종일 이�
 
 ## 동작 규칙
 - 대상: `#task` + 📅 due 가 있는 task. **새 이벤트 생성 범위**: 오늘 이후 due(+ `includeOverdue` 시 미완료 overdue). 이미 record가 있는 항목은 범위와 무관하게 계속 reconcile.
-- 완료 표시(OR 결합): **색상**(`doneColorId`, 기본 8) · **free/한가함**(`doneOnFree`, 기본 on) · 제목 접두사(미완료 ☐ / 완료 ☑️) · `#done` 폴백.
+- 완료 표시: **색상**(`doneColorId`, 기본 8=회색)이 GCal 쪽 완료 제스처다. 제목 접두사(미완료 ☐ / 완료 ☑️)는 표시용이고, 색을 끄면 접두사·`#done`이 판정에 쓰인다.
+  > free(한가함)를 완료 신호로 쓰던 방식은 **0.3.19에서 제거**했다. 색보다 먼저 평가돼 두 신호가 어긋나면 free가 이겼고, 종일 이벤트의 바쁨/한가함은 클라이언트마다 기본값이 달라 오탐이 났다 — 오탐의 결과가 노트에 ✅를 쓰는 것(반복이면 다음 회차까지 생성)이라 비용이 컸다. 이제 플러그인은 `transparency`를 읽지도 쓰지도 않는다.
 - 🆔 없는 task는 첫 동기화 때 6자리 ID를 자동 부여(Tasks 표준 필드, Morgen 비의존). `findByTaskId`로 기기 간 중복 생성 방지(adoption).
 - task의 due 변경 → 이벤트 날짜 갱신. 🛫 start가 있으면 start~due 다중일. task 삭제/due 제거 → 이벤트 삭제.
 - 양방향: GCal에서 날짜 이동/완료/삭제 시 필드(due/start/done/title) 단위로 병합. 같은 필드가 양쪽에서 바뀐 경우에만 GCal을 채택하고 warn을 남긴다.

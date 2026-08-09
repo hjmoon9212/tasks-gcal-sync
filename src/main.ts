@@ -18,6 +18,7 @@ interface PluginData {
 interface LegacySettings {
   syncPreset?: string; // 타이밍 프리셋(≤0.3.13) — 0.3.14에서 제거, 값은 직접 설정만
   pushOnly?: boolean; // 단방향 모드(≤0.3.13) — 0.3.14에서 제거, 항상 양방향
+  doneOnFree?: boolean; // free(한가함)=완료 제스처(0.3.0~0.3.18) — 0.3.19에서 제거
   syncOnWindowSwitch?: boolean; // 창 전환 트리거(0.3.11~0.3.12) — 0.3.13에서 제거
   syncOnBlur?: boolean;
   syncOnFocus?: boolean;
@@ -372,6 +373,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
    */
   private migrateTiming(): void {
     const dead: (keyof LegacySettings)[] = [
+      "doneOnFree",
       "skipPullOnEdit",
       "syncOnBlur",
       "syncOnFocus",

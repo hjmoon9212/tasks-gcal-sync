@@ -37,7 +37,6 @@ export interface PluginSettings {
   donePrefix: string; // 완료 task 이벤트 제목 접두사(예: ☑️). "" = 없음
   recurringPrefix: string; // 🔁 반복(🔁) task 이벤트 제목 아이콘(예: 🔁). "" = 표시 안 함
   doneColorId: string; // 완료 색(1~11). 이 색이면 완료로 간주. "" = 색 완료 비활성(제목 #done 폴백)
-  doneOnFree: boolean; // 이벤트를 free(한가함, transparency=transparent)로 바꾸면 완료로 간주(색과 OR). 아이폰 기본앱 대응.
   deepLink: "off" | "note" | "line"; // 이벤트 설명에 Obsidian 딥링크 추가. line은 Advanced URI 플러그인 필요
   includeOverdue: boolean; // overdue(오늘 이전 미완료)도 동기화
 
@@ -68,7 +67,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   donePrefix: "☑️",
   recurringPrefix: "🔁",
   doneColorId: "8",
-  doneOnFree: true,
   deepLink: "note",
   includeOverdue: false,
   syncOnStartup: true,

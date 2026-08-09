@@ -113,21 +113,18 @@ export class SyncEngine {
     return t.checked ? this.settings.doneColorId : null;
   }
 
-  /** 완료 상태에 대응하는 transparency. free 완료 활성 시: 완료=transparent(한가함), 미완료=opaque(바쁨). 비활성 시 undefined(안 건드림). */
-  private doneTransparency(t: VaultTask): string | undefined {
-    if (!this.settings.doneOnFree) return undefined;
-    return t.checked ? "transparent" : "opaque";
-  }
-
   /**
-   * GCal 이벤트가 "완료"인지 판정. 신호는 OR로 결합:
-   *  1) free(한가함, transparency=transparent) — 아이폰 기본앱에서 색 대신 쓰는 완료 제스처
-   *  2) 완료색(doneColorId) — 설정 시
-   *  3) 위 둘 다 비활성일 때만 제목 접두사(☑️ / #done) 폴백
+   * GCal 이벤트가 "완료"인지 판정.
+   *  1) 완료색(doneColorId) — 설정돼 있으면 이것만 본다
+   *  2) 색 완료를 껐을 때만 제목 접두사(☑️ / #done) 폴백
+   *
+   * free(한가함)를 완료 신호로 쓰던 방식은 0.3.19에서 뺐다. 아이폰 기본 캘린더가 색을
+   * 못 바꿔서 넣은 우회로였는데, 동기화 판정에서 비용이 더 컸다 — free가 색보다 먼저
+   * 평가돼 두 신호가 어긋나면 free가 이겼고, transparency는 종일 이벤트에서 클라이언트마다
+   * 기본값이 달라 오탐이 났다. **오탐의 결과가 노트에 ✅를 쓰는 것**(반복이면 다음 회차까지
+   * 생성)이라 되돌리는 비용도 컸다.
    */
   private isGcalDone(ev: GCalEvent): boolean {
-    if (this.settings.doneOnFree && ev.transparency === "transparent")
-      return true;
     if (this.settings.doneColorId)
       return ev.colorId === this.settings.doneColorId;
     const s = ev.summary ?? "";
@@ -232,17 +229,15 @@ export class SyncEngine {
     };
     const color = this.doneColor(t);
     if (color !== undefined) patch.colorId = color; // 완료=완료색, 미완료=null(기본색 복귀)
-    const transp = this.doneTransparency(t);
-    if (transp !== undefined) patch.transparency = transp; // 완료=free, 미완료=busy
     return patch;
   }
 
   /**
    * 날짜는 건드리지 않고 표현만 다시 찍는다.
    *
-   * GCal에서 free(한가함)로 완료하면 pull이 노트를 [x]로 만들지만, 그 완료가 이벤트의
-   * 제목 접두사(☐→☑️)나 완료색에는 반영되지 않았다 — "GCal이 이긴 필드는 되돌려 쓰지
-   * 않는다"는 규칙에 표현 갱신까지 딸려 들어갔기 때문. 캘린더에서는 여전히 미완료로 보였다.
+   * GCal에서 완료색으로 바꾸면 pull이 노트를 [x]로 만들지만, 그 완료가 이벤트의 제목
+   * 접두사(☐→☑️)에는 반영되지 않았다 — "GCal이 이긴 필드는 되돌려 쓰지 않는다"는 규칙에
+   * 표현 갱신까지 딸려 들어갔기 때문. 제목으로 완료를 보는 모바일에서는 미완료로 보였다.
    * 날짜를 안 보내므로 GCal이 방금 정한 일정을 되돌릴 위험이 없다.
    */
   private pushPresentation(
@@ -523,8 +518,6 @@ export class SyncEngine {
     };
     const color = this.doneColor(t);
     if (color !== undefined) ev.colorId = color;
-    const transp = this.doneTransparency(t);
-    if (transp !== undefined) ev.transparency = transp;
     return ev;
   }
 
