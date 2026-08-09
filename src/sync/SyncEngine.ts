@@ -58,6 +58,11 @@ interface CalPull {
 const COLD_START_MS = 60_000;
 /** done 회귀를 처음 본 뒤 실제로 push하기까지 최소 대기(ms). 그 사이 Sync가 정착한다. */
 const UNCHECK_HOLD_MS = 60_000;
+/**
+ * 캘린더 전수 스캔(rebuildRecords)의 자동 실행 간격.
+ * records 가 비었으면 간격과 무관하게 즉시 돈다 — 그때는 스캔이 유일한 복구 경로다.
+ */
+const FULL_SCAN_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /** vaultBehind가 계속 참일 때 보류를 포기하고 통과시키는 상한. */
 const BEHIND_MAX_MS = 10 * 60_000;
 const BEHIND_MAX_RUNS = 5;
@@ -371,6 +376,7 @@ export class SyncEngine {
     const adopted = new Set<string>();
     const timeMin = isoDaysAgo(lookbackDays);
     const timeMax = isoDaysAgo(-lookaheadDays);
+    let complete = true;
     for (const cal of this.knownCalendarIds()) {
       let items: GCalEvent[];
       try {
@@ -383,6 +389,7 @@ export class SyncEngine {
         }));
       } catch (e) {
         console.warn("[tasks-gcal-sync] 재구성 스캔 실패:", cal, e);
+        complete = false; // 한 캘린더라도 못 읽었으면 "훑었다" 고 기록하지 않는다
         continue;
       }
       for (const ev of items) {
@@ -396,6 +403,7 @@ export class SyncEngine {
         adopted.add(tid);
       }
     }
+    if (complete) this.state.lastFullScanAt = Date.now();
     if (adopted.size) {
       console.log(`[tasks-gcal-sync] records 재구성: ${adopted.size}건 복원`);
     }
@@ -845,8 +853,14 @@ export class SyncEngine {
     // ---- 0) records 재구성(캐시 복구) ----
     // 캐시가 비었으면 무조건, 그 외엔 시작 시 1회. 이걸 해야 record를 잃은 이벤트가
     // 조정 루프의 시야에 들어와 "task 없음 → 삭제"로 정리된다.
+    // 전수 스캔은 캘린더마다 ±2년치를 페이지네이션한다. 캐시가 멀쩡한 평상시엔 낭비라
+    // **하루 1회**로 제한한다. 목적은 고아 이벤트 회수이지 매번의 정합성 확인이 아니다.
+    // (캐시가 비었으면 간격과 무관하게 돈다 — 그때는 스캔이 유일한 복구 경로다)
+    const cacheEmpty = Object.keys(records).length === 0;
+    const scanDue =
+      Date.now() - (this.state.lastFullScanAt ?? 0) > FULL_SCAN_INTERVAL_MS;
     const adopted =
-      opts.fullScan || Object.keys(records).length === 0
+      opts.fullScan || cacheEmpty || scanDue
         ? await this.rebuildRecords()
         : new Set<string>();
 

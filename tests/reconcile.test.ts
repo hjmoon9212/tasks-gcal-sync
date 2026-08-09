@@ -75,6 +75,8 @@ function harness(opts: {
     insert: [] as any[],
     del: [] as string[],
     removeDue: [] as string[],
+    /** 전수 스캔(rebuildRecords) 호출 — timeMax 를 넘기는 건 이쪽뿐이다. */
+    fullScan: 0,
   };
   const settings: PluginSettings = {
     ...DEFAULT_SETTINGS,
@@ -86,7 +88,8 @@ function harness(opts: {
   const app: any = { vault: { getName: () => "vault" }, internalPlugins: {} };
   const repo: any = { getTasks: async () => opts.tasks };
   const client: any = {
-    listEvents: async () => {
+    listEvents: async (_c: string, params: any) => {
+      if (params?.timeMax !== undefined) calls.fullScan++;
       if (opts.pullFails) throw new Error("pull 실패");
       return { items: opts.events, nextSyncToken: "tok" };
     },
@@ -434,6 +437,42 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
       false,
       "해제 push엔 완료일 키를 안 보낸다"
     );
+  }
+
+  // -- 20) 캘린더 전수 스캔은 하루 1회. 매 실행마다 ±2년치를 훑지 않는다.
+  {
+    const h = harness({
+      tasks: [task("A1", false)],
+      events: [doneEvent("A1", false, "200")],
+      records: { A1: rec({ gcalUpdated: "200" }) },
+    });
+    h.state.lastFullScanAt = Date.now() - 1000; // 방금 훑었음
+    await h.engine.run();
+    eq(h.calls.fullScan, 0, "최근에 훑었으면 전수 스캔 안 함");
+
+    h.state.lastFullScanAt = Date.now() - 25 * 60 * 60 * 1000; // 하루 지남
+    await h.engine.run();
+    eq(h.calls.fullScan > 0, true, "하루 지나면 다시 훑는다");
+  }
+
+  // -- 21) 캐시가 비었으면 간격과 무관하게 즉시 훑는다(유일한 복구 경로)
+  {
+    const h = harness({ tasks: [], events: [], records: {} });
+    h.state.lastFullScanAt = Date.now();
+    await h.engine.run();
+    eq(h.calls.fullScan > 0, true, "records 가 비면 즉시 전수 스캔");
+  }
+
+  // -- 22) 수동 명령(fullScan)은 간격을 무시한다
+  {
+    const h = harness({
+      tasks: [task("A1", false)],
+      events: [doneEvent("A1", false, "200")],
+      records: { A1: rec({ gcalUpdated: "200" }) },
+    });
+    h.state.lastFullScanAt = Date.now();
+    await h.engine.run({ fullScan: true });
+    eq(h.calls.fullScan > 0, true, "명시적 요청은 항상 훑는다");
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

@@ -24,6 +24,11 @@ export interface SyncRecord {
 export interface PersistedState {
   records: Record<string, SyncRecord>;
   syncTokens: Record<string, string>; // calendarId → GCal 증분 동기화 토큰
+  /**
+   * 마지막으로 캘린더 전수 스캔(rebuildRecords)을 **완주한** 시각(ms).
+   * 이 스캔은 캘린더마다 ±2년치를 페이지네이션하므로 매 실행마다 돌릴 이유가 없다.
+   */
+  lastFullScanAt?: number;
 }
 
 export function emptyState(): PersistedState {

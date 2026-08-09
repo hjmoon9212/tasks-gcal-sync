@@ -42,6 +42,7 @@ const STATE_LS_KEY = "tasks-gcal-sync:state";
 interface StateFile {
   records: PersistedState["records"];
   syncTokens: PersistedState["syncTokens"];
+  lastFullScanAt?: PersistedState["lastFullScanAt"];
   clientId?: string;
   clientSecret?: string;
   refreshToken?: string | null;
@@ -106,6 +107,11 @@ export default class TasksGcalSyncPlugin extends Plugin {
       callback: () => this.backfillIds(),
     });
     this.addCommand({
+      id: "rebuild-records",
+      name: "캘린더 전수 스캔 (매핑 재구성 · 고아 이벤트 회수)",
+      callback: () => this.runSync(false, { fullScan: true, force: true }),
+    });
+    this.addCommand({
       id: "cleanup-duplicates",
       name: "중복 이벤트 정리 (같은 task의 GCal 중복 삭제)",
       callback: () => this.cleanupDuplicates(),
@@ -129,9 +135,9 @@ export default class TasksGcalSyncPlugin extends Plugin {
       this.setupInterval();
       if (this.settings.syncOnStartup && this.auth.isAuthenticated()) {
         // 메타데이터 캐시가 준비될 시간을 약간 둠.
-        // 시작 시 1회는 캘린더 전체를 훑어 records를 재구성한다 → record를 잃은
-        // 이벤트(고아)가 시야에 들어와 다음 사이클에 정리된다.
-        window.setTimeout(() => this.runSync(true, { fullScan: true }), 3000);
+        // 전수 스캔은 엔진이 하루 1회로 알아서 판단한다(캐시가 비었으면 즉시).
+        // 예전엔 실행할 때마다 캘린더 ±2년치를 훑었다.
+        window.setTimeout(() => this.runSync(true), 3000);
       }
     });
   }
@@ -316,7 +322,11 @@ export default class TasksGcalSyncPlugin extends Plugin {
     // 지켜야 하는 건 자격증명뿐 — 우선순위: localStorage > 구 state.json > data.json.
     const local = this.loadLocalState();
     this.state = local
-      ? { records: local.records ?? {}, syncTokens: local.syncTokens ?? {} }
+      ? {
+          records: local.records ?? {},
+          syncTokens: local.syncTokens ?? {},
+          lastFullScanAt: local.lastFullScanAt,
+        }
       : data?.state ?? emptyState(); // 아주 옛 버전: data.json 내장 state
     const legacy = await this.loadLegacyStateFile();
 
@@ -397,6 +407,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
     const sf: StateFile = {
       records: this.state.records,
       syncTokens: this.state.syncTokens,
+      lastFullScanAt: this.state.lastFullScanAt,
       clientId: this.settings.clientId,
       clientSecret: this.settings.clientSecret,
       refreshToken: this.settings.refreshToken,
