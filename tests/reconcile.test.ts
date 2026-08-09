@@ -475,6 +475,62 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     eq(h.calls.fullScan > 0, true, "명시적 요청은 항상 훑는다");
   }
 
+  // -- 23) 이벤트 설명의 **사용자 메모를 보존**한다(v0.4.3).
+  //     예전엔 매 push 마다 설명을 우리 블록으로 통째로 갈아치워, GCal 에 적어 둔
+  //     메모가 사라졌다.
+  {
+    const ev = doneEvent("A1", false, "200");
+    ev.description = `회의실 3층
+준비물: 노트북
+📁 vault
+🆔 A1`;
+    const h = harness({
+      tasks: [task("A1", true)],
+      events: [ev],
+      records: { A1: rec({ gcalUpdated: "200" }) },
+    });
+    await h.engine.run();
+    const d: string = h.calls.patch[0].patch.description;
+    eq(d.startsWith("회의실 3층"), true, "사용자 메모 보존");
+    eq(d.includes("준비물: 노트북"), true, "여러 줄 메모도 보존");
+    eq(d.includes("🆔 A1"), true, "우리 블록도 다시 찍힌다");
+    eq((d.match(/🆔 A1/g) ?? []).length, 1, "구버전 블록을 걷어내 중복되지 않는다");
+  }
+
+  // -- 24) 마커가 이미 있으면 그 아래만 갈아친다
+  {
+    const ev = doneEvent("A1", false, "200");
+    ev.description = `메모
+
+— tasks-gcal-sync —
+📁 vault
+🆔 A1
+🔗 old-link`;
+    const h = harness({
+      tasks: [task("A1", true)],
+      events: [ev],
+      records: { A1: rec({ gcalUpdated: "200" }) },
+    });
+    await h.engine.run();
+    const d: string = h.calls.patch[0].patch.description;
+    eq(d.startsWith("메모"), true, "마커 위는 그대로");
+    eq(d.includes("old-link"), false, "마커 아래는 새로 씀");
+  }
+
+  // -- 25) 이벤트를 손에 못 쥔 run 은 description 을 아예 안 보낸다.
+  //     현재 값을 모르는 채 쓰면 사용자 메모를 날린다 — patch 는 키 단위 병합이라
+  //     키를 빼면 이벤트의 설명이 그대로 남는다.
+  {
+    const h = harness({
+      tasks: [task("A1", false, "2026-08-11")],
+      events: [],
+      records: { A1: rec({ gcalUpdated: "200" }) },
+    });
+    await h.engine.run();
+    eq(h.calls.patch.length, 1, "날짜 변경은 push 된다");
+    eq("description" in h.calls.patch[0].patch, false, "설명을 모르면 그 키를 안 보낸다");
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   if (fail > 0) process.exit(1);
 })();

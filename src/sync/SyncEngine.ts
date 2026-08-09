@@ -154,11 +154,42 @@ export class SyncEngine {
     return `obsidian://open?vault=${vault}&file=${fp}`;
   }
 
-  /** GCal 이벤트 노트(설명): 볼트 이름 + task ID (+ 딥링크). */
-  private noteText(id: string, t?: VaultTask): string {
-    const base = `📁 ${this.app.vault.getName()}\n🆔 ${id}`;
+  /** 우리가 관리하는 설명 블록의 시작 표시. 이 줄부터 끝까지가 플러그인 영역이다. */
+  private static readonly NOTE_MARKER = "— tasks-gcal-sync —";
+
+  /** 우리 블록: 볼트 이름 + task ID (+ 딥링크). */
+  private noteBlock(id: string, t?: VaultTask): string {
+    const base = `${SyncEngine.NOTE_MARKER}\n📁 ${this.app.vault.getName()}\n🆔 ${id}`;
     const link = t ? this.deepLink(t) : null;
     return link ? `${base}\n🔗 ${link}` : base;
+  }
+
+  /**
+   * 기존 설명에서 **사용자가 쓴 부분만** 남긴다.
+   *
+   * 예전에는 설명을 통째로 우리 블록으로 갈아치웠다 — GCal 이벤트에 적어 둔 메모가
+   * 다음 push 마다 사라졌다. 이제 우리 영역은 마커 아래로 한정한다.
+   * 마커가 없는 구버전 이벤트는 **끝에 붙은 📁/🆔/🔗 줄만** 걷어낸다(그 시절 설명은
+   * 그 줄들이 전부였다).
+   */
+  private userDescription(prev: string): string {
+    const lines = prev.split("\n");
+    const i = lines.findIndex((l) => l.trim() === SyncEngine.NOTE_MARKER);
+    if (i >= 0) return lines.slice(0, i).join("\n").trimEnd();
+    let end = lines.length;
+    while (end > 0) {
+      const t = lines[end - 1].trim();
+      if (t === "" || /^(📁|🆔|🔗)/u.test(t)) end--;
+      else break;
+    }
+    return lines.slice(0, end).join("\n").trimEnd();
+  }
+
+  /** 사용자 텍스트를 보존한 채 우리 블록만 갱신한 설명. */
+  private mergeDescription(prev: string, id: string, t?: VaultTask): string {
+    const user = this.userDescription(prev);
+    const block = this.noteBlock(id, t);
+    return user ? `${user}\n\n${block}` : block;
   }
 
   /** 이벤트 시작일: 🛫 start가 있고 due보다 같거나 앞이면 start, 아니면 due. (다중일 블록 시작) */
@@ -190,13 +221,20 @@ export class SyncEngine {
    * 날짜를 뺀 "표현" patch — 제목(체크박스·반복 아이콘) · 설명 · 완료색 · free · 스냅샷.
    * pushUpdate와 아래 pushPresentation이 공유한다.
    */
-  private presentationPatch(id: string, t: VaultTask): Partial<GCalEvent> {
+  private presentationPatch(
+    id: string,
+    t: VaultTask,
+    ev?: GCalEvent
+  ): Partial<GCalEvent> {
     const patch: Partial<GCalEvent> = {
       summary: this.summary(t),
-      description: this.noteText(id, t),
       // 마지막 push 스냅샷을 이벤트에 갱신 기록(기기 간 상태 복원용).
       extendedProperties: { private: this.privateProps(id, t) },
     };
+    // **현재 설명을 모르면 아예 안 보낸다.** patch 는 키 단위 병합이라 이 키를 빼면
+    // 이벤트의 설명이 그대로 남는다 — 사용자가 적어 둔 메모를 날리느니 우리 블록이
+    // 한 사이클 낡는 편이 낫다. 다음에 이벤트를 손에 쥐면 갱신된다.
+    if (ev) patch.description = this.mergeDescription(ev.description ?? "", id, t);
     const color = this.doneColor(t);
     if (color !== undefined) patch.colorId = color; // 완료=완료색, 미완료=null(기본색 복귀)
     return patch;
@@ -213,12 +251,13 @@ export class SyncEngine {
   private pushPresentation(
     rec: { calendarId: string; eventId: string },
     task: VaultTask,
-    id: string
+    id: string,
+    ev?: GCalEvent
   ): Promise<GCalEvent> {
     return this.client.patchEvent(
       rec.calendarId,
       rec.eventId,
-      this.presentationPatch(id, task)
+      this.presentationPatch(id, task, ev)
     );
   }
 
@@ -226,17 +265,18 @@ export class SyncEngine {
     rec: { calendarId: string; eventId: string; due: string; start?: string },
     task: VaultTask,
     id: string,
-    doneOverride?: boolean
+    doneOverride?: boolean,
+    ev?: GCalEvent
   ): Promise<GCalEvent> {
     // done 회귀를 보류한 채 다른 필드(날짜·제목)만 올리는 경우 — 완료 상태는 기존 값으로
     // 고정한다. 안 그러면 제목 push에 미완료가 딸려가 보류가 무의미해진다.
     const t = doneOverride === undefined ? task : { ...task, checked: doneOverride };
-    const patch = this.presentationPatch(id, t);
     const startDate = this.spanStart(task);
     const dateChanged =
       task.due !== rec.due || startDate !== (rec.start ?? rec.due);
+    let cur: GCalEvent | undefined = ev;
+    let dates: Partial<GCalEvent> | undefined;
     if (dateChanged) {
-      let cur: GCalEvent | undefined;
       try {
         cur = await this.client.getEvent(rec.calendarId, rec.eventId);
       } catch (e) {
@@ -248,19 +288,26 @@ export class SyncEngine {
       if (cur?.start?.dateTime && cur?.end?.dateTime) {
         const oldDate = cur.start.dateTime.slice(0, 10);
         const delta = daysBetween(oldDate, task.due!);
-        patch.start = {
-          dateTime: shiftDateTime(cur.start.dateTime, delta),
-          timeZone: cur.start.timeZone,
-        };
-        patch.end = {
-          dateTime: shiftDateTime(cur.end.dateTime, delta),
-          timeZone: cur.end.timeZone,
+        dates = {
+          start: {
+            dateTime: shiftDateTime(cur.start.dateTime, delta),
+            timeZone: cur.start.timeZone,
+          },
+          end: {
+            dateTime: shiftDateTime(cur.end.dateTime, delta),
+            timeZone: cur.end.timeZone,
+          },
         };
       } else {
-        patch.start = { date: startDate };
-        patch.end = { date: addDay(task.due!) };
+        dates = {
+          start: { date: startDate },
+          end: { date: addDay(task.due!) },
+        };
       }
     }
+    // 설명 병합은 현재 이벤트를 알아야 하므로 getEvent 뒤에 만든다.
+    const patch = this.presentationPatch(id, t, cur);
+    if (dates) Object.assign(patch, dates);
     return this.client.patchEvent(rec.calendarId, rec.eventId, patch);
   }
 
@@ -487,7 +534,7 @@ export class SyncEngine {
   private buildEvent(t: VaultTask, id: string): GCalEvent {
     const ev: GCalEvent = {
       summary: this.summary(t),
-      description: this.noteText(id, t),
+      description: this.noteBlock(id, t),
       start: { date: this.spanStart(t) }, // 🛫 start가 있으면 거기서부터(다중일)
       end: { date: addDay(t.due!) },
       extendedProperties: { private: this.privateProps(id, t) },
@@ -504,8 +551,10 @@ export class SyncEngine {
     for (const id of Object.keys(this.state.records)) {
       const rec = this.state.records[id];
       try {
+        // 설명을 다시 쓰는 명령이므로 현재 값을 읽어 사용자 텍스트를 보존한다.
+        const cur = await this.client.getEvent(rec.calendarId, rec.eventId);
         await this.client.patchEvent(rec.calendarId, rec.eventId, {
-          description: this.noteText(id),
+          description: this.mergeDescription(cur.description ?? "", id),
         });
         ok++;
       } catch (e) {
@@ -722,7 +771,7 @@ export class SyncEngine {
 
       const target = resolveCalendar(task.tags, this.settings);
       if (!plan.pushNeeded) {
-        const updatedEv = await this.pushPresentation(rec, pushTask, id);
+        const updatedEv = await this.pushPresentation(rec, pushTask, id, c.ev);
         rec.gcalUpdated = updatedEv.updated;
         c.result.updated++;
       } else if (target && target.id !== rec.calendarId) {
@@ -745,7 +794,8 @@ export class SyncEngine {
           rec,
           task,
           id,
-          plan.holdDone ? rec.done : undefined
+          plan.holdDone ? rec.done : undefined,
+          c.ev
         );
         rec.gcalUpdated = updatedEv.updated;
         c.result.updated++;
