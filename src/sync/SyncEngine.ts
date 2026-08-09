@@ -4,7 +4,6 @@ import { PersistedState, SyncRecord } from "./StateStore";
 import { TaskRepository, VaultTask } from "../data/TaskRepository";
 import { CalendarClient, GCalEvent } from "../gcal/CalendarClient";
 import { TaskWriter } from "../write/TaskWriter";
-import { CompletionHandler } from "../write/CompletionHandler";
 import {
   decideReconcile,
   Field,
@@ -78,7 +77,6 @@ export class SyncEngine {
     private repo: TaskRepository,
     private client: CalendarClient,
     private writer: TaskWriter,
-    private completion: CompletionHandler,
     private saveState: () => Promise<void>
   ) {}
 
@@ -111,26 +109,6 @@ export class SyncEngine {
   private doneColor(t: VaultTask): string | null | undefined {
     if (!this.settings.doneColorId) return undefined;
     return t.checked ? this.settings.doneColorId : null;
-  }
-
-  /**
-   * GCal 이벤트가 "완료"인지 판정.
-   *  1) 완료색(doneColorId) — 설정돼 있으면 이것만 본다
-   *  2) 색 완료를 껐을 때만 제목 접두사(☑️ / #done) 폴백
-   *
-   * free(한가함)를 완료 신호로 쓰던 방식은 0.3.19에서 뺐다. 아이폰 기본 캘린더가 색을
-   * 못 바꿔서 넣은 우회로였는데, 동기화 판정에서 비용이 더 컸다 — free가 색보다 먼저
-   * 평가돼 두 신호가 어긋나면 free가 이겼고, transparency는 종일 이벤트에서 클라이언트마다
-   * 기본값이 달라 오탐이 났다. **오탐의 결과가 노트에 ✅를 쓰는 것**(반복이면 다음 회차까지
-   * 생성)이라 되돌리는 비용도 컸다.
-   */
-  private isGcalDone(ev: GCalEvent): boolean {
-    if (this.settings.doneColorId)
-      return ev.colorId === this.settings.doneColorId;
-    const s = ev.summary ?? "";
-    const done = this.settings.donePrefix?.trim();
-    if (done && s.startsWith(done)) return true;
-    return s.startsWith(this.settings.doneTag);
   }
 
   /** GCal 이벤트 제목에서 체크박스/반복 아이콘/완료 접두사를 떼어 순수 제목 추출(pull용). */
@@ -189,19 +167,6 @@ export class SyncEngine {
     if (ev.start?.date) return ev.start.date;
     if (ev.start?.dateTime) return ev.start.dateTime.slice(0, 10);
     return undefined;
-  }
-
-  /**
-   * 이벤트가 완료로 바뀐 날(로컬 YYYY-MM-DD). GCal엔 "완료 시각"이 없으므로
-   * 마지막 수정 시각(updated = 사용자가 free/색으로 완료 표시한 시점)을 쓴다.
-   *
-   * 핵심은 정확도가 아니라 **결정성**이다. 이 값은 이벤트에 실려 있으므로 어느 기기가
-   * 언제 pull해도 같은 ✅ 날짜가 나온다 → 기기 간 노트 텍스트가 갈리지 않는다.
-   */
-  private eventDoneDate(ev: GCalEvent | undefined): string | undefined {
-    if (!ev?.updated) return undefined;
-    const d = new Date(ev.updated);
-    return isNaN(d.getTime()) ? undefined : fmt(d);
   }
 
   /** 이벤트에서 due(마감일) 추출: all-day는 end.date(배타적)−1, 시간지정은 end 날짜(없으면 start). */
@@ -347,8 +312,6 @@ export class SyncEngine {
       done: p.tgsDone != null ? p.tgsDone === "1" : t.checked,
       title: p.tgsTitle ?? this.titleBase(t),
       gcalUpdated: ev.updated,
-      // 이벤트에서 만든 기준선은 원격의 복사본이다 → 신뢰 불가(StateStore 주석 참고).
-      baselineTrusted: false,
     };
   }
 
@@ -371,7 +334,6 @@ export class SyncEngine {
       done: p.tgsDone === "1",
       title: p.tgsTitle ?? this.gcalTitleBase(ev),
       gcalUpdated: ev.updated,
-      baselineTrusted: false, // 위와 같은 이유
     };
   }
 
@@ -652,7 +614,6 @@ export class SyncEngine {
     const due = this.eventDueDate(ev); // 다중일 블록은 끝(배타적−1)
     return {
       updated: ev.updated,
-      done: this.isGcalDone(ev),
       due,
       start: due ? this.eventStartDate(ev) ?? due : undefined,
       title: this.gcalTitleBase(ev),
@@ -679,18 +640,10 @@ export class SyncEngine {
     task: VaultTask;
     ev?: GCalEvent;
     result: SyncResult;
-    dirtyFiles: Set<string>;
-    today: string;
     coldHold: boolean;
   }): Promise<void> {
     const { plan, id, rec, task } = c;
     const where = `${task.path}:${task.line + 1}`;
-
-    if (plan.staleUncheck) {
-      console.warn(
-        `[tasks-gcal-sync] 기준선 불신 + 원격 완료 → 노트 복구: ${id} (${where})`
-      );
-    }
 
     // ── 1) pull: GCal이 이긴 필드만 노트에 반영 ──
     // writer가 쓰기 후 task의 파싱 필드까지 갱신하므로, 아래 push는 병합된 값을 올린다.
@@ -713,22 +666,6 @@ export class SyncEngine {
         console.warn("[tasks-gcal-sync] 제목 pull skip:", id, e);
       }
     }
-    // 완료는 맨 마지막 — 반복 완료가 줄을 삽입해 구조를 바꿀 수 있다.
-    if (p.done !== undefined) {
-      if (p.done) {
-        const structural = await this.completion.complete(
-          task,
-          this.writer,
-          this.eventDoneDate(c.ev) ?? c.today
-        );
-        // 반복 회차가 삽입돼 줄이 늘면 이 파일의 이후 쓰기를 미룬다.
-        if (structural) c.dirtyFiles.add(task.path);
-      } else {
-        await this.completion.uncomplete(task, this.writer);
-      }
-      applied.push("done");
-    }
-
     if (plan.conflicts.length) {
       console.warn(
         `[tasks-gcal-sync] 충돌 → GCal 채택 (${plan.conflicts.join(", ")}):`,
@@ -739,10 +676,8 @@ export class SyncEngine {
 
     if (plan.uncheckSeen === "set") rec.uncheckSeenAt = Date.now();
     else if (plan.uncheckSeen === "clear") delete rec.uncheckSeenAt;
-    if (plan.holdReason === "remote-unknown") {
-      console.warn(`[tasks-gcal-sync] done 회귀 보류(원격 미확인): ${id}`);
-    } else if (plan.holdReason === "recheck") {
-      console.log(`[tasks-gcal-sync] done 회귀 → 다음 사이클에 재확인: ${id}`);
+    if (plan.holdDone) {
+      console.log(`[tasks-gcal-sync] 완료 해제 → 다음 사이클에 재확인: ${id}`);
     }
     if (plan.retryAfterMs !== undefined) {
       c.result.retryAfterMs = Math.min(
@@ -753,8 +688,7 @@ export class SyncEngine {
 
     // ── 2) push: GCal이 가져가지 않은 Obsidian 변경, 또는 표현 정규화 ──
     const normalizeNeeded = plan.normalizeIfPulled && applied.length > 0;
-    // 반복 완료로 줄이 밀린 파일은 이번 run에서 더 쓰지 않는다(다음 사이클에서 신규 read).
-    const canWriteRemote = !c.dirtyFiles.has(task.path) && !c.coldHold;
+    const canWriteRemote = !c.coldHold;
 
     const m: Snapshot = { ...plan.merged };
     // pull이 실패한 필드는 노트가 안 바뀌었으므로 스냅샷도 노트 현재값이다.
@@ -822,8 +756,6 @@ export class SyncEngine {
     }
     // normalizeNeeded인데 못 찍었으면 스냅샷을 그대로 둔다 →
     // 다음 사이클에 "로컬이 바뀐 것"으로 읽혀 push되고, 그때 표현이 맞춰진다.
-
-    if (plan.promoteBaseline) rec.baselineTrusted = true;
   }
 
   async run(
@@ -889,9 +821,6 @@ export class SyncEngine {
 
     const records = this.state.records;
     const today = todayStr();
-    // 반복 완료로 줄이 삽입(구조 변경)된 파일. 이 run에서 이후 task.line이 밀려
-    // 형제 줄을 오손상시키지 않도록, 해당 파일의 추가 쓰기는 다음 사이클로 미룬다.
-    const dirtyFiles = new Set<string>();
     const result: SyncResult = {
       created: 0,
       updated: 0,
@@ -927,14 +856,7 @@ export class SyncEngine {
 
     // ---- 1) 기존 record 양방향 조정 ----
     // 판단은 전부 reconcile.ts의 순수 함수가 한다. 여기서는 그 결정을 실행만 한다.
-    const guards = new RunGuards({
-      dupIds,
-      dirtyFiles,
-      adopted,
-      holdWrites,
-      coldHold,
-      pulledCalendars: new Set(pullByCal.keys()),
-    });
+    const guards = new RunGuards({ dupIds, adopted, holdWrites, coldHold });
 
     for (const id of Object.keys(records)) {
       const rec = records[id];
@@ -949,7 +871,7 @@ export class SyncEngine {
           task: this.taskState(task),
           remote: this.remoteView(ev),
           evCancelled,
-          guards: guards.for(id, rec.calendarId, task?.path),
+          guards: guards.for(id),
           now: Date.now(),
           uncheckHoldMs: UNCHECK_HOLD_MS,
         });
@@ -962,8 +884,6 @@ export class SyncEngine {
             task: task!,
             ev,
             result,
-            dirtyFiles,
-            today,
             coldHold,
           });
           continue;
@@ -998,9 +918,6 @@ export class SyncEngine {
       if (!isValidDate(t.due)) continue; // due 없음/형식오류 → 스킵(잘못된 이벤트 생성 방지)
       if (t.id && dupIds.has(t.id)) continue; // 🆔 중복 노트 → 정본 불명, 손대지 않음
       if (t.id && records[t.id]) continue; // 이미 처리됨
-      // 이번 run에 구조 변경(반복 회차 삽입)된 파일 → 캐시된 line이 밀렸으므로
-      // 새 회차 이벤트 생성은 다음 사이클(신규 read)로 미룬다.
-      if (dirtyFiles.has(t.path)) continue;
 
       const target = resolveCalendar(t.tags, this.settings);
       if (!target) continue;

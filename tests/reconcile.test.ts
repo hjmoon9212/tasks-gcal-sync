@@ -75,8 +75,6 @@ function harness(opts: {
     insert: [] as any[],
     del: [] as string[],
     removeDue: [] as string[],
-    complete: [] as string[],
-    uncomplete: [] as string[],
   };
   const settings: PluginSettings = {
     ...DEFAULT_SETTINGS,
@@ -118,17 +116,6 @@ function harness(opts: {
     ensureId: async () => {},
     wroteRecently: () => false,
   };
-  const completion: any = {
-    complete: async (t: any) => {
-      calls.complete.push(t.id);
-      t.checked = true; // 실제 writer가 쓰기 후 파싱 필드를 갱신하는 것과 같게
-      return false;
-    },
-    uncomplete: async (t: any) => {
-      calls.uncomplete.push(t.id);
-      t.checked = false;
-    },
-  };
   const engine = new SyncEngine(
     app,
     settings,
@@ -136,7 +123,6 @@ function harness(opts: {
     repo,
     client,
     writer,
-    completion,
     async () => {}
   );
   // 기본은 "콜드 스타트 지난 상태" — 콜드 스타트 자체는 따로 테스트한다.
@@ -157,24 +143,6 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
 });
 
 (async () => {
-  // ── 1) 가짜 기준선 + 원격 완료 + 노트 미체크 → 노트를 복구하고 GCal은 안 건드린다
-  //     (2026-08-06 사고의 정확한 재현: 이 경로가 예전엔 ✅를 지웠다)
-  {
-    const ev = doneEvent("A1", true, "200");
-    const h = harness({
-      tasks: [task("A1", false)],
-      events: [ev],
-      records: {
-        A1: rec({ done: true, gcalUpdated: "200", baselineTrusted: false }),
-      },
-    });
-    await h.engine.run();
-    eq(h.calls.complete, ["A1"], "가짜 기준선: 노트를 [x]로 복구");
-    eq(h.calls.patch.length, 0, "가짜 기준선: GCal push 없음");
-    eq(h.state.records.A1.done, true, "가짜 기준선: 스냅샷은 완료 유지");
-    eq(h.state.records.A1.baselineTrusted, true, "원격을 봤으므로 기준선 승격");
-  }
-
   // ── 2) 신뢰 기준선 + 진짜 체크 해제 → 첫 run은 보류, 다음 사이클에 push
   {
     const ev = doneEvent("A1", true, "200");
@@ -199,7 +167,8 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     eq(h.state.records.A1.done, false, "push 후 스냅샷 갱신");
   }
 
-  // ── 3) 원격을 못 읽은 run(pull 실패)에서는 done 회귀를 밀지 않는다
+  // ── 3) pull이 실패해도 완료 해제 규칙은 그대로다(완료는 노트가 소유하므로
+  //     GCal에 물어볼 것이 없다 — 한 사이클 재확인만 한다)
   {
     const h = harness({
       tasks: [task("A1", false)],
@@ -208,13 +177,9 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
       pullFails: true,
     });
     await h.engine.run();
-    eq(h.calls.patch.length, 0, "원격 미확인: done 회귀 push 없음");
-    eq(h.state.records.A1.done, true, "원격 미확인: 스냅샷 유지");
-    eq(
-      h.state.records.A1.uncheckSeenAt,
-      undefined,
-      "원격 미확인: 대기 시계는 아직 시작 안 함"
-    );
+    eq(h.calls.patch.length, 0, "첫 관측은 보류");
+    eq(h.state.records.A1.done, true, "보류 중 스냅샷 유지");
+    eq(typeof h.state.records.A1.uncheckSeenAt, "number", "대기 시계 시작");
   }
 
   // ── 4) 콜드 스타트: 로드 직후 run은 원격에 아무것도 쓰지 않는다
@@ -378,28 +343,6 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     eq(h.calls.del, [], "입양 직후 run에서는 지우지 않는다");
   }
 
-  // -- 16) GCal에서 완료색으로 바꿈 → 노트를 [x]로 만들고, **이벤트 표현도 정규화**한다.
-  //     예전엔 노트만 완료되고 이벤트 제목은 ☐ 그대로라 모바일에서 미완료로 보였다.
-  {
-    const ev = doneEvent("A1", false, "300");
-    ev.colorId = "8"; // 색만 완료로 바꿈(제목은 ☐ 그대로)
-    const h = harness({
-      tasks: [task("A1", false)],
-      events: [ev],
-      records: { A1: rec({ gcalUpdated: "100" }) },
-    });
-    await h.engine.run();
-    eq(h.calls.complete, ["A1"], "색 완료: 노트를 [x]로");
-    eq(h.calls.patch.length, 1, "색 완료: 이벤트 표현 정규화 push");
-    const patch = h.calls.patch[0].patch;
-    eq(patch.summary, "☑️ 샘플", "정규화: 제목 접두사가 완료로");
-    eq(patch.colorId, "8", "정규화: 완료색");
-    eq(patch.transparency, undefined, "정규화: 바쁨/한가함은 건드리지 않는다");
-    eq(patch.start, undefined, "정규화: 날짜는 건드리지 않는다");
-    eq(patch.end, undefined, "정규화: 날짜는 건드리지 않는다");
-    eq(h.state.records.A1.done, true, "정규화: 스냅샷 완료");
-  }
-
   // -- 17) 노트에서 체크 해제 → 보류 후 push할 때 free/완료색이 실제로 풀린다.
   //     그리고 보류가 풀리는 시점을 호출부에 알려 후속 run이 예약되게 한다
   //     (안 그러면 다음 주기까지 GCal이 그대로라 "아무 일도 없다"로 보인다).
@@ -422,6 +365,36 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     eq(patch.colorId, null, "해제: 완료색 제거");
     eq(patch.transparency, undefined, "해제: 바쁨/한가함은 건드리지 않는다");
     eq(second.retryAfterMs, undefined, "push했으면 재시도 예약 없음");
+  }
+
+  // -- 18) **완료는 노트가 소유한다**: 이벤트가 완료로 바뀌어도 노트를 건드리지 않는다.
+  //     GCal엔 완료 어휘가 없어 색·제목을 빌려 읽어야 했고, 오탐의 결과가 노트에 ✅를
+  //     쓰는 것이라 파괴적이었다(0.4.0에서 pull 방향 제거).
+  {
+    const ev = doneEvent("A1", true, "300"); // 회색 + ☑️ 제목으로 바뀜
+    const h = harness({
+      tasks: [task("A1", false)],
+      events: [ev],
+      records: { A1: rec({ gcalUpdated: "100" }) },
+    });
+    await h.engine.run();
+    eq(h.state.records.A1.done, false, "이벤트가 완료여도 스냅샷은 미완료 그대로");
+    eq(h.calls.removeDue, [], "노트를 건드리지 않는다");
+    eq(h.calls.patch.length, 0, "되돌려 쓰지도 않는다");
+  }
+
+  // -- 19) 반대 방향(노트 → 이벤트)은 그대로 동작한다
+  {
+    const h = harness({
+      tasks: [task("A1", true)],
+      events: [doneEvent("A1", false, "200")],
+      records: { A1: rec({ gcalUpdated: "200" }) },
+    });
+    await h.engine.run();
+    eq(h.calls.patch.length, 1, "노트 완료 → 이벤트 push");
+    const patch = h.calls.patch[0].patch;
+    eq(patch.summary, "☑️ 샘플", "이벤트 제목이 완료로");
+    eq(patch.colorId, "8", "이벤트 색이 완료색으로");
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

@@ -56,7 +56,6 @@ const local = (o: Partial<LocalView> = {}): LocalView => ({
 /** 기본 원격은 "우리가 마지막으로 본 그대로"(updated가 rec와 같음 → 외부 수정 없음). */
 const remote = (o: Partial<RemoteView> = {}): RemoteView => ({
   updated: "100",
-  done: false,
   due: DAY,
   start: DAY,
   title: "샘플",
@@ -65,11 +64,9 @@ const remote = (o: Partial<RemoteView> = {}): RemoteView => ({
 
 const guards = (o: Partial<Guards> = {}): Guards => ({
   duplicateId: false,
-  fileDirty: false,
   adopted: false,
   holdWrites: false,
   coldHold: false,
-  remotePulled: true,
   ...o,
 });
 
@@ -103,11 +100,6 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
     decide({ task: { kind: "missing" }, guards: guards({ duplicateId: true }) }),
     { kind: "skip", reason: "duplicate-id" },
     "🆔 중복은 task 없음보다 먼저 막힌다"
-  );
-  eq(
-    decide({ guards: guards({ fileDirty: true }) }),
-    { kind: "skip", reason: "file-dirty" },
-    "구조 변경된 파일은 손대지 않는다"
   );
 }
 
@@ -218,38 +210,24 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
   eq(grow.pull.start, { value: "2026-08-04", write: "set" }, "다중일로 늘면 🛫 기록");
 }
 
-// ── 가짜 기준선 복구: 원격이 안 바뀌었어도 노트를 되살린다. 단 원격엔 쓰지 않는다 ──
+// ── 완료는 GCal에서 가져오지 않는다(노트가 소유) ──
 {
-  const p = merge({
-    rec: rec({ done: true, baselineTrusted: false }),
-    remote: remote({ done: true }), // updated 동일 → gcalChanged=false
-  });
-  eq(p.staleUncheck, true, "기준선 불신 + 원격 완료 + 노트 미체크");
-  eq(p.pull.done, true, "노트를 완료로 복구");
-  eq(p.pushNeeded, false, "GCal push 없음");
-  eq(
-    p.normalizeIfPulled,
-    false,
-    "표현 정규화도 안 한다 — 원격이 안 바뀐 상태에서 쓰기 시작하면 0.3.13 보장이 깨진다"
-  );
-  eq(p.merged.done, true, "스냅샷은 완료 유지");
+  // 이벤트가 완료색·☑️로 바뀌어도 노트는 건드리지 않는다.
+  const p = merge({ remote: remote({ updated: "200", title: "샘플" }) });
+  eq(p.pull, {}, "이벤트가 완료로 보여도 노트에 쓰지 않는다");
+  eq(p.pulledFields, [], "완료는 pull 대상이 아니다");
 
-  const trusted = merge({ rec: rec({ done: true }), remote: remote({ done: true }) });
-  eq(trusted.staleUncheck, false, "신뢰 기준선이면 복구 경로 아님");
+  // 반대 방향(노트 → 이벤트)은 그대로다.
+  const up = merge({
+    task: { kind: "ok", local: local({ done: true }) },
+    remote: remote({ updated: "200" }),
+  });
+  eq(up.pushNeeded, true, "노트 완료는 push");
+  eq(up.conflicts, [], "완료는 충돌 대상이 아니다");
 }
 
 // ── done 회귀 보류 ──
 {
-  const unknown = merge({
-    rec: rec({ done: true }),
-    remote: undefined,
-    guards: guards({ remotePulled: false }),
-  });
-  eq(unknown.holdDone, true, "원격 미확인: 무기한 보류");
-  eq(unknown.holdReason, "remote-unknown", "보류 사유");
-  eq(unknown.retryAfterMs, undefined, "무기한 보류엔 재시도 예약 안 함");
-  eq(unknown.uncheckSeen, undefined, "대기 시계는 아직 시작 안 함");
-
   const first = merge({ rec: rec({ done: true }), remote: undefined });
   eq(first.holdDone, true, "읽었어도 첫 관측은 한 사이클 보류");
   eq(first.uncheckSeen, "set", "관측 시각 기록");
@@ -274,12 +252,6 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
   const p = merge({ task: { kind: "ok", local: local({ done: true }) }, remote: undefined });
   eq(p.holdDone, false, "완료 방향은 보류 없음");
   eq(p.pushNeeded, true, "완료는 즉시 push");
-}
-
-// ── 기준선 승격은 "이벤트를 실제로 봤을 때"만 ──
-{
-  eq(merge({ remote: undefined }).promoteBaseline, false, "이벤트를 못 봤으면 승격 안 함");
-  eq(merge().promoteBaseline, true, "이벤트를 봤으면 승격");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

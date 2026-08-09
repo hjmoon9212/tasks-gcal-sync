@@ -59,7 +59,7 @@ export class TaskWriter {
    * 쓰기 후 인메모리 task의 파싱 필드(due/start/checked/title…)를 새 원문에 맞춘다.
    * 이게 없으면 같은 sync run 안에서 이어지는 push가 낡은 값을 올린다
    * (예: GCal 날짜를 pull로 반영한 직후 Obsidian 변경분을 push할 때).
-   * 반복 완료처럼 결과가 2줄이면 파싱이 안 되므로 그대로 둔다 — 호출부가 dirtyFiles로 건너뛴다.
+   * 파싱이 안 되는 결과면 그대로 둔다.
    */
   private refresh(task: VaultTask, updated: string): void {
     const parsed = TaskLine.parseTaskLine(updated, this.getGlobalFilter());
@@ -97,28 +97,5 @@ export class TaskWriter {
       if (r === null) throw new Error("title replace skipped (모호한 매칭)");
       return r;
     });
-  }
-
-  setStatusChar(task: VaultTask, char: string): Promise<string> {
-    return this.apply(task, (raw) => TaskLine.setStatusChar(raw, char));
-  }
-
-  /** Tasks API 토글 결과(반복 시 2줄일 수 있음)로 줄 전체 교체. */
-  replaceLine(task: VaultTask, newText: string): Promise<string> {
-    return this.apply(task, () => newText);
-  }
-
-  /** 폴백 완료: 상태 x + ✅오늘. */
-  completeFallback(task: VaultTask, today: string): Promise<string> {
-    return this.apply(task, (raw) =>
-      TaskLine.setDoneDate(TaskLine.setStatusChar(raw, "x"), today)
-    );
-  }
-
-  /** 완료 취소: 상태 공백 + ✅제거. */
-  uncomplete(task: VaultTask): Promise<string> {
-    return this.apply(task, (raw) =>
-      TaskLine.removeDone(TaskLine.setStatusChar(raw, " "))
-    );
   }
 }

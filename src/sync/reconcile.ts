@@ -10,6 +10,12 @@
  *  1) 무엇을 할지는 여기서만 정한다(decideReconcile). 파일도 네트워크도 안 건드리니
  *     가드 × 필드 조합을 표로 테스트할 수 있다.
  *  2) "파괴적 동작이 허용되는가"는 destructiveAllowed **한 곳**에만 있다.
+ *
+ * 필드 소유권(0.4.0~): 날짜(due/start)와 제목은 GCal이 직접 조작하는 값이라 양방향이고,
+ * **완료는 Obsidian이 소유한다** — GCal엔 "완료"라는 어휘가 없어 색·제목 같은 다른 용도의
+ * 필드를 빌려 인코딩해야 하는데, 빌린 필드는 다른 이유로도 바뀌고 오탐의 결과가 노트에
+ * ✅를 쓰는 것(반복이면 다음 회차 줄 생성)이라 파괴적이었다. 그래서 완료는 노트 → 이벤트
+ * 한 방향으로만 흐른다. 이벤트의 색·☑️는 표시일 뿐 판정에 쓰지 않는다.
  */
 import { SyncRecord } from "./StateStore";
 
@@ -32,7 +38,6 @@ export interface LocalView extends Snapshot {
 /** 이벤트에서 뽑은 원격 값. 이번 run의 pull에 이벤트가 안 왔으면 undefined. */
 export interface RemoteView {
   updated?: string;
-  done: boolean;
   /** 날짜를 못 읽으면(혼합형·파싱 실패) undefined — 그때는 날짜 계열을 아예 손대지 않는다. */
   due?: string;
   start?: string;
@@ -47,19 +52,12 @@ export type TaskState =
 export interface Guards {
   /** 같은 🆔가 두 줄 이상 — 정본을 특정할 수 없다. */
   duplicateId: boolean;
-  /** 이번 run에 이 파일에 줄이 삽입됨(반복 회차) — 캐시된 line이 밀렸다. */
-  fileDirty: boolean;
   /** 이번 스캔에서 처음 주운 record. */
   adopted: boolean;
   /** 볼트가 Obsidian Sync로 아직 따라잡는 중. */
   holdWrites: boolean;
   /** 플러그인이 막 로드됨 — 원격에 쓰지 않는다. */
   coldHold: boolean;
-  /**
-   * 이번 run이 이 record의 캘린더를 **실제로 읽었는가**.
-   * "이벤트 객체가 응답에 있었는가"가 아니다 — 증분 pull은 변경 없는 이벤트를 안 준다.
-   */
-  remotePulled: boolean;
 }
 
 /**
@@ -75,7 +73,6 @@ export function destructiveAllowed(g: Guards): boolean {
 
 export type SkipReason =
   | "duplicate-id"
-  | "file-dirty"
   | "hold-task-gone"
   | "hold-due-invalid"
   | "hold-unschedule";
@@ -86,8 +83,6 @@ export interface PullOps {
   /** write=none: 값은 채택하되 줄은 안 건드림(🛫가 없는데 단일일로 바뀐 경우). */
   start?: { value: string; write: "set" | "remove" | "none" };
   title?: { from: string; to: string };
-  /** true=완료 처리, false=완료 취소. */
-  done?: boolean;
 }
 
 export interface MergePlan {
@@ -106,17 +101,12 @@ export interface MergePlan {
   normalizeIfPulled: boolean;
   /** done 회귀(완료→미완료)를 이번 run엔 올리지 않는다. */
   holdDone: boolean;
-  holdReason?: "remote-unknown" | "recheck";
   /** 보류가 풀리는 시점(ms 뒤) — 호출부가 후속 run을 예약한다. */
   retryAfterMs?: number;
   /** 회귀 관측 시각 기록 지시. */
   uncheckSeen: "set" | "clear" | undefined;
-  /** 기준선 불신 + 원격 완료 + 노트 미체크 → 노트를 복구한 경우(경고용). */
-  staleUncheck: boolean;
   /** 우리 push가 아닌 외부 수정이 감지됐는가. */
   gcalChanged: boolean;
-  /** 원격을 실제로 봤으므로 기준선을 승격해도 되는가. */
-  promoteBaseline: boolean;
   /** 병합 결과(스냅샷 후보). pull이 실패한 필드는 호출부가 local 값으로 되돌린다. */
   merged: Snapshot;
   /** 노트 현재값 — pull 실패 시 폴백. */
@@ -149,11 +139,6 @@ export function decideReconcile(i: DecideInput): ReconcilePlan {
   // 🆔가 중복된 노트 → 정본을 특정할 수 없으니 읽지도 쓰지도 않는다.
   // (특히 아래 "task 없음 → 삭제"로 새지 않도록 이 검사가 먼저 와야 한다)
   if (g.duplicateId) return { kind: "skip", reason: "duplicate-id" };
-
-  // 같은 run에서 이 파일에 반복 회차가 삽입됨 → task.line이 밀려 오손상 위험.
-  if (i.task.kind !== "missing" && g.fileDirty) {
-    return { kind: "skip", reason: "file-dirty" };
-  }
 
   // Obsidian에서 task 사라짐 → 이벤트 삭제
   if (i.task.kind === "missing") {
@@ -209,24 +194,16 @@ function mergePlan(i: DecideInput, local: LocalView): MergePlan {
   // 예전엔 이 경우에도 else로 떨어져 task의 🛫를 근거 없이 지웠다.
   const datesOk = !!remote?.due;
 
-  // ── 가짜 기준선 복구 ──
-  // 이벤트에서 복원한 record는 baseline ≡ 원격이라 gcalChanged가 영원히 false다.
-  // 그 상태에서 노트가 스테일하면(원격 완료 · 노트 미체크) "로컬이 체크를 풀었다"로 읽혀
-  // ✅가 GCal에서 지워진다 — 2026-08-06 롤백 사고의 실제 경로. 신뢰 못 하는 기준선일
-  // 때는 원격의 **현재값을 노트와 직접** 비교하고, 정보를 잃지 않는 방향으로만 적용한다.
-  const trusted = rec.baselineTrusted !== false;
-  const staleUncheck = !trusted && remote?.done === true && !local.done;
-
+  // GCal이 가져갈 수 있는 필드는 날짜와 제목뿐이다. **완료는 여기 없다** — 노트가 소유한다.
   const gc = {
     due: gcalChanged && datesOk && remote!.due !== rec.due,
     start: gcalChanged && datesOk && remote!.start !== recStart,
-    done: (gcalChanged && remote!.done !== rec.done) || staleUncheck,
     title: gcalChanged && !!remote!.title && remote!.title !== rec.title,
   };
 
   // 같은 필드가 양쪽 다 바뀐 경우에만 승자가 필요하다 → GCal 채택(직접 조작한 화면).
   const conflicts: Field[] = [];
-  for (const f of ["due", "start", "done", "title"] as Field[]) {
+  for (const f of ["due", "start", "title"] as const) {
     if (gc[f] && obs[f]) conflicts.push(f);
   }
 
@@ -259,39 +236,25 @@ function mergePlan(i: DecideInput, local: LocalView): MergePlan {
     merged.title = remote!.title!;
     pulledFields.push("title");
   }
-  if (gc.done) {
-    pull.done = remote!.done;
-    merged.done = remote!.done;
-    pulledFields.push("done");
-  }
 
-  // ── done 회귀(완료 → 미완료) 보류 ──
-  // 가장 파괴적인 push다. 노트가 최신이라는 확신이 없으면 미룬다. 두 겹:
-  //  (a) 이번 run이 그 캘린더를 **읽지 못했으면** 무기한 보류. "이벤트 객체가 없다"가
-  //      아니라 "pull을 못 했다"가 기준이다 — 증분 pull에서 변경 없는 이벤트는 원래
-  //      응답에 안 온다. 그걸 근거로 삼으면 정상적인 체크 해제가 영영 안 올라간다.
-  //  (b) 읽었더라도 **한 사이클 재확인**한다(2단계 삭제 가드와 같은 패턴).
-  //      그 사이 Obsidian Sync가 정착하면 회귀 자체가 사라진다.
-  const doneRegress = obs.done && !local.done && rec.done && !gc.done;
+  // ── done 회귀(완료 → 미완료) 한 사이클 보류 ──
+  // 완료는 노트가 소유하므로 GCal에 물어볼 것은 없다. 그래도 **미완료 push는 되돌리기 힘든
+  // 방향**이라 한 박자 미룬다: 방금 열린 스테일한 노트가 남의 기기가 찍은 완료를 지우고
+  // 이벤트를 미완료로 되돌리면, Sync가 정착한 뒤 다시 완료로 돌아오며 캘린더가 깜빡인다.
+  // 한 사이클 기다리면 그 사이 Sync가 정착해 회귀 자체가 사라진다.
+  const doneRegress = obs.done && !local.done && rec.done;
   let holdDone = false;
-  let holdReason: MergePlan["holdReason"];
   let retryAfterMs: number | undefined;
   let uncheckSeen: "set" | "clear" | undefined;
   if (doneRegress) {
-    if (!i.guards.remotePulled) {
-      holdDone = true;
-      holdReason = "remote-unknown";
-    } else {
-      const seenAt = rec.uncheckSeenAt ?? i.now;
-      if (rec.uncheckSeenAt === undefined) uncheckSeen = "set";
-      const waited = i.now - seenAt;
-      holdDone = waited < i.uncheckHoldMs;
-      if (holdDone) {
-        holdReason = "recheck";
-        // 보류가 풀리는 시점에 한 번 더 돌지 않으면 다음 주기(기본 5분)까지 GCal이
-        // 그대로라 "아무 일도 안 일어난다"로 보인다.
-        retryAfterMs = i.uncheckHoldMs - waited + 2_000;
-      }
+    const seenAt = rec.uncheckSeenAt ?? i.now;
+    if (rec.uncheckSeenAt === undefined) uncheckSeen = "set";
+    const waited = i.now - seenAt;
+    holdDone = waited < i.uncheckHoldMs;
+    if (holdDone) {
+      // 보류가 풀리는 시점에 한 번 더 돌지 않으면 다음 주기(기본 5분)까지 GCal이
+      // 그대로라 "아무 일도 안 일어난다"로 보인다.
+      retryAfterMs = i.uncheckHoldMs - waited + 2_000;
     }
   } else if (rec.uncheckSeenAt !== undefined) {
     uncheckSeen = "clear";
@@ -303,7 +266,7 @@ function mergePlan(i: DecideInput, local: LocalView): MergePlan {
   const pushNeeded =
     (obs.due && !gc.due) ||
     (obs.start && !gc.start) ||
-    (obs.done && !gc.done && !holdDone) ||
+    (obs.done && !holdDone) ||
     (obs.title && !gc.title);
 
   return {
@@ -313,21 +276,13 @@ function mergePlan(i: DecideInput, local: LocalView): MergePlan {
     conflicts,
     pushNeeded,
     // GCal이 이긴 변경만 있어 push할 게 없더라도 **이벤트의 표현은 다시 찍는다.**
-    // 캘린더에서 완료색으로 바꾸면 노트는 [x]가 되는데 이벤트 제목은 ☐ 그대로여서
-    // 모바일에서는 미완료로 보였다(0.3.17). 단 사용자가 GCal에서 실제로 뭔가 바꾼
-    // 경우로 한정한다 — staleUncheck는 원격이 안 바뀐 상태라, 거기서 원격에 쓰기
-    // 시작하면 "확신 없으면 원격을 안 건드린다"는 0.3.13의 보장이 무너진다.
+    // 예: GCal에서 제목을 고치면 우리가 붙여 둔 상태 접두사(☐/☑️/🔁)가 떨어져 나간다.
+    // 단 사용자가 GCal에서 실제로 뭔가 바꾼 경우로 한정한다.
     normalizeIfPulled: !pushNeeded && gcalChanged,
     holdDone,
-    holdReason,
     retryAfterMs,
     uncheckSeen,
-    staleUncheck,
     gcalChanged,
-    // 원격을 실제로 본 run에서만 기준선을 승격한다. **"캘린더를 읽었다"로 완화하면 안 된다** —
-    // rebuildRecords는 ±730일을 훑는데 pull 초기 창은 30일이라, 그 밖에서 입양된 record가
-    // 이벤트를 한 번도 못 본 채 신뢰 상태가 되어 스테일 노트가 ✅를 지운다(2026-08-06 경로).
-    promoteBaseline: !!remote,
     merged,
     local: {
       due: local.due,
@@ -343,22 +298,18 @@ export class RunGuards {
   constructor(
     private readonly ctx: {
       dupIds: Set<string>;
-      dirtyFiles: Set<string>;
       adopted: Set<string>;
       holdWrites: boolean;
       coldHold: boolean;
-      pulledCalendars: Set<string>;
     }
   ) {}
 
-  for(id: string, calendarId: string, path?: string): Guards {
+  for(id: string): Guards {
     return {
       duplicateId: this.ctx.dupIds.has(id),
-      fileDirty: path !== undefined && this.ctx.dirtyFiles.has(path),
       adopted: this.ctx.adopted.has(id),
       holdWrites: this.ctx.holdWrites,
       coldHold: this.ctx.coldHold,
-      remotePulled: this.ctx.pulledCalendars.has(calendarId),
     };
   }
 }

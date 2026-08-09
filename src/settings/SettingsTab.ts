@@ -218,7 +218,7 @@ export class SettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("제목 접두사 (미완료 / 완료)")
       .setDesc(
-        "이벤트 제목 앞 체크박스 표식. 미완료=☐, 완료=☑️ → 색이 안 보이는 모바일에서도 제목으로 완료 확인. 비우면 안 붙음."
+        "이벤트 제목 앞 체크박스 표식. 미완료=☐, 완료=☑️ → 색이 안 보이는 모바일에서도 제목으로 완료 확인. 표시 전용이며, 완료 여부는 Obsidian에서만 바꾼다. 비우면 안 붙음."
       )
       .addText((t) =>
         t
@@ -257,7 +257,7 @@ export class SettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("완료 색")
       .setDesc(
-        "캘린더 앱에서 이벤트를 이 색으로 바꾸면 Obsidian에서 완료 처리(되돌리면 완료 취소). 이게 GCal 쪽 완료 제스처다. '끄기' 선택 시 제목 #done 방식으로 폴백."
+        "완료한 task의 이벤트를 이 색으로 표시한다(표시 전용 — 캘린더에서 색을 바꿔도 Obsidian은 바뀌지 않는다). '끄기' 선택 시 색을 건드리지 않는다."
       )
       .addDropdown((d) => {
         d.addOption("", "끄기 (제목 #done)");
@@ -298,14 +298,14 @@ export class SettingsTab extends PluginSettingTab {
     // 완료 색·free를 둘 다 꺼야 쓰이는 폴백이라 평소엔 접어 둔다.
     const doneBox = this.collapsible(
       containerEl,
-      "완료 색을 껐을 때만 쓰이는 폴백 설정.",
+      "완료 색과 제목 접두사를 둘 다 껐을 때만 쓰이는 폴백 설정.",
       this.showDoneDetails,
       (v) => (this.showDoneDetails = v)
     );
 
     new Setting(doneBox)
       .setName("완료 표시 태그 (#done 폴백용)")
-      .setDesc("완료 색이 '끄기'일 때 — 완료 task 제목 앞에 붙는 태그.")
+      .setDesc("완료 색과 제목 접두사가 둘 다 없을 때 — 완료 task 제목 앞에 붙는 태그.")
       .addText((t) =>
         t.setValue(s.doneTag).onChange(async (v) => {
           s.doneTag = v.trim() || "#done";

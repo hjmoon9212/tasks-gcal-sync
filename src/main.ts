@@ -6,7 +6,6 @@ import { GoogleAuth } from "./auth/GoogleAuth";
 import { CalendarClient } from "./gcal/CalendarClient";
 import { TaskRepository } from "./data/TaskRepository";
 import { TaskWriter } from "./write/TaskWriter";
-import { CompletionHandler } from "./write/CompletionHandler";
 import { SyncEngine } from "./sync/SyncEngine";
 
 interface PluginData {
@@ -55,7 +54,6 @@ export default class TasksGcalSyncPlugin extends Plugin {
   client!: CalendarClient;
   repo!: TaskRepository;
   writer!: TaskWriter;
-  completion!: CompletionHandler;
   engine!: SyncEngine;
 
   private syncing = false;
@@ -82,7 +80,6 @@ export default class TasksGcalSyncPlugin extends Plugin {
     this.client = new CalendarClient(this.auth);
     this.repo = new TaskRepository(this.app, () => this.settings.globalFilter);
     this.writer = new TaskWriter(this.app, () => this.settings.globalFilter);
-    this.completion = new CompletionHandler(this.app);
     this.engine = new SyncEngine(
       this.app,
       this.settings,
@@ -90,7 +87,6 @@ export default class TasksGcalSyncPlugin extends Plugin {
       this.repo,
       this.client,
       this.writer,
-      this.completion,
       () => this.saveState()
     );
 
