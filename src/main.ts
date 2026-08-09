@@ -6,7 +6,7 @@ import { GoogleAuth } from "./auth/GoogleAuth";
 import { CalendarClient } from "./gcal/CalendarClient";
 import { TaskRepository } from "./data/TaskRepository";
 import { TaskWriter } from "./write/TaskWriter";
-import { SyncEngine } from "./sync/SyncEngine";
+import { SkipKind, SyncEngine, SyncResult } from "./sync/SyncEngine";
 
 interface PluginData {
   settings: PluginSettings;
@@ -23,6 +23,19 @@ interface LegacySettings {
   syncOnFocus?: boolean;
   skipPullOnEdit?: boolean;
 }
+
+/** skip 사유를 사람이 읽는 말로. 숫자만 보여주면 원인을 못 찾는다. */
+const SKIP_LABEL: Record<SkipKind, string> = {
+  "vault-behind": "볼트 동기화 중",
+  "duplicate-id": "🆔 중복",
+  "hold-task-gone": "task 없음(보류)",
+  "hold-due-invalid": "📅 없음(보류)",
+  "hold-unschedule": "이벤트 삭제됨(보류)",
+  "cold-start-create": "콜드 스타트(생성 보류)",
+  "ensure-id-failed": "🆔 쓰기 실패",
+  "create-failed": "이벤트 생성 실패",
+  "reconcile-error": "조정 실패",
+};
 
 /** localStorage 키. App.saveLocalStorage가 볼트 단위로 네임스페이스를 붙인다. */
 const STATE_LS_KEY = "tasks-gcal-sync:state";
@@ -62,6 +75,8 @@ export default class TasksGcalSyncPlugin extends Plugin {
   private autoPushTimer: number | null = null;
   private followUpTimer: number | null = null;
   private lastSyncAt = 0; // 마지막 동기화 "완료" 시각(ms) — 최소 간격 계산 기준
+  private lastResult: SyncResult | null = null;
+  private lastFatal: string | null = null;
   private statusBar!: HTMLElement;
 
   async onload(): Promise<void> {
@@ -105,6 +120,11 @@ export default class TasksGcalSyncPlugin extends Plugin {
       id: "backfill-ids",
       name: "기존 이벤트 설명에 🆔 백필",
       callback: () => this.backfillIds(),
+    });
+    this.addCommand({
+      id: "sync-report",
+      name: "동기화 리포트 (마지막 결과 · 건너뛴 이유 · 실패)",
+      callback: () => this.showReport(),
     });
     this.addCommand({
       id: "rebuild-records",
@@ -206,9 +226,16 @@ export default class TasksGcalSyncPlugin extends Plugin {
     this.statusBar.setText("GCal ⟳");
     try {
       const r = await this.engine.run(opts);
+      this.lastResult = r;
+      this.lastFatal = null;
       // 체크 해제는 한 사이클 보류한다(롤백 사고 대비). 보류가 풀리는 시점에 한 번 더
       // 돌지 않으면 다음 주기(기본 5분)까지 GCal이 그대로라 "아무 일도 안 일어난다"로 보인다.
       if (r.retryAfterMs) this.scheduleFollowUp(r.retryAfterMs);
+      const skipDetail = this.describeSkips(r);
+      if (skipDetail) console.log("[tasks-gcal-sync] 건너뜀:", skipDetail);
+      for (const f of r.failures) {
+        console.error(`[tasks-gcal-sync] 실패 ${f.where}: ${f.message}`);
+      }
       if (!silent || r.created || r.updated || r.moved || r.deleted || r.pulled) {
         const msg =
           `GCal 동기화: +${r.created} ~${r.updated} ↔${r.moved} -${r.deleted} ⬇${r.pulled}` +
@@ -216,11 +243,27 @@ export default class TasksGcalSyncPlugin extends Plugin {
         console.log("[tasks-gcal-sync]", msg);
         new Notice(msg, 10000);
       }
-      this.statusBar.setText(`GCal ✓ ${this.nowHM()}`);
+      // **항목별 실패는 예외가 아니라 결과다.** 예전엔 전부 catch 로 삼키고 상태바에
+      // `✓` 를 찍어서, 인증이 통째로 깨진 채 "도는 것 같은데 아무것도 안 바뀌는"
+      // 상태가 며칠 갔다(2026-07-21). 하나라도 터졌으면 눈에 보이게 한다.
+      if (r.failures.length) {
+        this.statusBar.setText(`GCal ⚠ ${this.nowHM()}`);
+        if (!silent) {
+          new Notice(
+            `동기화 중 ${r.failures.length}건 실패 — ${r.failures[0].message}`,
+            10000
+          );
+        }
+      } else {
+        this.statusBar.setText(`GCal ✓ ${this.nowHM()}`);
+      }
+      this.statusBar.setAttribute("aria-label", this.reportText());
     } catch (e: any) {
       console.error("[tasks-gcal-sync]", e);
+      this.lastFatal = e?.message ?? String(e);
       if (!silent) new Notice("동기화 실패: " + e.message);
       this.statusBar.setText(`GCal ⚠ ${this.nowHM()}`);
+      this.statusBar.setAttribute("aria-label", this.reportText());
     } finally {
       this.syncing = false;
       this.lastSyncAt = Date.now(); // 최소 간격은 "완료" 시각 기준 (실패해도 연타 방지)
@@ -234,6 +277,54 @@ export default class TasksGcalSyncPlugin extends Plugin {
       this.followUpTimer = null;
       this.runSync(true);
     }, delay);
+  }
+
+  private describeSkips(r: SyncResult): string {
+    return (Object.keys(r.skips) as SkipKind[])
+      .filter((k) => r.skips[k])
+      .map((k) => `${SKIP_LABEL[k]} ${r.skips[k]}`)
+      .join(" · ");
+  }
+
+  /** 상태바 tooltip · 리포트 명령이 함께 쓰는 요약. */
+  private reportText(): string {
+    const lines: string[] = [];
+    const r = this.lastResult;
+    lines.push(
+      this.lastSyncAt
+        ? `마지막 동기화: ${this.nowHM()} 기준 ${Math.round(
+            (Date.now() - this.lastSyncAt) / 1000
+          )}초 전`
+        : "아직 동기화한 적 없음"
+    );
+    if (this.lastFatal) lines.push(`⚠ 동기화 실패: ${this.lastFatal}`);
+    if (r) {
+      lines.push(
+        `결과: 생성 ${r.created} · 수정 ${r.updated} · 이동 ${r.moved} · 삭제 ${r.deleted} · 노트반영 ${r.pulled}`
+      );
+      const skips = this.describeSkips(r);
+      if (skips) lines.push(`건너뜀 ${r.skipped}건 — ${skips}`);
+      for (const f of r.failures.slice(0, 5)) {
+        lines.push(`⚠ ${f.where}: ${f.message}`);
+      }
+      if (r.failures.length > 5) {
+        lines.push(`… 외 ${r.failures.length - 5}건 (콘솔 참고)`);
+      }
+    }
+    if (!this.auth.isAuthenticated()) lines.push("⚠ Google 미인증");
+    const scan = this.state.lastFullScanAt;
+    lines.push(
+      scan
+        ? `전수 스캔: ${Math.round((Date.now() - scan) / 3600_000)}시간 전`
+        : "전수 스캔: 아직 안 함"
+    );
+    return lines.join("\n");
+  }
+
+  private showReport(): void {
+    const text = this.reportText();
+    console.log("[tasks-gcal-sync] 리포트\n" + text);
+    new Notice(text, 15000);
   }
 
   private nowHM(): string {

@@ -26,6 +26,27 @@ import {
   todayStr,
 } from "./dates";
 
+/**
+ * 이번 run 에서 무엇을 못 했는가. `skipped` 는 합계일 뿐이라 원인을 못 알려준다 —
+ * 2026-07-21 의 "동기화가 도는 것 같은데 아무것도 안 바뀐다" 가 정확히 이 사각지대였다
+ * (인증이 통째로 깨졌는데 항목별 catch 가 조용히 삼키고 있었다).
+ */
+export type SkipKind =
+  | "vault-behind" // 볼트가 Sync 중 → run 전체 보류
+  | "duplicate-id" // 같은 🆔 가 두 줄 → 정본 불명
+  | "hold-task-gone" // task 없음, 그러나 지우기엔 이른 상태
+  | "hold-due-invalid" // 📅 유실, 그러나 지우기엔 이른 상태
+  | "hold-unschedule" // 이벤트 삭제됨, 그러나 미일정화하기엔 이른 상태
+  | "cold-start-create" // 콜드 스타트라 새 이벤트를 안 만듦
+  | "ensure-id-failed" // 🆔 쓰기 실패(줄이 그 사이 바뀜 등)
+  | "create-failed" // 이벤트 생성 실패
+  | "reconcile-error"; // 조정 중 예외
+
+export interface SyncFailure {
+  where: string; // task 🆔 또는 경로
+  message: string;
+}
+
 export interface SyncResult {
   created: number;
   updated: number;
@@ -33,6 +54,10 @@ export interface SyncResult {
   deleted: number;
   pulled: number; // GCal → Obsidian 반영 건수
   skipped: number;
+  /** 사유별 skip 건수. 합이 `skipped` 다. */
+  skips: Partial<Record<SkipKind, number>>;
+  /** 실제로 터진 것. 콘솔에만 남기면 못 본다 — 호출부가 사용자에게 보여준다. */
+  failures: SyncFailure[];
   /**
    * done 회귀 보류가 걸려 이 시간(ms) 뒤에 다시 돌면 반영될 것이 있다.
    * 없으면 undefined. 호출부(main)가 후속 run을 예약한다 — 안 그러면 체크 해제가
@@ -512,6 +537,20 @@ export class SyncEngine {
     return over;
   }
 
+  /** skip 을 사유와 함께 센다. 합계(`skipped`)와 내역이 항상 같이 움직이게 한다. */
+  private skip(r: SyncResult, kind: SkipKind): void {
+    r.skipped++;
+    r.skips[kind] = (r.skips[kind] ?? 0) + 1;
+  }
+
+  /** 실제로 터진 것. 콘솔에만 남기면 못 본다. */
+  private fail(r: SyncResult, where: string, e: unknown): void {
+    r.failures.push({
+      where,
+      message: e instanceof Error ? e.message : String(e),
+    });
+  }
+
   private resetBehindBudget(): void {
     this.behindSince = null;
     this.behindRuns = 0;
@@ -838,6 +877,8 @@ export class SyncEngine {
       deleted: 0,
       pulled: 0,
       skipped: 0,
+      skips: {},
+      failures: [],
     };
 
     // 볼트가 아직 동기화 중이면 **run 전체를 건너뛴다**(0.3.13~).
@@ -848,7 +889,7 @@ export class SyncEngine {
     const overBudget = behind && this.behindBudgetExceeded();
     if (behind && !overBudget && !opts.force) {
       console.log("[tasks-gcal-sync] 볼트 동기화 중 → 이번 run 보류");
-      return { ...empty, skipped: 1 };
+      return { ...empty, skipped: 1, skips: { "vault-behind": 1 } };
     }
     if (!behind) this.resetBehindBudget();
     // 상한 초과 시엔 뒤처짐 판정을 무시하고 평소대로 돈다(fail-open).
@@ -898,6 +939,8 @@ export class SyncEngine {
       deleted: 0,
       pulled: 0,
       skipped: 0,
+      skips: {},
+      failures: [],
     };
 
     // ---- 0) records 재구성(캐시 복구) ----
@@ -925,6 +968,7 @@ export class SyncEngine {
           pullByCal.set(cal, await this.pullCalendar(cal));
         } catch (e) {
           console.error("[tasks-gcal-sync] pull 실패:", cal, e);
+          this.fail(result, `pull ${cal}`, e);
           pullOk = false; // 한 캘린더라도 못 읽었으면 콜드 스타트 잠금을 풀지 않는다
         }
       }
@@ -967,7 +1011,7 @@ export class SyncEngine {
 
         switch (plan.kind) {
           case "skip":
-            result.skipped++;
+            this.skip(result, plan.reason);
             break;
           case "delete-event":
             await this.client.deleteEvent(rec.calendarId, rec.eventId);
@@ -985,7 +1029,8 @@ export class SyncEngine {
         }
       } catch (e) {
         console.error("[tasks-gcal-sync] reconcile 실패:", id, e);
-        result.skipped++;
+        this.skip(result, "reconcile-error");
+        this.fail(result, id, e);
       }
     }
 
@@ -1035,7 +1080,7 @@ export class SyncEngine {
       // 콜드 스타트에는 새 이벤트를 만들지 않는다. 노트가 아직 안 내려왔을 뿐인데
       // 만들면 다른 기기가 이미 만든 것과 겹치거나, 곧 사라질 task의 이벤트가 남는다.
       if (coldHold) {
-        result.skipped++;
+        this.skip(result, "cold-start-create");
         continue;
       }
 
@@ -1048,7 +1093,8 @@ export class SyncEngine {
           await this.writer.ensureId(t, id);
         } catch (e) {
           console.warn("[tasks-gcal-sync] ensureId 실패, skip:", t.path, e);
-          result.skipped++;
+          this.skip(result, "ensure-id-failed");
+          this.fail(result, t.path, e);
           continue;
         }
         existingIds.add(id);
@@ -1073,7 +1119,8 @@ export class SyncEngine {
         result.created++;
       } catch (e) {
         console.error("[tasks-gcal-sync] 생성 실패:", t.path, e);
-        result.skipped++;
+        this.skip(result, "create-failed");
+        this.fail(result, t.path, e);
       }
     }
 

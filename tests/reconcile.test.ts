@@ -131,7 +131,7 @@ function harness(opts: {
   // 기본은 "콜드 스타트 지난 상태" — 콜드 스타트 자체는 따로 테스트한다.
   (engine as any).loadedAt = Date.now() - 10 * 60_000;
   (engine as any).pullCycleDone = true;
-  return { engine, calls, state, settings };
+  return { engine, calls, state, settings, client };
 }
 
 const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
@@ -529,6 +529,38 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     await h.engine.run();
     eq(h.calls.patch.length, 1, "날짜 변경은 push 된다");
     eq("description" in h.calls.patch[0].patch, false, "설명을 모르면 그 키를 안 보낸다");
+  }
+
+  // -- 26) skip 은 **사유와 함께** 센다. 합계만 있으면 원인을 못 찾는다
+  //     (2026-07-21 "도는 것 같은데 아무것도 안 바뀜" 의 사각지대).
+  {
+    const h = harness({
+      tasks: [task("A1", false), task("A1", false)], // 같은 🆔 두 줄
+      events: [doneEvent("A1", false, "200")],
+      records: { A1: rec({ gcalUpdated: "200" }) },
+    });
+    const r = await h.engine.run();
+    eq(r.skipped, 1, "건너뛴 건수");
+    eq(r.skips["duplicate-id"], 1, "사유가 함께 기록된다");
+    eq(r.failures, [], "정상 보류는 실패가 아니다");
+  }
+
+  // -- 27) 항목별 실패는 예외로 새지 않고 result.failures 에 남는다.
+  //     전부 catch 로 삼키고 상태바에 ✓ 를 찍던 게 07-21 사고를 며칠 끌었다.
+  {
+    const h = harness({
+      tasks: [task("A1", true)],
+      events: [doneEvent("A1", false, "200")],
+      records: { A1: rec({ gcalUpdated: "200" }) },
+    });
+    h.client.patchEvent = async () => {
+      throw new Error("GCal PATCH 401: invalid_client");
+    };
+    const r = await h.engine.run();
+    eq(r.skips["reconcile-error"], 1, "조정 실패로 분류");
+    eq(r.failures.length, 1, "실패가 결과에 남는다");
+    eq(r.failures[0].where, "A1", "어느 항목인지");
+    eq(r.failures[0].message.includes("invalid_client"), true, "원인 메시지 보존");
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);
