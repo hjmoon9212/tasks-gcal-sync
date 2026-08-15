@@ -7,6 +7,7 @@ import { CalendarClient } from "./gcal/CalendarClient";
 import { TaskRepository } from "./data/TaskRepository";
 import { TaskWriter } from "./write/TaskWriter";
 import { SkipKind, SyncEngine, SyncResult } from "./sync/SyncEngine";
+import { SyncLogWriter } from "./sync/SyncLog";
 
 interface PluginData {
   settings: PluginSettings;
@@ -69,6 +70,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
   repo!: TaskRepository;
   writer!: TaskWriter;
   engine!: SyncEngine;
+  log!: SyncLogWriter;
 
   private syncing = false;
   private intervalId: number | null = null;
@@ -96,6 +98,12 @@ export default class TasksGcalSyncPlugin extends Plugin {
     this.client = new CalendarClient(this.auth);
     this.repo = new TaskRepository(this.app, () => this.settings.globalFilter);
     this.writer = new TaskWriter(this.app, () => this.settings.globalFilter);
+    this.log = new SyncLogWriter(this.app, () => ({
+      enabled: this.settings.syncLogEnabled,
+      path: this.logPath(),
+      maxKB: this.settings.syncLogMaxKB,
+      logSkips: this.settings.syncLogSkips,
+    }));
     this.engine = new SyncEngine(
       this.app,
       this.settings,
@@ -109,12 +117,12 @@ export default class TasksGcalSyncPlugin extends Plugin {
     // 수동 실행은 force — 사용자가 명시적으로 요청한 것이므로 콜드 스타트/뒤처짐 보류를
     // 우회한다(자동 트리거만 보류 대상).
     this.addRibbonIcon("calendar-clock", "Tasks → Google Calendar 동기화", () =>
-      this.runSync(false, { force: true })
+      this.runSync(false, { force: true, trigger: "수동(리본)" })
     );
     this.addCommand({
       id: "sync-now",
       name: "지금 동기화 (Tasks → Google Calendar)",
-      callback: () => this.runSync(false, { force: true }),
+      callback: () => this.runSync(false, { force: true, trigger: "수동(명령)" }),
     });
     this.addCommand({
       id: "backfill-ids",
@@ -129,12 +137,22 @@ export default class TasksGcalSyncPlugin extends Plugin {
     this.addCommand({
       id: "rebuild-records",
       name: "캘린더 전수 스캔 (매핑 재구성 · 고아 이벤트 회수)",
-      callback: () => this.runSync(false, { fullScan: true, force: true }),
+      callback: () =>
+        this.runSync(false, {
+          fullScan: true,
+          force: true,
+          trigger: "수동(전수 스캔)",
+        }),
     });
     this.addCommand({
       id: "cleanup-duplicates",
       name: "중복 이벤트 정리 (같은 task의 GCal 중복 삭제)",
       callback: () => this.cleanupDuplicates(),
+    });
+    this.addCommand({
+      id: "open-sync-log",
+      name: "동기화 로그 열기 (건별 상세 기록)",
+      callback: () => this.openSyncLog(),
     });
     this.statusBar = this.addStatusBarItem();
     this.statusBar.setText("GCal —");
@@ -146,6 +164,9 @@ export default class TasksGcalSyncPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (!(file instanceof TFile) || file.extension !== "md") return;
+        // 로그 파일은 우리가 매 run 끝에 쓴다. 이걸 편집으로 받으면
+        // [동기화 → 로그 기록 → modify → 자동 push → 동기화]가 끝없이 돈다.
+        if (file.path === this.logPath()) return;
         if (this.writer.wroteRecently(file.path, 10_000)) return;
         this.scheduleAutoPush();
       })
@@ -157,7 +178,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
         // 메타데이터 캐시가 준비될 시간을 약간 둠.
         // 전수 스캔은 엔진이 하루 1회로 알아서 판단한다(캐시가 비었으면 즉시).
         // 예전엔 실행할 때마다 캘린더 ±2년치를 훑었다.
-        window.setTimeout(() => this.runSync(true), 3000);
+        window.setTimeout(() => this.runSync(true, { trigger: "시작 시" }), 3000);
       }
     });
   }
@@ -187,7 +208,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
       this.autoPushTimer = null;
       // 편집 트리거도 pull을 함께 한다(0.3.13~). 증분 pull은 캘린더당 목록 호출 1회로 싸고,
       // 원격을 안 보고 미는 run은 "로컬 무조건 승"이 되어 GCal의 최신 변경을 덮어쓴다.
-      this.runSync(true);
+      this.runSync(true, { trigger: "편집 자동" });
     }, delay);
   }
 
@@ -207,7 +228,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
       this.intervalId = window.setInterval(() => {
         // 방금 편집 트리거로 돌았으면 이번 틱은 건너뛴다(최소 간격).
         if (this.cooldownRemaining() > 0) return;
-        this.runSync(true);
+        this.runSync(true, { trigger: `주기(${m}분)` });
       }, m * 60_000);
       this.registerInterval(this.intervalId);
     }
@@ -215,7 +236,13 @@ export default class TasksGcalSyncPlugin extends Plugin {
 
   async runSync(
     silent = false,
-    opts: { pull?: boolean; fullScan?: boolean; force?: boolean } = {}
+    opts: {
+      pull?: boolean;
+      fullScan?: boolean;
+      force?: boolean;
+      /** 로그에 남길 실행 계기(수동·주기·편집 등). 원인 추적에 이게 있어야 한다. */
+      trigger?: string;
+    } = {}
   ): Promise<void> {
     if (this.syncing) return;
     if (!this.auth.isAuthenticated()) {
@@ -236,13 +263,17 @@ export default class TasksGcalSyncPlugin extends Plugin {
       for (const f of r.failures) {
         console.error(`[tasks-gcal-sync] 실패 ${f.where}: ${f.message}`);
       }
+      const summary =
+        `+${r.created} ~${r.updated} ↔${r.moved} -${r.deleted} ⬇${r.pulled}` +
+        (r.skipped ? ` (skip ${r.skipped})` : "");
       if (!silent || r.created || r.updated || r.moved || r.deleted || r.pulled) {
-        const msg =
-          `GCal 동기화: +${r.created} ~${r.updated} ↔${r.moved} -${r.deleted} ⬇${r.pulled}` +
-          (r.skipped ? ` (skip ${r.skipped})` : "");
+        const msg = `GCal 동기화: ${summary}`;
         console.log("[tasks-gcal-sync]", msg);
         new Notice(msg, 10000);
       }
+      // Notice는 10초, 상태바는 마지막 하나, console은 재시작하면 사라진다 →
+      // "무엇이 왜 지워졌나"에 나중에 답할 수 있는 건 이 파일뿐이다.
+      await this.log.append(summary, r.entries, opts.trigger ?? "수동");
       // **항목별 실패는 예외가 아니라 결과다.** 예전엔 전부 catch 로 삼키고 상태바에
       // `✓` 를 찍어서, 인증이 통째로 깨진 채 "도는 것 같은데 아무것도 안 바뀌는"
       // 상태가 며칠 갔다(2026-07-21). 하나라도 터졌으면 눈에 보이게 한다.
@@ -261,6 +292,11 @@ export default class TasksGcalSyncPlugin extends Plugin {
     } catch (e: any) {
       console.error("[tasks-gcal-sync]", e);
       this.lastFatal = e?.message ?? String(e);
+      await this.log.append(
+        "동기화 중단",
+        [{ action: "FAIL", detail: `run 전체 실패: ${this.lastFatal}` }],
+        opts.trigger ?? "수동"
+      );
       if (!silent) new Notice("동기화 실패: " + e.message);
       this.statusBar.setText(`GCal ⚠ ${this.nowHM()}`);
       this.statusBar.setAttribute("aria-label", this.reportText());
@@ -275,7 +311,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
     if (this.followUpTimer !== null) window.clearTimeout(this.followUpTimer);
     this.followUpTimer = window.setTimeout(() => {
       this.followUpTimer = null;
-      this.runSync(true);
+      this.runSync(true, { trigger: "보류 해제 후속" });
     }, delay);
   }
 
@@ -319,6 +355,34 @@ export default class TasksGcalSyncPlugin extends Plugin {
         : "전수 스캔: 아직 안 함"
     );
     return lines.join("\n");
+  }
+
+  /** 동기화 로그 경로(볼트 루트 기준). 비어 있으면 기본값. */
+  logPath(): string {
+    const p = this.settings.syncLogPath?.trim();
+    return normalizePath(p || "Logs/GCal 동기화 로그.md");
+  }
+
+  /**
+   * 로그 노트를 새 탭으로 연다.
+   * 볼트 인덱스 밖(.obsidian 등)에 두면 Obsidian이 노트로 취급하지 않아 열 수 없다 —
+   * 그때는 경로를 옮기라고 알린다(조용히 실패하면 로그가 없는 것처럼 보인다).
+   */
+  async openSyncLog(): Promise<void> {
+    const path = this.logPath();
+    const f = this.app.vault.getAbstractFileByPath(path);
+    if (f instanceof TFile) {
+      await this.app.workspace.getLeaf(true).openFile(f);
+      return;
+    }
+    if (await this.app.vault.adapter.exists(path)) {
+      new Notice(
+        `로그가 볼트 인덱스 밖에 있어 열 수 없습니다:\n${path}\n설정에서 볼트 안 경로(예: Logs/…)로 바꾸세요.`,
+        12000
+      );
+      return;
+    }
+    new Notice("아직 기록된 동기화 로그가 없습니다.", 6000);
   }
 
   private showReport(): void {

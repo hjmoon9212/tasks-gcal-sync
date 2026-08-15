@@ -47,6 +47,12 @@ export interface PluginSettings {
   autoPushDebounceSeconds: number; // 편집이 멎고 몇 초 뒤에 동기화할지
   minSyncIntervalSeconds: number; // 자동 동기화 최소 간격(수동/리본은 무시). 0 = 제한 없음
 
+  // 상세 로그 — Notice·상태바·console이 모두 휘발성이라, 사후 추적은 이 파일로만 가능하다
+  syncLogEnabled: boolean;
+  syncLogPath: string; // 볼트 루트 기준. 볼트 안이면 Obsidian에서 바로 열람 가능
+  syncLogMaxKB: number; // 초과분은 오래된 것부터 삭제. 0 = 무제한
+  syncLogSkips: boolean; // 보류·건너뜀·실패도 남길지
+
   // (구버전 호환) 단일 대상 캘린더 — 마이그레이션에만 사용
   targetCalendarId?: string;
   targetCalendarName?: string;
@@ -74,6 +80,10 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   autoPushOnEdit: true,
   autoPushDebounceSeconds: 20,
   minSyncIntervalSeconds: 60,
+  syncLogEnabled: true,
+  syncLogPath: "Logs/GCal 동기화 로그.md",
+  syncLogMaxKB: 512,
+  syncLogSkips: true,
 };
 
 /**

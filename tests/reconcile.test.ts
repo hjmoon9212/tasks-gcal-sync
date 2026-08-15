@@ -561,6 +561,56 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     eq(r.failures.length, 1, "실패가 결과에 남는다");
     eq(r.failures[0].where, "A1", "어느 항목인지");
     eq(r.failures[0].message.includes("invalid_client"), true, "원인 메시지 보존");
+    eq(r.entries.filter((e) => e.action === "FAIL").length, 1, "로그에도 남는다");
+  }
+
+  // ── 12) 로그 항목: 사후에 "무엇이 왜"에 답할 수 있어야 한다.
+  //     카운터만으로는 삭제 한 건의 이유도, 충돌에서 무엇이 버려졌는지도 알 수 없다.
+  {
+    // (a) task가 사라져 이벤트를 지운 경우 — 사유와 마지막 스냅샷이 남는가
+    const h = harness({
+      tasks: [],
+      events: [doneEvent("A1", false, "100")],
+      records: { A1: rec() },
+    });
+    const r = await h.engine.run();
+    eq(r.deleted, 1, "task 없음 → 삭제");
+    const del = r.entries.find((e) => e.action === "DELETE")!;
+    eq(del.id, "A1", "삭제 기록: 어느 task인지");
+    eq(del.eventId, "ev-A1", "삭제 기록: 어느 이벤트인지");
+    eq(del.detail!.includes("task 줄이 사라짐"), true, "삭제 기록: 사유");
+    eq(del.detail!.includes(TODAY), true, "삭제 기록: 마지막 스냅샷 due");
+  }
+  {
+    // (b) 같은 필드를 양쪽에서 수정 → GCal 채택. 폐기된 노트 값이 로그에 남아야 한다.
+    const ev = doneEvent("A1", false, "200");
+    ev.start = { date: "2026-08-20" };
+    ev.end = { date: "2026-08-21" };
+    ev.extendedProperties.private.tgsDue = "2026-08-20";
+    const h = harness({
+      tasks: [task("A1", false, "2026-08-19")], // 노트도 같은 필드(due)를 바꿨다
+      events: [ev],
+      records: { A1: rec({ gcalUpdated: "100" }) },
+    });
+    const r = await h.engine.run();
+    const merged = r.entries.find((e) => e.action === "PULL" || e.action === "UPDATE")!;
+    eq(merged.id, "A1", "충돌 기록: 대상");
+    eq(merged.detail!.includes("⚔️ 충돌"), true, "충돌 기록: 충돌 표시");
+    eq(merged.detail!.includes("2026-08-19"), true, "충돌 기록: 폐기된 노트 값");
+    eq(merged.detail!.includes("2026-08-20"), true, "충돌 기록: 채택된 GCal 값");
+    eq(merged.detail!.includes("GCal 채택"), true, "충돌 기록: 승자");
+    eq(merged.where, "note.md:1", "충돌 기록: 노트 위치");
+  }
+  {
+    // (c) 조용한 run은 로그를 남기지 않는다 — 5분마다 "변화 없음"이 쌓이면
+    //     정작 찾아야 할 삭제 한 줄이 묻힌다.
+    const h = harness({
+      tasks: [task("A1", false)],
+      events: [doneEvent("A1", false, "100")],
+      records: { A1: rec({ gcalUpdated: "100" }) },
+    });
+    const r = await h.engine.run();
+    eq(r.entries, [], "아무 일도 없으면 기록도 없다");
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

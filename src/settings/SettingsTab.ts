@@ -377,7 +377,63 @@ export class SettingsTab extends PluginSettingTab {
       b
         .setButtonText("지금 동기화")
         .setCta()
-        .onClick(() => this.plugin.runSync())
+        .onClick(() => this.plugin.runSync(false, { trigger: "수동(설정)" }))
     );
+
+    // ---- 5. 상세 로그 ----
+    containerEl.createEl("h3", { text: "5. 동기화 로그" });
+    containerEl.createEl("p", {
+      text:
+        "무엇이 왜 생성·수정·삭제됐는지 건별로 노트에 기록합니다. 충돌이면 어느 필드가 겹쳤고 노트와 GCal이 각각 무엇으로 바꿨고 어느 쪽이 채택돼 무엇이 폐기됐는지까지 남습니다. 변화가 없는 동기화는 기록하지 않습니다.",
+      cls: "setting-item-description",
+    });
+
+    new Setting(containerEl).setName("로그 기록").addToggle((t) =>
+      t.setValue(s.syncLogEnabled).onChange(async (v) => {
+        s.syncLogEnabled = v;
+        await this.plugin.saveAll();
+      })
+    );
+
+    new Setting(containerEl)
+      .setName("로그 파일 경로")
+      .setDesc(
+        "볼트 루트 기준. 볼트 안에 두면 바로 열어볼 수 있고, 이 파일의 수정은 자동 push 감시에서 제외됩니다."
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder("Logs/GCal 동기화 로그.md")
+          .setValue(s.syncLogPath)
+          .onChange(async (v) => {
+            s.syncLogPath = v.trim();
+            await this.plugin.saveAll();
+          })
+      )
+      .addButton((b) =>
+        b.setButtonText("열기").onClick(() => this.plugin.openSyncLog())
+      );
+
+    new Setting(containerEl)
+      .setName("보류·건너뜀·실패도 기록")
+      .setDesc(
+        "콜드 스타트 보류, 🆔 중복, API 실패처럼 '아무 일도 안 일어난' 이유. 지금은 콘솔에만 남고 재시작하면 사라집니다."
+      )
+      .addToggle((t) =>
+        t.setValue(s.syncLogSkips).onChange(async (v) => {
+          s.syncLogSkips = v;
+          await this.plugin.saveAll();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("최대 크기(KB)")
+      .setDesc("초과하면 오래된 앞부분부터 잘라냅니다. 0 = 무제한.")
+      .addText((t) =>
+        t.setValue(String(s.syncLogMaxKB)).onChange(async (v) => {
+          const n = parseInt(v, 10);
+          s.syncLogMaxKB = isNaN(n) || n < 0 ? 0 : n;
+          await this.plugin.saveAll();
+        })
+      );
   }
 }

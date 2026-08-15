@@ -4,6 +4,7 @@ import { PersistedState, SyncRecord } from "./StateStore";
 import { TaskRepository, VaultTask } from "../data/TaskRepository";
 import { CalendarClient, GCalEvent } from "../gcal/CalendarClient";
 import { TaskWriter } from "../write/TaskWriter";
+import { SyncLogEntry } from "./SyncLog";
 import {
   decideReconcile,
   Field,
@@ -51,6 +52,19 @@ export interface SyncFailure {
   message: string;
 }
 
+/** skip 사유를 로그에 적을 한국어 라벨. main의 SKIP_LABEL과 같은 문구를 쓴다. */
+const SKIP_TEXT: Record<SkipKind, string> = {
+  "vault-behind": "볼트가 Obsidian Sync로 아직 따라잡는 중 → run 전체 보류",
+  "duplicate-id": "같은 🆔가 두 줄 이상 → 정본 불명, 손대지 않음",
+  "hold-task-gone": "task가 안 보이지만 지우기엔 이름 → 이벤트 유지",
+  "hold-due-invalid": "📅가 없지만 지우기엔 이름 → 이벤트 유지",
+  "hold-unschedule": "이벤트가 삭제됐지만 미일정화하기엔 이름 → 📅 유지",
+  "cold-start-create": "콜드 스타트 → 새 이벤트 생성 보류",
+  "ensure-id-failed": "🆔를 노트에 쓰지 못함",
+  "create-failed": "이벤트 생성 실패",
+  "reconcile-error": "조정 중 예외",
+};
+
 export interface SyncResult {
   created: number;
   updated: number;
@@ -62,6 +76,11 @@ export interface SyncResult {
   skips: Partial<Record<SkipKind, number>>;
   /** 실제로 터진 것. 콘솔에만 남기면 못 본다 — 호출부가 사용자에게 보여준다. */
   failures: SyncFailure[];
+  /**
+   * 건별 기록. 카운터는 "몇 건"만 알려주므로 사후에 원인을 못 찾는다 —
+   * 무엇이 어느 캘린더에서 왜 바뀌었는지는 여기에만 남는다(호출부가 파일로 적는다).
+   */
+  entries: SyncLogEntry[];
   /**
    * done 회귀 보류가 걸려 이 시간(ms) 뒤에 다시 돌면 반영될 것이 있다.
    * 없으면 undefined. 호출부(main)가 후속 run을 예약한다 — 안 그러면 체크 해제가
@@ -615,6 +634,48 @@ export class SyncEngine {
     });
   }
 
+  /** calendarId → 사람이 읽을 이름. 설정 캐시에 없으면 id 그대로. */
+  private calName(calendarId: string): string {
+    return (
+      this.settings.calendars.find((c) => c.id === calendarId)?.name ??
+      calendarId
+    );
+  }
+
+  /** 스냅샷 한 필드를 로그에 적을 문자열로. 빈 값도 "없음"으로 보이게 한다. */
+  private fieldText(
+    s: { due: string; start?: string; time?: string; done: boolean; title: string },
+    f: Field
+  ): string {
+    if (f === "due") return s.due || "(없음)";
+    if (f === "start") return s.start ?? s.due;
+    if (f === "time") return s.time || "(종일)";
+    if (f === "done") return s.done ? "완료" : "미완료";
+    return `"${s.title}"`;
+  }
+
+  /** `due 2026-08-14→2026-08-16` 형태로 필드별 변화를 나열. */
+  private diffText(
+    before: { due: string; start?: string; time?: string; done: boolean; title: string },
+    after: { due: string; start?: string; time?: string; done: boolean; title: string },
+    fields: Field[]
+  ): string {
+    return fields
+      .map((f) => `${f} ${this.fieldText(before, f)}→${this.fieldText(after, f)}`)
+      .join(", ");
+  }
+
+  /** before(직전 스냅샷) 대비 after에서 실제로 값이 달라진 필드만 추린다. */
+  private changedFields(
+    before: { due: string; start?: string; time?: string; done: boolean; title: string },
+    after: { due: string; start?: string; time?: string; done: boolean; title: string },
+    fields: readonly Field[] = ["due", "start", "time", "done", "title"]
+  ): Field[] {
+    return fields.filter(
+      (f) => this.fieldText(before, f) !== this.fieldText(after, f)
+    );
+  }
+
   private resetBehindBudget(): void {
     this.behindSince = null;
     this.behindRuns = 0;
@@ -823,6 +884,16 @@ export class SyncEngine {
   }): Promise<void> {
     const { plan, id, rec, task } = c;
     const where = `${task.path}:${task.line + 1}`;
+    // rec은 아래에서 갱신된다 → 로그에 "무엇이 무엇으로" 바뀌었는지 적으려면
+    // 직전 스냅샷을 먼저 떠 둔다. 이게 양쪽 변경을 판정한 기준값이기도 하다.
+    const before = {
+      due: rec.due,
+      start: rec.start,
+      time: rec.time,
+      done: rec.done,
+      title: rec.title,
+    };
+    const fromCalendar = rec.calendarId;
 
     // ── 1) pull: GCal이 이긴 필드만 노트에 반영 ──
     // writer가 쓰기 후 task의 파싱 필드까지 갱신하므로, 아래 push는 병합된 값을 올린다.
@@ -881,6 +952,7 @@ export class SyncEngine {
     }
 
     let pushed = false;
+    let pushKind: "move" | "update" | "presentation" | null = null;
     if ((plan.pushNeeded || normalizeNeeded) && canWriteRemote) {
       // done을 보류 중이면 완료 상태만 기존 값으로 고정해서 올린다 —
       // 안 그러면 날짜/제목 push에 미완료가 딸려가 보류가 무의미해진다.
@@ -896,6 +968,7 @@ export class SyncEngine {
         const updatedEv = await this.pushPresentation(rec, pushTask, id, c.ev);
         rec.gcalUpdated = updatedEv.updated;
         c.result.updated++;
+        pushKind = "presentation";
       } else if (target && target.id !== rec.calendarId) {
         // 대상 캘린더 변경 → 이동
         try {
@@ -911,6 +984,7 @@ export class SyncEngine {
         rec.calendarId = target.id;
         rec.gcalUpdated = newEv.updated; // 우리 push의 updated 저장 → 다음 pull에서 self-echo 제외
         c.result.moved++;
+        pushKind = "move";
       } else {
         const updatedEv = await this.pushUpdate(
           rec,
@@ -921,6 +995,7 @@ export class SyncEngine {
         );
         rec.gcalUpdated = updatedEv.updated;
         c.result.updated++;
+        pushKind = "update";
       }
       // 완료 해제가 실제로 GCal에 올라간 순간. 되돌리기 힘든 방향이라 조용히 넘기지 않는다 —
       // 노트에서 실수로 풀린 걸 이틀 뒤에 발견한 사고가 있었다(2026-08-09 CISS).
@@ -949,6 +1024,118 @@ export class SyncEngine {
     }
     // normalizeNeeded인데 못 찍었으면 스냅샷을 그대로 둔다 →
     // 다음 사이클에 "로컬이 바뀐 것"으로 읽혀 push되고, 그때 표현이 맞춰진다.
+
+    this.logMerge({
+      plan,
+      id,
+      rec,
+      task,
+      before,
+      fromCalendar,
+      applied,
+      pushKind,
+      blockedByCold: (plan.pushNeeded || normalizeNeeded) && !canWriteRemote,
+      result: c.result,
+      where,
+    });
+  }
+
+  /**
+   * 병합 한 건이 실제로 무엇을 했는지 한 줄로 남긴다.
+   *
+   * 카운터(`~3`)로는 "무엇이 무엇으로 바뀌었는지"도, "무엇이 폐기됐는지"도 알 수 없다.
+   * 특히 충돌은 한쪽 변경이 조용히 사라지는 유일한 경로라 근거를 남겨야 한다 —
+   * 어느 필드가 겹쳤고, 노트/GCal이 각각 무엇으로 바꿨고, 무엇이 버려졌는지까지 적는다.
+   */
+  private logMerge(c: {
+    plan: MergePlan;
+    id: string;
+    rec: SyncRecord;
+    task: VaultTask;
+    before: { due: string; start?: string; time?: string; done: boolean; title: string };
+    fromCalendar: string;
+    applied: Field[];
+    pushKind: "move" | "update" | "presentation" | null;
+    blockedByCold: boolean;
+    result: SyncResult;
+    where: string;
+  }): void {
+    const { plan, before, applied, pushKind } = c;
+    const parts: string[] = [];
+
+    // 1) 충돌 — 같은 필드를 양쪽에서 바꾼 것. GCal이 이기고 노트 변경은 버려진다.
+    if (plan.conflicts.length) {
+      const each = plan.conflicts
+        .map(
+          (f) =>
+            `${f}(노트 ${this.fieldText(before, f)}→${this.fieldText(
+              plan.local,
+              f
+            )} / GCal ${this.fieldText(before, f)}→${this.fieldText(plan.merged, f)})`
+        )
+        .join(", ");
+      parts.push(`⚔️ 충돌 ${each} → GCal 채택, 노트 변경 폐기`);
+    }
+
+    // 2) GCal → 노트로 실제로 쓴 것 / 쓰려다 실패한 것
+    if (applied.length) {
+      parts.push(`⬇ 노트 반영: ${this.diffText(before, plan.merged, applied)}`);
+    }
+    const pullFailed = plan.pulledFields.filter((f) => !applied.includes(f));
+    if (pullFailed.length) {
+      parts.push(
+        `⚠ 노트 반영 실패(값 유지): ${this.diffText(before, plan.merged, pullFailed)}`
+      );
+    }
+
+    // 3) 노트 → GCal. GCal이 가져가지 않은 노트 변경만 올라간다.
+    if (pushKind === "presentation") {
+      parts.push("⬆ 이벤트 표현만 재적용(제목 접두사 등)");
+    } else if (pushKind) {
+      const pushedFields = this.changedFields(before, plan.local).filter(
+        (f) => !plan.pulledFields.includes(f)
+      );
+      if (pushedFields.length) {
+        parts.push(`⬆ GCal 반영: ${this.diffText(before, plan.local, pushedFields)}`);
+      }
+      if (pushKind === "move") {
+        parts.push(
+          `↔ 캘린더 이동: ${this.calName(c.fromCalendar)} → ${this.calName(
+            c.rec.calendarId
+          )} (이벤트 재생성)`
+        );
+      }
+    }
+
+    // 4) 미룬 것 — 이번 run에 "아무 일도 안 일어난" 이유가 여기 있다.
+    if (plan.holdDone) {
+      const sec = Math.round((plan.retryAfterMs ?? 0) / 1000);
+      parts.push(
+        `⏸ 완료 해제(완료→미완료)를 한 사이클 보류 — ${sec}초 뒤 재확인`
+      );
+    }
+    if (c.blockedByCold) {
+      parts.push("⏸ 콜드 스타트 → GCal 쓰기 보류(다음 run에 올라감)");
+    }
+
+    if (!parts.length) return; // 실제로 한 일이 없으면 남기지 않는다
+
+    const action = pushKind === "move"
+      ? "MOVE"
+      : pushKind
+      ? "UPDATE"
+      : applied.length
+      ? "PULL"
+      : "HOLD";
+    c.result.entries.push({
+      action,
+      id: c.id,
+      title: plan.merged.title || plan.local.title,
+      calendar: this.calName(c.rec.calendarId),
+      eventId: c.rec.eventId,
+      where: c.where,
+      detail: parts.join(" | "),
+    });
   }
 
   async run(
@@ -963,6 +1150,7 @@ export class SyncEngine {
       skipped: 0,
       skips: {},
       failures: [],
+      entries: [],
     };
 
     // 볼트가 아직 동기화 중이면 **run 전체를 건너뛴다**(0.3.13~).
@@ -973,7 +1161,12 @@ export class SyncEngine {
     const overBudget = behind && this.behindBudgetExceeded();
     if (behind && !overBudget && !opts.force) {
       console.log("[tasks-gcal-sync] 볼트 동기화 중 → 이번 run 보류");
-      return { ...empty, skipped: 1, skips: { "vault-behind": 1 } };
+      return {
+        ...empty,
+        skipped: 1,
+        skips: { "vault-behind": 1 },
+        entries: [{ action: "SKIP", detail: SKIP_TEXT["vault-behind"] }],
+      };
     }
     if (!behind) this.resetBehindBudget();
     // 상한 초과 시엔 뒤처짐 판정을 무시하고 평소대로 돈다(fail-open).
@@ -1025,6 +1218,7 @@ export class SyncEngine {
       skipped: 0,
       skips: {},
       failures: [],
+      entries: [],
     };
 
     // ---- 0) records 재구성(캐시 복구) ----
@@ -1053,6 +1247,13 @@ export class SyncEngine {
         } catch (e) {
           console.error("[tasks-gcal-sync] pull 실패:", cal, e);
           this.fail(result, `pull ${cal}`, e);
+          result.entries.push({
+            action: "FAIL",
+            calendar: this.calName(cal),
+            detail: `캘린더를 읽지 못함 → 이번 run은 이 캘린더의 GCal 변경을 반영하지 못함: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          });
           pullOk = false; // 한 캘린더라도 못 읽었으면 콜드 스타트 잠금을 풀지 않는다
         }
       }
@@ -1093,28 +1294,80 @@ export class SyncEngine {
           continue;
         }
 
+        const logWhere = task ? `${task.path}:${task.line + 1}` : undefined;
         switch (plan.kind) {
           case "skip":
             this.skip(result, plan.reason);
+            result.entries.push({
+              action: "SKIP",
+              id,
+              title: rec.title,
+              calendar: this.calName(rec.calendarId),
+              eventId: rec.eventId,
+              where: logWhere,
+              detail: SKIP_TEXT[plan.reason],
+            });
             break;
           case "delete-event":
             await this.client.deleteEvent(rec.calendarId, rec.eventId);
             delete records[id];
             result.deleted++;
+            result.entries.push({
+              action: "DELETE",
+              id,
+              title: rec.title,
+              calendar: this.calName(rec.calendarId),
+              eventId: rec.eventId,
+              where: logWhere,
+              detail:
+                plan.reason === "task-gone"
+                  ? `노트에서 task 줄이 사라짐 → 이벤트 삭제 (마지막 스냅샷 due=${rec.due}${
+                      rec.time ? ` ${rec.time}` : ""
+                    })`
+                  : `task는 있으나 📅가 없음 → 이벤트 삭제 (마지막 스냅샷 due=${rec.due})`,
+            });
             break;
           case "drop-record":
             delete records[id];
+            result.entries.push({
+              action: "DROP",
+              id,
+              title: rec.title,
+              calendar: this.calName(rec.calendarId),
+              eventId: rec.eventId,
+              where: logWhere,
+              detail:
+                "GCal에서 이벤트가 삭제됨 + 완료된 줄 → 매핑만 폐기(📅는 기록이므로 유지)",
+            });
             break;
           case "unschedule":
             await this.writer.removeDue(task!);
             delete records[id];
             result.pulled++;
+            result.entries.push({
+              action: "UNSCHEDULE",
+              id,
+              title: rec.title,
+              calendar: this.calName(rec.calendarId),
+              eventId: rec.eventId,
+              where: logWhere,
+              detail: `GCal에서 이벤트가 삭제됨 → 노트의 📅 ${rec.due} 제거(미일정화)`,
+            });
             break;
         }
       } catch (e) {
         console.error("[tasks-gcal-sync] reconcile 실패:", id, e);
         this.skip(result, "reconcile-error");
         this.fail(result, id, e);
+        result.entries.push({
+          action: "FAIL",
+          id,
+          title: rec.title,
+          calendar: this.calName(rec.calendarId),
+          eventId: rec.eventId,
+          where: task ? `${task.path}:${task.line + 1}` : undefined,
+          detail: `조정 중 예외: ${e instanceof Error ? e.message : String(e)}`,
+        });
       }
     }
 
@@ -1142,12 +1395,41 @@ export class SyncEngine {
             const [keep, ...dupes] = existing;
             // 이벤트에 심긴 스냅샷으로 복원 → 다음 sync에서 어느 쪽이 바뀌었는지 정확 판정.
             records[t.id] = this.recordFromEvent(keep, target.id, t);
+            result.entries.push({
+              action: "ADOPT",
+              id: t.id,
+              title: this.titleBase(t),
+              calendar: target.name || target.id,
+              eventId: keep.id,
+              where: `${t.path}:${t.line + 1}`,
+              detail:
+                "GCal에 이미 있던 이벤트를 매핑으로 회수(다른 기기가 만든 것) — " +
+                "새로 만들지 않음",
+            });
             for (const d of dupes) {
               try {
                 await this.client.deleteEvent(target.id, d.id!);
                 result.deleted++;
+                result.entries.push({
+                  action: "DELETE",
+                  id: t.id,
+                  title: this.titleBase(t),
+                  calendar: target.name || target.id,
+                  eventId: d.id,
+                  where: `${t.path}:${t.line + 1}`,
+                  detail: `같은 🆔의 중복 이벤트 정리 (정본 ${keep.id} 유지)`,
+                });
               } catch (e) {
                 console.warn("[tasks-gcal-sync] 중복 삭제 실패:", d.id, e);
+                result.entries.push({
+                  action: "FAIL",
+                  id: t.id,
+                  calendar: target.name || target.id,
+                  eventId: d.id,
+                  detail: `중복 이벤트 삭제 실패: ${
+                    e instanceof Error ? e.message : String(e)
+                  }`,
+                });
               }
             }
             continue;
@@ -1158,6 +1440,16 @@ export class SyncEngine {
             t.id,
             e
           );
+          result.entries.push({
+            action: "FAIL",
+            id: t.id,
+            title: this.titleBase(t),
+            calendar: target.name || target.id,
+            where: `${t.path}:${t.line + 1}`,
+            detail: `기존 이벤트 조회 실패 → 새로 생성 진행(중복 가능): ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          });
         }
       }
 
@@ -1165,10 +1457,19 @@ export class SyncEngine {
       // 만들면 다른 기기가 이미 만든 것과 겹치거나, 곧 사라질 task의 이벤트가 남는다.
       if (coldHold) {
         this.skip(result, "cold-start-create");
+        result.entries.push({
+          action: "HOLD",
+          id: t.id,
+          title: this.titleBase(t),
+          calendar: target.name || target.id,
+          where: `${t.path}:${t.line + 1}`,
+          detail: SKIP_TEXT["cold-start-create"],
+        });
         continue;
       }
 
       let id = t.id;
+      const idWasNew = !id; // 로그용: 이번 run에서 🆔를 새로 부여했는가
       if (!id) {
         // 후보군에 records의 id도 넣는다. existingIds는 이번 run에 파싱된 task의 🆔뿐이라,
         // 파일이 아직 안 내려온 기기에서는 records에만 남은 id가 그대로 재발급될 수 있다.
@@ -1179,6 +1480,15 @@ export class SyncEngine {
           console.warn("[tasks-gcal-sync] ensureId 실패, skip:", t.path, e);
           this.skip(result, "ensure-id-failed");
           this.fail(result, t.path, e);
+          result.entries.push({
+            action: "SKIP",
+            title: this.titleBase(t),
+            calendar: target.name || target.id,
+            where: `${t.path}:${t.line + 1}`,
+            detail: `${SKIP_TEXT["ensure-id-failed"]}: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          });
           continue;
         }
         existingIds.add(id);
@@ -1196,15 +1506,40 @@ export class SyncEngine {
           calendarId: target.id,
           due: t.due,
           start: this.spanStart(t),
+          // ⏰를 빠뜨리면 스냅샷이 "종일"로 남아, 바로 다음 run이 시간대를 바뀐 것으로
+          // 읽고 불필요한 push를 한 번 더 한다(다른 복원 경로들은 이미 넣고 있다).
+          time: this.taskTime(t),
           done: t.checked,
           title: this.titleBase(t),
           gcalUpdated: ev.updated,
         };
         result.created++;
+        result.entries.push({
+          action: "CREATE",
+          id,
+          title: this.titleBase(t),
+          calendar: target.name || target.id,
+          eventId: ev.id,
+          where: `${t.path}:${t.line + 1}`,
+          detail:
+            `due=${t.due}` +
+            (this.spanStart(t) !== t.due ? ` start=${this.spanStart(t)}` : "") +
+            (this.taskTime(t) ? ` time=${this.taskTime(t)}` : " (종일)") +
+            (t.checked ? " done=완료" : "") +
+            (idWasNew ? " · 🆔를 새로 부여해 노트에 기록" : ""),
+        });
       } catch (e) {
         console.error("[tasks-gcal-sync] 생성 실패:", t.path, e);
         this.skip(result, "create-failed");
         this.fail(result, t.path, e);
+        result.entries.push({
+          action: "FAIL",
+          id,
+          title: this.titleBase(t),
+          calendar: target.name || target.id,
+          where: `${t.path}:${t.line + 1}`,
+          detail: `이벤트 생성 실패: ${e instanceof Error ? e.message : String(e)}`,
+        });
       }
     }
 
