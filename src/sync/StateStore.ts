@@ -9,6 +9,12 @@ export interface SyncRecord {
   calendarId: string; // 이벤트가 올라가 있는 캘린더 (태그 변경 시 이동 처리용)
   due: string; // 마지막으로 push한 due (YYYY-MM-DD)
   start?: string; // 마지막으로 push한 이벤트 시작일(🛫 start 또는 due). 없으면 due와 동일 취급
+  /**
+   * 마지막으로 push한 타임블록 "HH:MM-HH:MM". 없거나 ""면 종일 이벤트.
+   * 0.4.5 이전 record엔 이 키가 없으므로 읽을 때 항상 `?? ""`로 받는다 —
+   * undefined를 "종일"로 읽어야 기존 record가 "시각이 지워졌다"로 오판되지 않는다.
+   */
+  time?: string;
 
   done: boolean; // 마지막으로 push한 완료 상태
   title: string; // 마지막으로 push한 정제 제목

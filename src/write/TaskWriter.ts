@@ -86,6 +86,15 @@ export class TaskWriter {
     return this.apply(task, (raw) => TaskLine.removeStart(raw));
   }
 
+  /** ⏰ 타임블록 지정(첫 필드 이모지 앞에 삽입 — Tasks 파싱을 깨지 않기 위해). */
+  setTime(task: VaultTask, range: string): Promise<string> {
+    return this.apply(task, (raw) => TaskLine.setTime(raw, range));
+  }
+
+  removeTime(task: VaultTask): Promise<string> {
+    return this.apply(task, (raw) => TaskLine.removeTime(raw));
+  }
+
   /** GCal 제목 → task 본문 제목 교체(정확히 1회 매칭될 때만, 아니면 throw로 skip). */
   replaceTitle(
     task: VaultTask,

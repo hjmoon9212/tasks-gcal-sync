@@ -22,7 +22,11 @@ import {
   genId,
   isoDaysAgo,
   isValidDate,
+  isValidTimeRange,
+  localTimeZone,
   shiftDateTime,
+  timeOfDateTime,
+  toDateTime,
   todayStr,
 } from "./dates";
 
@@ -238,6 +242,47 @@ export class SyncEngine {
   }
 
   /**
+   * 이벤트의 타임블록 "HH:MM-HH:MM". 종일이면 "", 판정 불가면 undefined.
+   *
+   * 양끝이 모두 dateTime 일 때만 시각으로 인정한다. 한쪽만 dateTime 인 혼합형은
+   * (iPhone 기본 캘린더 등이 만든다) 애초에 patch 하면 400 이 나는 모양이라 손대지 않는다.
+   * 자정을 넘기거나 여러 날에 걸친 시간지정 이벤트도 "HH:MM-HH:MM" 한 줄로는 표현할 수
+   * 없으므로 판정 불가로 둔다 — 억지로 접으면 노트의 ⏰ 를 엉뚱한 값으로 덮어쓴다.
+   */
+  private eventTimeRange(ev: GCalEvent): string | undefined {
+    if (ev.start?.date && ev.end?.date) return "";
+    const s = ev.start?.dateTime;
+    const e = ev.end?.dateTime;
+    if (!s || !e) return undefined;
+    const st = timeOfDateTime(s);
+    const et = timeOfDateTime(e);
+    if (!st || !et) return undefined;
+    const range = `${st}-${et}`;
+    return isValidTimeRange(range) ? range : undefined;
+  }
+
+  /** 노트의 타임블록("" = 종일). 유효하지 않은 값은 종일로 본다. */
+  private taskTime(t: VaultTask): string {
+    return isValidTimeRange(t.time) ? t.time : "";
+  }
+
+  /**
+   * ⏰ 가 있으면 시간지정 이벤트의 start/end 를, 없으면 null.
+   * timeZone 을 반드시 함께 보낸다 — 안 보내면 캘린더 기본 타임존으로 해석돼
+   * 기기 타임존이 다를 때 시각이 밀린다(DST 포함).
+   */
+  private timedDates(t: VaultTask): Partial<GCalEvent> | null {
+    const range = this.taskTime(t);
+    if (!range) return null;
+    const [st, et] = range.split("-");
+    const tz = localTimeZone();
+    return {
+      start: { dateTime: toDateTime(this.spanStart(t), st), timeZone: tz },
+      end: { dateTime: toDateTime(t.due!, et), timeZone: tz },
+    };
+  }
+
+  /**
    * Obsidian 변경분을 이벤트에 반영.
    *  - 제목/완료만 바뀌면 summary/description만 patch → 시간(타임블록) 보존.
    *  - 날짜가 바뀌면: 시간지정 이벤트는 시각 유지한 채 날짜만 이동, 종일이면 종일로.
@@ -287,7 +332,13 @@ export class SyncEngine {
   }
 
   private async pushUpdate(
-    rec: { calendarId: string; eventId: string; due: string; start?: string },
+    rec: {
+      calendarId: string;
+      eventId: string;
+      due: string;
+      start?: string;
+      time?: string;
+    },
     task: VaultTask,
     id: string,
     doneOverride?: boolean,
@@ -298,7 +349,9 @@ export class SyncEngine {
     const t = doneOverride === undefined ? task : { ...task, checked: doneOverride };
     const startDate = this.spanStart(task);
     const dateChanged =
-      task.due !== rec.due || startDate !== (rec.start ?? rec.due);
+      task.due !== rec.due ||
+      startDate !== (rec.start ?? rec.due) ||
+      this.taskTime(task) !== (rec.time ?? "");
     let cur: GCalEvent | undefined = ev;
     let dates: Partial<GCalEvent> | undefined;
     if (dateChanged) {
@@ -307,10 +360,15 @@ export class SyncEngine {
       } catch (e) {
         console.warn("[tasks-gcal-sync] getEvent 실패(종일로 처리):", e);
       }
-      // 순수 timed 이벤트(양끝 모두 dateTime)일 때만 시각 유지하고 날짜만 이동.
-      // 한쪽만 dateTime인 혼합형(예: iPhone 기본 캘린더가 만들 수 있음)을 그대로
-      // patch하면 start=dateTime/end=date 타입 불일치로 GCal 400 → 종일로 정규화.
-      if (cur?.start?.dateTime && cur?.end?.dateTime) {
+      // 노트에 ⏰ 가 있으면 그 값이 이긴다 — 시각도 노트가 소유하는 필드가 됐다.
+      const timed = this.timedDates(task);
+      if (timed) {
+        dates = timed;
+      }
+      // ⏰ 가 없는 task 는 예전 동작을 유지한다: GCal 에서 사람이 지정해 둔 시각을
+      // 날짜만 밀어 보존한다. 순수 timed(양끝 모두 dateTime)일 때만 — 한쪽만 dateTime 인
+      // 혼합형을 그대로 patch 하면 타입 불일치로 GCal 400 → 종일로 정규화.
+      else if (cur?.start?.dateTime && cur?.end?.dateTime) {
         const oldDate = cur.start.dateTime.slice(0, 10);
         const delta = daysBetween(oldDate, task.due!);
         dates = {
@@ -351,6 +409,9 @@ export class SyncEngine {
       tgsVault: this.app.vault.getName(),
       tgsDue: t.due!,
       tgsStart: this.spanStart(t),
+      // 종일이면 빈 문자열을 **명시적으로** 싣는다. patch는 키 단위 병합이라 키를 빼면
+      // 이벤트에 직전 시각이 남아, 시간지정 → 종일로 되돌린 게 다음 판정에서 안 보인다.
+      tgsTime: this.taskTime(t),
       tgsDone: t.checked ? "1" : "0",
       tgsTitle: this.titleBase(t),
     };
@@ -392,6 +453,7 @@ export class SyncEngine {
       calendarId,
       due: p.tgsDue ?? t.due!,
       start: p.tgsStart ?? this.spanStart(t),
+      time: p.tgsTime ?? this.taskTime(t),
       done: p.tgsDone != null ? p.tgsDone === "1" : t.checked,
       title: p.tgsTitle ?? this.titleBase(t),
       gcalUpdated: ev.updated,
@@ -414,6 +476,8 @@ export class SyncEngine {
       calendarId,
       due: p.tgsDue,
       start: p.tgsStart ?? p.tgsDue,
+      // 스냅샷이 없는 옛 이벤트는 이벤트 자체의 모양에서 읽는다(판정 불가면 종일로).
+      time: p.tgsTime ?? this.eventTimeRange(ev) ?? "",
       done: p.tgsDone === "1",
       title: p.tgsTitle ?? this.gcalTitleBase(ev),
       gcalUpdated: ev.updated,
@@ -571,11 +635,15 @@ export class SyncEngine {
   }
 
   private buildEvent(t: VaultTask, id: string): GCalEvent {
+    const timed = this.timedDates(t);
     const ev: GCalEvent = {
       summary: this.summary(t),
       description: this.noteBlock(id, t),
-      start: { date: this.spanStart(t) }, // 🛫 start가 있으면 거기서부터(다중일)
-      end: { date: addDay(t.due!) },
+      // ⏰ 가 있으면 시간지정, 없으면 종일. 🛫 start가 있으면 거기서부터(다중일)
+      ...(timed ?? {
+        start: { date: this.spanStart(t) },
+        end: { date: addDay(t.due!) },
+      }),
       extendedProperties: { private: this.privateProps(id, t) },
     };
     const color = this.doneColor(t);
@@ -704,6 +772,7 @@ export class SyncEngine {
     return {
       due: t.due!,
       start: this.spanStart(t),
+      time: this.taskTime(t),
       done: t.checked,
       title: this.titleBase(t),
       hasStart: !!t.start,
@@ -718,18 +787,26 @@ export class SyncEngine {
       updated: ev.updated,
       due,
       start: due ? this.eventStartDate(ev) ?? due : undefined,
+      time: this.eventTimeRange(ev),
       title: this.gcalTitleBase(ev),
     };
   }
 
   /** 스냅샷 한 필드를 옮긴다. record(start가 optional)와 Snapshot 둘 다 대상이 된다. */
   private assignSnapshot(
-    dst: { due: string; start?: string; done: boolean; title: string },
+    dst: {
+      due: string;
+      start?: string;
+      time?: string;
+      done: boolean;
+      title: string;
+    },
     f: Field,
     src: Snapshot
   ): void {
     if (f === "due") dst.due = src.due;
     else if (f === "start") dst.start = src.start;
+    else if (f === "time") dst.time = src.time;
     else if (f === "done") dst.done = src.done;
     else dst.title = src.title;
   }
@@ -759,6 +836,11 @@ export class SyncEngine {
       if (p.start.write === "set") await this.writer.setStart(task, p.start.value);
       else if (p.start.write === "remove") await this.writer.removeStart(task);
       applied.push("start");
+    }
+    if (p.time) {
+      if (p.time.value) await this.writer.setTime(task, p.time.value);
+      else await this.writer.removeTime(task);
+      applied.push("time");
     }
     if (p.title) {
       try {
@@ -805,6 +887,7 @@ export class SyncEngine {
       const pushTask = plan.holdDone ? { ...task, checked: rec.done } : task;
       m.due = task.due!;
       m.start = this.spanStart(task);
+      m.time = this.taskTime(task);
       m.done = pushTask.checked;
       m.title = this.titleBase(task);
 
@@ -857,6 +940,7 @@ export class SyncEngine {
     if (pushed || (!plan.pushNeeded && !normalizeNeeded)) {
       rec.due = m.due;
       rec.start = m.start;
+      rec.time = m.time;
       rec.done = m.done;
       rec.title = m.title;
     } else if (plan.pushNeeded) {

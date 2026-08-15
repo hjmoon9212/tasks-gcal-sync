@@ -47,6 +47,7 @@ const rec = (o: Partial<SyncRecord> = {}): SyncRecord => ({
 const local = (o: Partial<LocalView> = {}): LocalView => ({
   due: DAY,
   start: DAY,
+  time: "",
   done: false,
   title: "샘플",
   hasStart: false,
@@ -58,6 +59,7 @@ const remote = (o: Partial<RemoteView> = {}): RemoteView => ({
   updated: "100",
   due: DAY,
   start: DAY,
+  time: "",
   title: "샘플",
   ...o,
 });
@@ -252,6 +254,61 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
   const p = merge({ task: { kind: "ok", local: local({ done: true }) }, remote: undefined });
   eq(p.holdDone, false, "완료 방향은 보류 없음");
   eq(p.pushNeeded, true, "완료는 즉시 push");
+}
+
+// ── ⏰ 타임블록: 날짜와 독립된 필드로 판정된다 ──
+{
+  const T = "14:00-15:00";
+
+  // 노트에서 시각 지정 → push (GCal은 그대로)
+  const obsOnly = merge({
+    task: { kind: "ok", local: local({ time: T }) },
+    remote: undefined,
+  });
+  eq(obsOnly.pushNeeded, true, "노트에 ⏰ 생김 → push");
+  eq(obsOnly.merged.time, T, "스냅샷에 시각 반영");
+  eq(obsOnly.pull.time, undefined, "pull 없음");
+
+  // GCal에서 시각만 변경 → pull (due/start는 그대로)
+  const gcOnly = merge({
+    remote: remote({ updated: "200", time: T }),
+  });
+  eq(gcOnly.pull.time, { value: T }, "GCal 시각 변경 → 노트로 pull");
+  eq(gcOnly.pulledFields, ["time"], "시각만 GCal이 가져감");
+  eq(gcOnly.pushNeeded, false, "pull만 있으면 push 불필요");
+  eq(gcOnly.merged.time, T, "병합 스냅샷은 GCal 값");
+
+  // GCal에서 종일로 되돌림 → ⏰ 제거 지시("")
+  const cleared = merge({
+    rec: rec({ time: T }),
+    task: { kind: "ok", local: local({ time: T }) },
+    remote: remote({ updated: "200", time: "" }),
+  });
+  eq(cleared.pull.time, { value: "" }, "GCal이 종일로 → ⏰ 제거");
+  eq(cleared.merged.time, "", "스냅샷도 종일");
+
+  // 양쪽 다 바뀜 → GCal 채택 + 충돌 보고
+  const conflict = merge({
+    task: { kind: "ok", local: local({ time: "09:00-10:00" }) },
+    remote: remote({ updated: "200", time: T }),
+  });
+  eq(conflict.conflicts, ["time"], "시각 충돌 보고");
+  eq(conflict.pull.time, { value: T }, "충돌 시 GCal 채택");
+  eq(conflict.pushNeeded, false, "GCal이 가져간 필드는 되돌려 쓰지 않는다");
+
+  // 읽지 못한 이벤트(혼합형 등, time=undefined)는 손대지 않는다 —
+  // 이걸 ""로 뭉개면 근거 없이 노트의 ⏰를 지운다.
+  const unknown = merge({
+    rec: rec({ time: T }),
+    task: { kind: "ok", local: local({ time: T }) },
+    remote: remote({ updated: "200", time: undefined }),
+  });
+  eq(unknown.pull.time, undefined, "time 판정 불가 → pull 없음");
+  eq(unknown.pushNeeded, false, "판정 불가여도 push를 유발하지 않는다");
+
+  // 0.4.5 이전 record엔 time 키가 없다 → 종일로 읽어야 한다(불필요한 push 방지)
+  const legacy = merge({ rec: rec({ time: undefined }), remote: undefined });
+  eq(legacy.pushNeeded, false, "구버전 record + 종일 노트 → 변경 없음");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

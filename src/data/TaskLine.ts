@@ -5,6 +5,8 @@
  * 절대 줄 전체를 재직렬화하지 않는다 → 모델링하지 않은 이모지/메타데이터 유실 방지.
  */
 
+import { normalizeTimeRange } from "../sync/dates";
+
 export const EMOJI = {
   due: "📅",
   scheduled: "⏳",
@@ -16,6 +18,11 @@ export const EMOJI = {
   id: "🆔",
   dependsOn: "⛔",
   onCompletion: "🏁",
+  /**
+   * 타임블록. Tasks 플러그인의 필드가 아니라 **우리가 정한 확장 필드**다.
+   * 값은 `HH:MM-HH:MM`(종료 생략 시 시작+1시간으로 해석).
+   */
+  time: "⏰",
 } as const;
 
 const PRIORITY_EMOJIS = ["🔺", "⏫", "🔼", "🔽", "⏬"];
@@ -50,10 +57,13 @@ const FIELD_EMOJIS = [
   EMOJI.cancelled,
   EMOJI.recurrence,
   EMOJI.onCompletion,
+  EMOJI.time,
   ...PRIORITY_EMOJIS,
 ];
 const FIELD_LOOKAHEAD =
   "(?=" + FIELD_EMOJIS.map(reEsc).join("|") + "|$)";
+/** 줄에서 처음 나오는 필드 이모지 — ⏰ 를 끼워 넣을 자리를 찾는 데 쓴다. */
+const firstFieldRe = () => reU("(?:" + FIELD_EMOJIS.map(reEsc).join("|") + ")");
 
 const TASK_LINE_RE = /^(\s*)([-*+]) \[(.)\] (.*)$/;
 const DATE = "(\\d{4}-\\d{2}-\\d{2})";
@@ -63,6 +73,8 @@ const DATE = "(\\d{4}-\\d{2}-\\d{2})";
  * (예: "2026-08-038-03")까지 한 번에 소거·교체해 오염을 자가 치유한다.
  */
 const DATE_GREEDY = "\\d{4}-\\d{2}-\\d{2}[\\d-]*";
+/** ⏰ 값: `HH:MM` 또는 `HH:MM-HH:MM`. 한 자리 시(9:05)도 받아 정규화한다. */
+const TIME = "(\\d{1,2}:\\d{2})(?:\\s*-\\s*(\\d{1,2}:\\d{2}))?";
 
 export interface ParsedTask {
   indent: string;
@@ -78,6 +90,8 @@ export interface ParsedTask {
   created?: string;
   id?: string;
   recurrence?: string;
+  /** ⏰ 타임블록을 정규화한 "HH:MM-HH:MM". 없으면 undefined(= 종일). */
+  time?: string;
   tags: string[]; // 본문의 모든 #태그 (라우팅용)
 }
 
@@ -92,6 +106,11 @@ function escapeRegExp(s: string): string {
 function extractDate(body: string, emoji: string): string | undefined {
   const m = body.match(reU(reEsc(emoji) + "\\s*" + DATE));
   return m ? m[1] : undefined;
+}
+
+function extractTime(body: string): string | undefined {
+  const m = body.match(reU(reEsc(EMOJI.time) + "\\s*" + TIME));
+  return m ? normalizeTimeRange(m[1], m[2]) : undefined;
 }
 
 export function parseTaskLine(
@@ -123,6 +142,7 @@ export function parseTaskLine(
     created: extractDate(body, EMOJI.created),
     id: idM ? idM[1] : undefined,
     recurrence: recM ? recM[1].trim() : undefined,
+    time: extractTime(body),
     tags: body.match(/#[A-Za-z0-9_/\-가-힣]+/g) ?? [],
   };
 }
@@ -140,6 +160,7 @@ export function cleanTitle(body: string, globalFilter: string): string {
   ]) {
     t = t.replace(reU(reEsc(e) + "\\s*\\d{4}-\\d{2}-\\d{2}", "g"), " ");
   }
+  t = t.replace(reU(reEsc(EMOJI.time) + "\\s*" + TIME, "g"), " ");
   t = t.replace(reU(reEsc(EMOJI.id) + "\\s*[A-Za-z0-9]+", "g"), " ");
   t = t.replace(reU(reEsc(EMOJI.dependsOn) + "\\s*[A-Za-z0-9, ]+", "g"), " ");
   t = t.replace(
@@ -184,6 +205,38 @@ export function setStart(raw: string, date: string): string {
 export function removeStart(raw: string): string {
   return raw
     .replace(reU("\\s*" + reEsc(EMOJI.start) + "\\s*" + DATE_GREEDY), "")
+    .replace(/\s+$/, "");
+}
+
+/**
+ * ⏰ 타임블록을 교체하거나 새로 넣는다. 값은 정규화된 "HH:MM-HH:MM".
+ *
+ * ⚠️ **줄 끝에 붙이면 안 된다.** Obsidian Tasks 는 필드 정규식을 전부 "$" 앵커로 만들고
+ *    줄 끝에서부터 하나씩 벗겨내는 루프로 파싱한다. 끝에 Tasks 가 모르는 토큰이 있으면
+ *    첫 바퀴에 아무것도 매치되지 않아 루프가 끝나고, 그 앞의 📅🛫 까지 통째로 설명으로
+ *    흡수된다 → 마감일 기반 쿼리·정렬이 그 task 를 놓친다.
+ * 그래서 항상 **첫 필드 이모지 앞**에 끼워 넣는다(필드가 하나도 없으면 줄 끝).
+ */
+export function setTime(raw: string, range: string): string {
+  const cleaned = removeTime(raw);
+  const field = EMOJI.time + " " + range;
+  const m = cleaned.match(firstFieldRe());
+  if (m && m.index !== undefined) {
+    return (
+      cleaned.slice(0, m.index).replace(/\s+$/, "") +
+      " " +
+      field +
+      " " +
+      cleaned.slice(m.index)
+    );
+  }
+  return cleaned.replace(/\s+$/, "") + " " + field;
+}
+
+/** ⏰ 제거(종일로 되돌리기). */
+export function removeTime(raw: string): string {
+  return raw
+    .replace(reU("\\s*" + reEsc(EMOJI.time) + "\\s*" + TIME), "")
     .replace(/\s+$/, "");
 }
 

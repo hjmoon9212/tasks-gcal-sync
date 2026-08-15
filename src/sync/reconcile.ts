@@ -19,12 +19,17 @@
  */
 import { SyncRecord } from "./StateStore";
 
-export type Field = "due" | "start" | "done" | "title";
+export type Field = "due" | "start" | "done" | "title" | "time";
 
-/** 스냅샷으로 비교하는 네 값. record·노트·병합결과가 모두 이 모양이다. */
+/** 스냅샷으로 비교하는 값들. record·노트·병합결과가 모두 이 모양이다. */
 export interface Snapshot {
   due: string;
   start: string;
+  /**
+   * 타임블록 "HH:MM-HH:MM". **"" 는 종일**을 뜻하며 undefined 를 쓰지 않는다 —
+   * 날짜·제목과 똑같은 문자열 비교 경로를 타게 해서 판정에 새 분기를 만들지 않으려는 것.
+   */
+  time: string;
   done: boolean;
   title: string;
 }
@@ -42,6 +47,12 @@ export interface RemoteView {
   due?: string;
   start?: string;
   title?: string;
+  /**
+   * 이벤트의 타임블록. "" 면 종일 이벤트, undefined 면 **판정 불가**(혼합형 등)라 손대지 않는다.
+   * 종일("")과 판정 불가(undefined)를 반드시 구분해야 한다 — 섞으면 읽지 못한 이벤트를
+   * 근거로 노트의 ⏰ 를 지운다.
+   */
+  time?: string;
 }
 
 export type TaskState =
@@ -83,6 +94,8 @@ export interface PullOps {
   /** write=none: 값은 채택하되 줄은 안 건드림(🛫가 없는데 단일일로 바뀐 경우). */
   start?: { value: string; write: "set" | "remove" | "none" };
   title?: { from: string; to: string };
+  /** value 가 "" 면 ⏰ 제거(종일로), 아니면 그 범위로 지정. */
+  time?: { value: string };
 }
 
 export interface MergePlan {
@@ -179,9 +192,15 @@ function mergePlan(i: DecideInput, local: LocalView): MergePlan {
   // ── 어느 쪽에서 무엇이 바뀌었나: 필드별로 판정한다 ──
   // 기준은 양쪽 모두 마지막 동기화 스냅샷(rec). 필드를 따로 보기 때문에
   // "Obsidian에서 ✅ + GCal에서 날짜 이동"처럼 겹치지 않는 변경은 둘 다 살아남는다.
+  // 시각은 "" 가 종일이다. rec 은 0.4.5 이전에 이 키가 없고, local 도 구버전 호출부에서
+  // 빠질 수 있으므로 양쪽 다 ?? "" 로 받는다 — undefined 가 들어오면 "시각이 사라졌다"로
+  // 오판해 매 사이클 불필요한 push 가 돈다.
+  const recTime = rec.time ?? "";
+  const localTime = local.time ?? "";
   const obs = {
     due: local.due !== rec.due,
     start: local.start !== recStart,
+    time: localTime !== recTime,
     done: local.done !== rec.done,
     title: local.title !== rec.title,
   };
@@ -198,12 +217,15 @@ function mergePlan(i: DecideInput, local: LocalView): MergePlan {
   const gc = {
     due: gcalChanged && datesOk && remote!.due !== rec.due,
     start: gcalChanged && datesOk && remote!.start !== recStart,
+    // 시각은 날짜와 별개로 판정한다: GCal에서 드래그로 시간만 바꾸는 게 가장 흔한 조작이고,
+    // 그때 due/start 는 그대로다. remote.time 이 undefined 면 읽지 못한 것이므로 손대지 않는다.
+    time: gcalChanged && remote!.time !== undefined && remote!.time !== recTime,
     title: gcalChanged && !!remote!.title && remote!.title !== rec.title,
   };
 
   // 같은 필드가 양쪽 다 바뀐 경우에만 승자가 필요하다 → GCal 채택(직접 조작한 화면).
   const conflicts: Field[] = [];
-  for (const f of ["due", "start", "title"] as const) {
+  for (const f of ["due", "start", "time", "title"] as const) {
     if (gc[f] && obs[f]) conflicts.push(f);
   }
 
@@ -212,6 +234,7 @@ function mergePlan(i: DecideInput, local: LocalView): MergePlan {
   const merged: Snapshot = {
     due: local.due,
     start: local.start,
+    time: localTime,
     done: local.done,
     title: local.title,
   };
@@ -230,6 +253,11 @@ function mergePlan(i: DecideInput, local: LocalView): MergePlan {
     };
     merged.start = v;
     pulledFields.push("start");
+  }
+  if (gc.time) {
+    pull.time = { value: remote!.time! };   // "" 면 ⏰ 제거(GCal에서 종일로 되돌린 것)
+    merged.time = remote!.time!;
+    pulledFields.push("time");
   }
   if (gc.title) {
     pull.title = { from: local.title, to: remote!.title! };
@@ -266,6 +294,7 @@ function mergePlan(i: DecideInput, local: LocalView): MergePlan {
   const pushNeeded =
     (obs.due && !gc.due) ||
     (obs.start && !gc.start) ||
+    (obs.time && !gc.time) ||
     (obs.done && !holdDone) ||
     (obs.title && !gc.title);
 
@@ -287,6 +316,7 @@ function mergePlan(i: DecideInput, local: LocalView): MergePlan {
     local: {
       due: local.due,
       start: local.start,
+      time: localTime,
       done: local.done,
       title: local.title,
     },

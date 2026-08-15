@@ -8,9 +8,19 @@ import {
   setDoneDate,
   removeDone,
   cleanTitle,
+  setTime,
+  removeTime,
 } from "../src/data/TaskLine";
 import { resolveCalendar } from "../src/settings/Settings";
-import { addDays, daysBetween, shiftDateTime } from "../src/sync/dates";
+import {
+  addDays,
+  daysBetween,
+  isValidTimeRange,
+  normalizeTimeRange,
+  shiftDateTime,
+  timeOfDateTime,
+  toDateTime,
+} from "../src/sync/dates";
 
 let pass = 0;
 let fail = 0;
@@ -192,6 +202,64 @@ eq(
   "- [ ] #task 주간(월간)보고 🔁 every week 🛫 2026-07-02 📅 2026-07-24 🆔 KRBgwN",
   "setDue: 정상 날짜는 잉여 없이 교체(하드닝 회귀 없음)"
 );
+
+// --- ⏰ 타임블록 ---
+// 삽입 위치가 핵심이다: Tasks 는 필드 정규식을 "$" 앵커로 만들고 줄 끝에서부터 벗겨내므로,
+// 모르는 토큰이 줄 끝에 있으면 그 앞의 📅🛫 까지 통째로 설명으로 흡수된다.
+const T0 = "- [ ] #task 보고서 작성 📅 2026-08-20 🆔 ab12cd";
+const T1 = setTime(T0, "14:00-15:00");
+eq(
+  T1,
+  "- [ ] #task 보고서 작성 ⏰ 14:00-15:00 📅 2026-08-20 🆔 ab12cd",
+  "setTime: 첫 필드 이모지(📅) 앞에 삽입 — 줄 끝 append 금지"
+);
+eq(parseTaskLine(T1, F)!.time, "14:00-15:00", "parse: 범위");
+eq(parseTaskLine(T1, F)!.due, "2026-08-20", "⏰ 가 있어도 due 파싱 정상");
+eq(parseTaskLine(T1, F)!.id, "ab12cd", "⏰ 가 있어도 id 파싱 정상");
+eq(parseTaskLine(T1, F)!.title, "보고서 작성", "cleanTitle: ⏰ 제거");
+
+eq(removeTime(T1), T0, "removeTime: 원본으로 되돌아감");
+eq(
+  setTime(T1, "09:30-10:00"),
+  "- [ ] #task 보고서 작성 ⏰ 09:30-10:00 📅 2026-08-20 🆔 ab12cd",
+  "setTime: 교체 시 중복 생성 안 함"
+);
+
+// 파싱 정규화 (손으로 적힌 값도 안전하게 읽는다)
+eq(parseTaskLine("- [ ] #task 데모 ⏰ 14:00 📅 2026-08-20", F)!.time, "14:00-15:00", "parse: 종료 생략 → +1시간");
+eq(parseTaskLine("- [ ] #task 데모 ⏰ 14:00-13:00 📅 2026-08-20", F)!.time, "14:00-15:00", "parse: 역전 범위 보정");
+eq(parseTaskLine("- [ ] #task 데모 ⏰ 9:05-9:35 📅 2026-08-20", F)!.time, "09:05-09:35", "parse: 한 자리 시 정규화");
+eq(parseTaskLine("- [ ] #task 데모 ⏰ 23:30 📅 2026-08-20", F)!.time, "23:30-23:59", "parse: 자정 넘김은 23:59 로 자름");
+eq(parseTaskLine(T0, F)!.time, undefined, "parse: ⏰ 없으면 undefined");
+
+// 필드가 없는 줄 / 🛫만 있는 줄
+eq(setTime("- [ ] #task 메모", "07:00-08:00"), "- [ ] #task 메모 ⏰ 07:00-08:00", "setTime: 필드 없으면 줄 끝");
+eq(
+  setTime("- [ ] #task 준비 🛫 2026-08-01", "10:00-11:00"),
+  "- [ ] #task 준비 ⏰ 10:00-11:00 🛫 2026-08-01",
+  "setTime: 🛫 앞에 삽입"
+);
+
+// 🔁 반복 문장이 ⏰ 를 삼키지 않는다 (FIELD_LOOKAHEAD 에 ⏰ 를 넣은 효과)
+const Trec = "- [ ] #task 청소 ⏰ 07:45-08:45 🔁 every week 📅 2026-08-15";
+eq(parseTaskLine(Trec, F)!.recurrence, "every week", "🔁 파싱: ⏰ 와 공존");
+eq(parseTaskLine(Trec, F)!.time, "07:45-08:45", "⏰ 파싱: 🔁 와 공존");
+eq(parseTaskLine(Trec, F)!.title, "청소", "제목: ⏰·🔁 모두 제거");
+// 반대 순서(🔁 가 앞)에서도 반복 문장이 ⏰ 앞에서 끊긴다
+const Trec2 = "- [ ] #task 청소 🔁 every week ⏰ 07:45-08:45 📅 2026-08-15";
+eq(parseTaskLine(Trec2, F)!.recurrence, "every week", "🔁 문장이 ⏰ 앞에서 끊긴다");
+eq(parseTaskLine(Trec2, F)!.time, "07:45-08:45", "⏰ 가 🔁 뒤에 있어도 파싱");
+
+// --- 시각 헬퍼 ---
+eq(isValidTimeRange("14:00-15:00"), true, "isValidTimeRange 정상");
+eq(isValidTimeRange("15:00-14:00"), false, "isValidTimeRange 역전 거부");
+eq(isValidTimeRange("14:00"), false, "isValidTimeRange 범위 아님 거부");
+eq(isValidTimeRange("24:00-25:00"), false, "isValidTimeRange 24시 거부");
+eq(isValidTimeRange(undefined), false, "isValidTimeRange undefined");
+eq(normalizeTimeRange("9:05"), "09:05-10:05", "normalizeTimeRange 기본 1시간");
+eq(timeOfDateTime("2026-08-20T14:00:00+09:00"), "14:00", "timeOfDateTime");
+eq(timeOfDateTime("2026-08-20"), undefined, "timeOfDateTime 날짜만이면 undefined");
+eq(toDateTime("2026-08-20", "9:05"), "2026-08-20T09:05:00", "toDateTime 패딩");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
