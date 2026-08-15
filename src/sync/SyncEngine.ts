@@ -403,13 +403,20 @@ export class SyncEngine {
       }
       // 노트에 ⏰ 가 있으면 그 값이 이긴다 — 시각도 노트가 소유하는 필드가 됐다.
       const timed = this.timedDates(task);
+      // 노트에서 ⏰ 를 **뗀** 경우인가. 기준은 마지막 동기화 스냅샷이다:
+      //   rec.time 이 비어 있음  = 우리가 시각을 올린 적이 없다 → 이벤트의 시각은 GCal 에서
+      //                            사람이 지정한 것이므로 보존한다(0.5.0 설계).
+      //   rec.time 이 차 있음    = 우리가 올렸던 시각이 노트에서 사라졌다 → 종일로 되돌린다.
+      // 이 구분이 없으면 아래 보존 분기가 "⏰ 제거" 까지 삼켜, 노트에서 지워도 GCal 은
+      // 계속 시간지정으로 남는다(2026-08-16).
+      const timeRemoved = !this.taskTime(task) && !!(rec.time ?? "");
       if (timed) {
         dates = timed;
       }
-      // ⏰ 가 없는 task 는 예전 동작을 유지한다: GCal 에서 사람이 지정해 둔 시각을
+      // ⏰ 가 없고 제거된 것도 아니면 예전 동작을 유지한다: GCal 에서 사람이 지정해 둔 시각을
       // 날짜만 밀어 보존한다. 순수 timed(양끝 모두 dateTime)일 때만 — 한쪽만 dateTime 인
       // 혼합형을 그대로 patch 하면 타입 불일치로 GCal 400 → 종일로 정규화.
-      else if (cur?.start?.dateTime && cur?.end?.dateTime) {
+      else if (!timeRemoved && cur?.start?.dateTime && cur?.end?.dateTime) {
         const oldDate = cur.start.dateTime.slice(0, 10);
         const delta = daysBetween(oldDate, task.due!);
         dates = {
@@ -517,8 +524,11 @@ export class SyncEngine {
       calendarId,
       due: p.tgsDue,
       start: p.tgsStart ?? p.tgsDue,
-      // 스냅샷이 없는 옛 이벤트는 이벤트 자체의 모양에서 읽는다(판정 불가면 종일로).
-      time: p.tgsTime ?? this.eventTimeRange(ev) ?? "",
+      // 스냅샷(tgsTime)이 없는 옛 이벤트는 **종일로 본다.** 이벤트의 모양에서 읽으면,
+      // GCal 에서 사람이 지정해 둔 시각이 "우리가 마지막에 올린 값" 으로 둔갑해
+      // 노트에 ⏰ 가 없다는 이유로 다음 push 가 그 시각을 지운다. 실제로 시각이 바뀐
+      // 이벤트라면 pull 경로(remote.time + gcalChanged)가 노트에 ⏰ 를 써 넣는다.
+      time: p.tgsTime ?? "",
       done: p.tgsDone === "1",
       title: p.tgsTitle ?? this.gcalTitleBase(ev),
       gcalUpdated: ev.updated,

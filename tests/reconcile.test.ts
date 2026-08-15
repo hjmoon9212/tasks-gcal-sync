@@ -599,18 +599,39 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
   {
     // ⏰ 가 없는 task 는 GCal 에서 사람이 지정한 시각을 보존한다(0.5.0 설계).
     // 그 경로에서도 종일 표현이 남지 않아야 한다.
+    // **rec.time 이 비어 있다**는 게 "우리가 시각을 올린 적 없다 = GCal 쪽 것" 의 근거다.
     const ev = doneEvent("A1", false, "200");
     ev.start = { dateTime: "2026-08-06T07:45:00", timeZone: "Asia/Seoul" };
     ev.end = { dateTime: "2026-08-06T10:00:00", timeZone: "Asia/Seoul" };
     const h = harness({
       tasks: [task("A1", false, "2026-08-09")],
       events: [ev],
-      records: { A1: rec({ time: "07:45-10:00", gcalUpdated: "200" }) },
+      records: { A1: rec({ gcalUpdated: "200" }) }, // time 없음 = 우리가 올린 시각 아님
     });
     await h.engine.run();
     const p = h.calls.patch[0].patch;
     eq(p.start.dateTime, "2026-08-09T07:45:00", "시각은 보존한 채 날짜만 민다");
     eq(p.start.date, null, "종일 표현을 지운다");
+  }
+  {
+    // ── 노트에서 ⏰ 를 떼면 GCal 도 종일로 돌아가야 한다(2026-08-16).
+    // 위 보존 분기가 이 경우까지 삼켜서, 노트에서 지워도 이벤트는 시간지정으로 남았다.
+    // 구분 기준은 rec.time — 차 있으면 "우리가 올렸던 시각이 사라진 것" 이다.
+    const ev = doneEvent("A1", false, "200");
+    ev.start = { dateTime: "2026-08-06T07:45:00", timeZone: "Asia/Seoul" };
+    ev.end = { dateTime: "2026-08-06T10:00:00", timeZone: "Asia/Seoul" };
+    const h = harness({
+      tasks: [task("A1", false)], // 노트에서 ⏰ 제거됨(날짜는 그대로)
+      events: [ev],
+      records: { A1: rec({ time: "07:45-10:00", gcalUpdated: "200" }) },
+    });
+    await h.engine.run();
+    eq(h.calls.patch.length, 1, "⏰ 제거 → push 발생");
+    const p = h.calls.patch[0].patch;
+    eq(p.start.date, "2026-08-06", "종일로 되돌린다");
+    eq(p.start.dateTime, null, "시간 표현을 지운다");
+    eq(p.start.timeZone, null, "시간대도 지운다");
+    eq(p.end.dateTime, null, "종료의 시간 표현도 지운다");
   }
 
   // ── 12) 로그 항목: 사후에 "무엇이 왜"에 답할 수 있어야 한다.
