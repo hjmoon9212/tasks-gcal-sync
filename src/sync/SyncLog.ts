@@ -74,6 +74,66 @@ export function formatEntry(e: SyncLogEntry): string {
   return e.detail ? `${line} — ${flat(e.detail)}` : line;
 }
 
+/** 시:분:초만 (접힌 블록의 끝 시각처럼 날짜가 뻔한 자리에 쓴다). */
+function hms(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/**
+ * 파일에 적힌 run 블록 하나. 같은 내용이 이어지면 새 블록을 만들지 않고 이걸 갱신한다.
+ * (`count`>1 이면 접힌 블록)
+ */
+export interface LogBlock {
+  /** 접기 판정 기준 — 항목 줄이 완전히 같을 때만 같은 블록으로 본다. */
+  signature: string;
+  summary: string;
+  /** 관측된 계기들(중복 제거). 반복 중에 주기/편집이 섞이는 게 정상이다. */
+  triggers: string[];
+  first: Date;
+  last: Date;
+  count: number;
+  lines: string[];
+}
+
+export function newBlock(
+  summary: string,
+  trigger: string,
+  entries: SyncLogEntry[],
+  now = new Date()
+): LogBlock {
+  const lines = entries.map(formatEntry);
+  return {
+    signature: lines.join("\n"),
+    summary,
+    triggers: [trigger],
+    first: now,
+    last: now,
+    count: 1,
+    lines,
+  };
+}
+
+/** 같은 내용이 한 번 더 관측됨 → 새 블록 대신 횟수와 끝 시각만 늘린다. */
+export function extendBlock(b: LogBlock, trigger: string, now = new Date()): LogBlock {
+  return {
+    ...b,
+    triggers: b.triggers.includes(trigger) ? b.triggers : [...b.triggers, trigger],
+    last: now,
+    count: b.count + 1,
+  };
+}
+
+/** 블록을 파일에 적을 문자열로. 접힌 블록은 헤더에 기간과 횟수를 단다. */
+export function renderBlock(b: LogBlock): string {
+  const when =
+    b.count > 1 ? `${stamp(b.first)} ~ ${hms(b.last)}` : stamp(b.first);
+  const trig =
+    b.triggers.length > 1 ? `${b.triggers[0]} 외 ${b.triggers.length - 1}종` : b.triggers[0];
+  const times = b.count > 1 ? ` · ×${b.count}회` : "";
+  return `\n## ${when} · ${b.summary} · ${trig}${times}\n` + b.lines.join("\n") + "\n";
+}
+
 /** 이번 run 블록 전체(헤더 1줄 + 항목들). 파일에 붙일 문자열을 만든다. */
 export function formatBlock(
   summary: string,
@@ -81,11 +141,7 @@ export function formatBlock(
   entries: SyncLogEntry[],
   now = new Date()
 ): string {
-  return (
-    `\n## ${stamp(now)} · ${summary} · ${trigger}\n` +
-    entries.map(formatEntry).join("\n") +
-    "\n"
-  );
+  return renderBlock(newBlock(summary, trigger, entries, now));
 }
 
 /** 설정에 따라 기록 대상만 남긴다. 조용한 run(=남길 게 없는 run)은 빈 배열이 된다. */
@@ -99,6 +155,12 @@ export function selectEntries(
 }
 
 export class SyncLogWriter {
+  /**
+   * 파일 끝에 적혀 있는 블록. 다음 run이 같은 내용이면 새로 붙이는 대신 이걸 고쳐 쓴다.
+   * 로드마다 초기화된다 — 그때는 접기가 한 번 끊길 뿐, 기록이 틀어지지는 않는다.
+   */
+  private tail: LogBlock | null = null;
+
   constructor(private app: App, private config: () => SyncLogConfig) {}
 
   path(): string {
@@ -106,9 +168,14 @@ export class SyncLogWriter {
   }
 
   /**
-   * 한 run의 결과를 append.
+   * 한 run의 결과를 기록한다.
+   *
    * 남길 항목이 없으면 아무것도 쓰지 않는다 — 5분 주기 동기화가 "변화 없음"으로
    * 파일을 채우면 정작 찾아야 할 삭제 한 줄이 묻힌다.
+   *
+   * **같은 내용이 이어지면 블록을 새로 만들지 않고 `× N회` 로 접는다.** 볼트가 Sync 중일
+   * 때의 run 보류는 편집이 잦으면 십수 초마다 같은 줄을 남겨 파일을 채웠다(2026-08-16).
+   * 접어도 정보는 안 잃는다 — 첫 시각·끝 시각·횟수·계기가 헤더에 남는다.
    */
   async append(
     summary: string,
@@ -121,20 +188,48 @@ export class SyncLogWriter {
     if (shown.length === 0) return;
 
     const path = this.path();
-    const block = formatBlock(summary, trigger, shown);
+    const fresh = newBlock(summary, trigger, shown);
     try {
       const adapter = this.app.vault.adapter;
       if (!(await adapter.exists(path))) {
         await this.ensureParent(path);
-        await adapter.write(path, HEADER + this.legend() + block);
+        await adapter.write(path, HEADER + this.legend() + renderBlock(fresh));
+        this.tail = fresh;
         return;
       }
-      await adapter.append(path, block);
+      if (this.tail && this.tail.signature === fresh.signature) {
+        const merged = extendBlock(this.tail, trigger);
+        if (await this.rewriteTail(path, renderBlock(this.tail), renderBlock(merged))) {
+          this.tail = merged;
+          return;
+        }
+        // 파일 끝이 우리가 아는 모양이 아니다(트림·사용자 편집·다른 기기) → 그냥 새로 붙인다.
+      }
+      await adapter.append(path, renderBlock(fresh));
+      this.tail = fresh;
       await this.trim(path, cfg.maxKB);
     } catch (e) {
       // 로그를 못 쓰는 것이 동기화를 막아선 안 된다.
       console.error("[tasks-gcal-sync] 동기화 로그 기록 실패:", path, e);
+      this.tail = null; // 실패했으면 파일 끝 상태를 더는 알 수 없다
     }
+  }
+
+  /**
+   * 파일 끝의 블록을 갱신본으로 갈아끼운다. 끝이 `prev` 와 정확히 같을 때만 손대고,
+   * 아니면 false 를 돌려 호출부가 append 로 폴백하게 한다 — 남의 기록을 덮어쓰느니
+   * 줄이 하나 늘어나는 편이 낫다.
+   */
+  private async rewriteTail(
+    path: string,
+    prev: string,
+    next: string
+  ): Promise<boolean> {
+    const adapter = this.app.vault.adapter;
+    const text = await adapter.read(path);
+    if (!text.endsWith(prev)) return false;
+    await adapter.write(path, text.slice(0, text.length - prev.length) + next);
+    return true;
   }
 
   private legend(): string {
