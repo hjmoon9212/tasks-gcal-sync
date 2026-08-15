@@ -564,6 +564,55 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     eq(r.entries.filter((e) => e.action === "FAIL").length, 1, "로그에도 남는다");
   }
 
+  // ── 11-b) 종일 이벤트에 ⏰ 를 새로 붙이면 PATCH 가 400 나던 것(2026-08-16).
+  //     PATCH 는 병합이라 start 에 date 가 남은 채 dateTime 이 더해져
+  //     "Invalid start time" 이 됐다 — 반대편 표현을 null 로 지워야 한다.
+  {
+    const ev = doneEvent("A1", false, "200"); // 종일 이벤트(start.date)
+    const h = harness({
+      tasks: [{ ...task("A1", false), time: "07:45-10:00" }], // 노트에 ⏰ 추가됨
+      events: [ev],
+      records: { A1: rec({ gcalUpdated: "200" }) }, // 스냅샷은 종일(time 없음)
+    });
+    await h.engine.run();
+    eq(h.calls.patch.length, 1, "⏰ 추가 → push 발생");
+    const p = h.calls.patch[0].patch;
+    eq(p.start.dateTime, "2026-08-06T07:45:00", "시작 시각을 보낸다");
+    eq(p.end.dateTime, "2026-08-06T10:00:00", "종료 시각을 보낸다");
+    eq(p.start.date, null, "종일 표현(start.date)을 명시적으로 지운다");
+    eq(p.end.date, null, "종일 표현(end.date)을 명시적으로 지운다");
+  }
+  {
+    // 반대 방향(종일 patch)도 한 가지 표현만 남긴다 — 시간 표현이 섞여 들어가면
+    // 같은 400 이 반대쪽에서 난다.
+    const h = harness({
+      tasks: [task("A1", false, "2026-08-09")], // ⏰ 없음, 날짜만 변경
+      events: [doneEvent("A1", false, "200")], // 종일 이벤트
+      records: { A1: rec({ gcalUpdated: "200" }) },
+    });
+    await h.engine.run();
+    const p = h.calls.patch[0].patch;
+    eq(p.start.date, "2026-08-09", "종일 날짜를 보낸다");
+    eq(p.start.dateTime, null, "시간 표현(dateTime)을 명시적으로 지운다");
+    eq(p.start.timeZone, null, "시간대도 지운다");
+  }
+  {
+    // ⏰ 가 없는 task 는 GCal 에서 사람이 지정한 시각을 보존한다(0.5.0 설계).
+    // 그 경로에서도 종일 표현이 남지 않아야 한다.
+    const ev = doneEvent("A1", false, "200");
+    ev.start = { dateTime: "2026-08-06T07:45:00", timeZone: "Asia/Seoul" };
+    ev.end = { dateTime: "2026-08-06T10:00:00", timeZone: "Asia/Seoul" };
+    const h = harness({
+      tasks: [task("A1", false, "2026-08-09")],
+      events: [ev],
+      records: { A1: rec({ time: "07:45-10:00", gcalUpdated: "200" }) },
+    });
+    await h.engine.run();
+    const p = h.calls.patch[0].patch;
+    eq(p.start.dateTime, "2026-08-09T07:45:00", "시각은 보존한 채 날짜만 민다");
+    eq(p.start.date, null, "종일 표현을 지운다");
+  }
+
   // ── 12) 로그 항목: 사후에 "무엇이 왜"에 답할 수 있어야 한다.
   //     카운터만으로는 삭제 한 건의 이유도, 충돌에서 무엇이 버려졌는지도 알 수 없다.
   {

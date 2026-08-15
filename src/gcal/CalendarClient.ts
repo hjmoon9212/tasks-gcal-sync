@@ -9,8 +9,10 @@ export interface GCalEvent {
   description?: string;
   colorId?: string | null; // 1~11 (Google 이벤트 색). null=색 제거(기본색 복귀).
   status?: string; // "confirmed" | "cancelled"
-  start?: { date?: string; dateTime?: string; timeZone?: string };
-  end?: { date?: string; dateTime?: string; timeZone?: string };
+  // PATCH에서 null은 "그 필드를 지운다"는 뜻이다. 종일↔시간 전환에 반드시 필요하다 —
+  // 반대편 표현을 명시적으로 지우지 않으면 date와 dateTime이 한 객체에 함께 남는다.
+  start?: { date?: string | null; dateTime?: string | null; timeZone?: string | null };
+  end?: { date?: string | null; dateTime?: string | null; timeZone?: string | null };
   updated?: string;
   extendedProperties?: { private?: Record<string, string> };
 }

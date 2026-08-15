@@ -350,6 +350,28 @@ export class SyncEngine {
     );
   }
 
+  /**
+   * PATCH 용 start/end 를 **한 가지 표현만 남게** 만든다.
+   *
+   * PATCH 는 객체를 병합한다. 종일 이벤트(`start.date`)에 시각 표현(`start.dateTime`)만
+   * 보내면 서버 쪽 start 에는 date 와 dateTime 이 **함께** 남고, Google 은 그걸
+   * `400 Invalid start time` 으로 거절한다 — 노트에 ⏰ 를 새로 붙인 task 가 매 sync 마다
+   * 이 400 을 반복했다(2026-08-16). 반대 방향(시간 → 종일)도 같은 이유로 깨진다.
+   * 그래서 쓰지 않는 쪽을 null 로 명시해 지운다.
+   */
+  private exclusiveDates(d: Partial<GCalEvent>): Partial<GCalEvent> {
+    const one = (v: GCalEvent["start"]): GCalEvent["start"] => {
+      if (!v) return v;
+      return v.dateTime
+        ? { ...v, date: null } // 시간지정 → 종일 표현 제거
+        : { ...v, dateTime: null, timeZone: null }; // 종일 → 시간 표현 제거
+    };
+    const out: Partial<GCalEvent> = { ...d };
+    if (d.start) out.start = one(d.start);
+    if (d.end) out.end = one(d.end);
+    return out;
+  }
+
   private async pushUpdate(
     rec: {
       calendarId: string;
@@ -409,7 +431,7 @@ export class SyncEngine {
     }
     // 설명 병합은 현재 이벤트를 알아야 하므로 getEvent 뒤에 만든다.
     const patch = this.presentationPatch(id, t, cur);
-    if (dates) Object.assign(patch, dates);
+    if (dates) Object.assign(patch, this.exclusiveDates(dates));
     return this.client.patchEvent(rec.calendarId, rec.eventId, patch);
   }
 
