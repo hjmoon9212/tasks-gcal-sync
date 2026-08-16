@@ -625,14 +625,23 @@ export class SyncEngine {
     try {
       const inst = (this.app as any).internalPlugins?.plugins?.sync?.instance;
       if (!inst) return false;
-      if (inst.pause === true) return true;
-      // 불리언 신호가 문자열보다 직접적이다(실측: 인스턴스에 syncing/pause/error/ready가 있다).
-      // `=== true`로만 받아 fail-open을 지킨다 — 필드가 없어지면 undefined라 통과한다.
-      if (inst.syncing === true) return true;
       // getStatus()는 표시용 문구(syncStatus: "Fully synced")가 아니라 토큰("synced")을
-      // 준다. 그래도 아래 판정은 여전히 "진행 중"만 양성으로 본다(주석 참고).
+      // 준다. 판정 전에 먼저 읽어두는 이유는 **로그 때문**이다 — 어느 신호로 걸렸든
+      // "Sync가 뭐라고 했는지"가 콘솔에 남아야 사후에 원인을 좁힐 수 있다.
       const raw =
         typeof inst.getStatus === "function" ? inst.getStatus() : inst.syncStatus;
+      const say = (why: string) =>
+        console.log(`[tasks-gcal-sync] Sync 진행 중(${why}):`, raw);
+      if (inst.pause === true) {
+        say("pause");
+        return true;
+      }
+      // 불리언 신호가 문자열보다 직접적이다(실측: 인스턴스에 syncing/pause/error/ready가 있다).
+      // `=== true`로만 받아 fail-open을 지킨다 — 필드가 없어지면 undefined라 통과한다.
+      if (inst.syncing === true) {
+        say("syncing");
+        return true;
+      }
       const s = String(raw ?? "").toLowerCase();
       if (!s) return false;
       // **fail-open**: "진행 중"이라고 확실히 읽힐 때만 true.
@@ -643,7 +652,7 @@ export class SyncEngine {
         /syncing|synchronizing|uploading|downloading|pending|queued|동기화\s*중|업로드|다운로드/.test(
           s
         );
-      if (busy) console.log("[tasks-gcal-sync] Sync 진행 중:", raw);
+      if (busy) say("상태");
       return busy;
     } catch {
       return false;
