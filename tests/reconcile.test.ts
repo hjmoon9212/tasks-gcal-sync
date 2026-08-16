@@ -238,10 +238,45 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     const r = await h.engine.run();
     eq(h.calls.patch.length, 0, "볼트 뒤처짐: push 없음");
     eq(r.skipped, 1, "볼트 뒤처짐: run 보류로 표시");
+    // 보류만 하고 끝내면 다음 주기(5분)까지 방치된다 → 재확인을 예약시킨다
+    eq(r.retryAfterMs, 15_000, "볼트 뒤처짐: 재확인 시각을 돌려준다");
 
-    // fail-open 상한: 계속 뒤처짐이면 결국 통과시킨다
+    // fail-open 상한은 **횟수가 아니라 시간**이다. 재확인이 15초로 촘촘해진 뒤로
+    // 횟수 상한(옛 5회)은 75초 만에 보호를 풀어버려 제거했다.
     for (let i = 0; i < 6; i++) await h.engine.run();
-    eq(h.calls.patch.length >= 1, true, "fail-open 상한 초과 후에는 통과");
+    eq(h.calls.patch.length, 0, "짧게 여러 번 보류해도 상한은 안 풀린다");
+    (h.engine as any).behindSince = Date.now() - 11 * 60_000;
+    await h.engine.run();
+    eq(h.calls.patch.length >= 1, true, "fail-open 시간 상한 초과 후에는 통과");
+  }
+
+  // ── 7-b) 상태 문자열 없이 `syncing` 불리언만 있어도 뒤처짐으로 본다
+  {
+    const h = harness({
+      tasks: [task("A1", false, "2026-08-09")],
+      events: [doneEvent("A1", false, "200")],
+      records: { A1: rec({ gcalUpdated: "200" }) },
+    });
+    (h.engine as any).app.internalPlugins = {
+      plugins: { sync: { instance: { syncing: true, syncStatus: "" } } },
+    };
+    const r = await h.engine.run();
+    eq(h.calls.patch.length, 0, "syncing 불리언: push 없음");
+    eq(r.skips["vault-behind"], 1, "syncing 불리언: 뒤처짐으로 집계");
+  }
+
+  // ── 7-c) fail-open: 판정할 근거가 없으면 통과시킨다(가드가 기능을 끄면 안 된다)
+  {
+    const h = harness({
+      tasks: [task("A1", false, "2026-08-09")],
+      events: [doneEvent("A1", false, "200")],
+      records: { A1: rec({ gcalUpdated: "200" }) },
+    });
+    (h.engine as any).app.internalPlugins = {
+      plugins: { sync: { instance: { getStatus: () => "synced" } } },
+    };
+    await h.engine.run();
+    eq(h.calls.patch.length >= 1, true, "synced 토큰: 평소대로 통과");
   }
 
   // ── 8) GCal에서 이벤트를 지워도 **완료된** 줄의 📅는 건드리지 않는다.
@@ -283,6 +318,39 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     await h.engine.run();
     eq(h.calls.removeDue, [], "콜드 스타트: 미일정화 보류");
     eq(h.state.records.A1 !== undefined, true, "콜드 스타트: record 유지");
+  }
+
+  // ── 10-b) 콜드 스타트 run은 잠금이 풀리는 시점을 돌려준다.
+  //      안 그러면 60초에 잠금이 풀려도 깨우는 사람이 없어 5분 틱까지 기다린다.
+  {
+    const h = harness({
+      tasks: [task("A1", false, "2026-08-09")],
+      events: [doneEvent("A1", false, "200")],
+      records: { A1: rec({ gcalUpdated: "200" }) },
+    });
+    (h.engine as any).loadedAt = Date.now() - 20_000;
+    (h.engine as any).pullCycleDone = false;
+    const r = await h.engine.run();
+    eq(h.calls.patch.length, 0, "콜드 스타트: GCal 쓰기 없음");
+    // 남은 40초 + 여유 2초. 실행 시간만큼 오차가 나므로 범위로 본다.
+    const ok = r.retryAfterMs! > 39_000 && r.retryAfterMs! <= 42_000;
+    eq(ok, true, `콜드 스타트: 잠금 만료 시점 예약 (실제 ${r.retryAfterMs})`);
+  }
+
+  // ── 10-c) pull이 실패했으면 예약하지 않는다.
+  //      시간이 다 지나도 pullCycleDone이 false면 다음 run도 콜드다 — 예약하면
+  //      2초 간격으로 되돈다. 그 경우는 기존 주기 동기화가 재시도한다.
+  {
+    const h = harness({
+      tasks: [task("A1", false, "2026-08-09")],
+      events: [doneEvent("A1", false, "200")],
+      records: { A1: rec({ gcalUpdated: "200" }) },
+      pullFails: true,
+    });
+    (h.engine as any).loadedAt = Date.now();
+    (h.engine as any).pullCycleDone = false;
+    const r = await h.engine.run();
+    eq(r.retryAfterMs, undefined, "콜드 스타트 + pull 실패: 예약 없음");
   }
 
   // -- 11) due를 잃은 task: 평상시엔 이벤트를 지운다(400 무한반복 방지, 0.3.5)

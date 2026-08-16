@@ -82,9 +82,13 @@ export interface SyncResult {
    */
   entries: SyncLogEntry[];
   /**
-   * done 회귀 보류가 걸려 이 시간(ms) 뒤에 다시 돌면 반영될 것이 있다.
-   * 없으면 undefined. 호출부(main)가 후속 run을 예약한다 — 안 그러면 체크 해제가
-   * 다음 주기(기본 5분)까지 GCal에 안 올라가 "아무 변화가 없다"로 보인다.
+   * 이 시간(ms) 뒤에 다시 돌면 반영될 것이 있다. 없으면 undefined.
+   * 사유는 셋 — **done 회귀 보류 · 볼트 뒤처짐 보류 · 콜드 스타트 쓰기 잠금**.
+   * 호출부(main)가 후속 run을 예약한다 — 안 그러면 보류가 풀려도 다음 주기(기본 5분)
+   * 까지 GCal이 그대로라 "아무 변화가 없다"로 보인다.
+   *
+   * 여러 보류가 겹치면 **가장 이른 시각**을 쓴다(`Math.min`). 각 run이 남아 있는 보류를
+   * 매번 다시 알리므로, 이르게 깨어나도 그 run이 다음 재확인을 또 예약해 수렴한다.
    */
   retryAfterMs?: number;
 }
@@ -111,17 +115,30 @@ const UNCHECK_HOLD_MS = 60_000;
  * records 가 비었으면 간격과 무관하게 즉시 돈다 — 그때는 스캔이 유일한 복구 경로다.
  */
 const FULL_SCAN_INTERVAL_MS = 24 * 60 * 60 * 1000;
-/** vaultBehind가 계속 참일 때 보류를 포기하고 통과시키는 상한. */
+/**
+ * vaultBehind가 계속 참일 때 보류를 포기하고 통과시키는 상한.
+ *
+ * **시간만 센다.** 예전엔 횟수(5회) 상한도 있었는데, 그건 run 간격이 주기 동기화
+ * (기본 5분)뿐이라 "5회 ≈ 25분"이던 시절의 값이다. 보류할 때마다 재확인을 예약하는
+ * 지금은 5회가 75초밖에 안 돼 보호가 사실상 사라진다. 예산의 목적은 "영원히 막히지
+ * 않기"이므로 원래 시간 개념이 맞다.
+ */
 const BEHIND_MAX_MS = 10 * 60_000;
-const BEHIND_MAX_RUNS = 5;
+/**
+ * 볼트 뒤처짐으로 run을 보류했을 때 다시 확인하기까지의 간격.
+ *
+ * 보류 run은 네트워크 호출 전에 반환되므로 사실상 공짜다. 이게 없으면 Sync가 3초 만에
+ * 정착해도 다음 트리거(주기 5분)까지 아무 일도 안 일어난다.
+ */
+const BEHIND_RECHECK_MS = 15_000;
 
 export class SyncEngine {
   /** 플러그인 로드 시각. 콜드 스타트 판정 기준(인스턴스는 로드마다 새로 만들어진다). */
   private readonly loadedAt = Date.now();
   /** 알려진 캘린더 전부를 예외 없이 pull한 run이 한 번 끝났는가. */
   private pullCycleDone = false;
+  /** 볼트 뒤처짐 판정이 **연속으로** 참이기 시작한 시각. fail-open 상한의 기준. */
   private behindSince: number | null = null;
-  private behindRuns = 0;
 
   constructor(
     private app: App,
@@ -609,6 +626,11 @@ export class SyncEngine {
       const inst = (this.app as any).internalPlugins?.plugins?.sync?.instance;
       if (!inst) return false;
       if (inst.pause === true) return true;
+      // 불리언 신호가 문자열보다 직접적이다(실측: 인스턴스에 syncing/pause/error/ready가 있다).
+      // `=== true`로만 받아 fail-open을 지킨다 — 필드가 없어지면 undefined라 통과한다.
+      if (inst.syncing === true) return true;
+      // getStatus()는 표시용 문구(syncStatus: "Fully synced")가 아니라 토큰("synced")을
+      // 준다. 그래도 아래 판정은 여전히 "진행 중"만 양성으로 본다(주석 참고).
       const raw =
         typeof inst.getStatus === "function" ? inst.getStatus() : inst.syncStatus;
       const s = String(raw ?? "").toLowerCase();
@@ -631,19 +653,15 @@ export class SyncEngine {
   /**
    * vaultBehind 보류가 너무 오래 이어지면 포기하고 통과시킨다(**fail-open 상한**).
    *
-   * `vaultBehind()`는 비공식 API의 상태 문자열에 기대고, Sync를 수동 일시정지해두면
+   * `vaultBehind()`는 비공식 API의 상태에 기대고, Sync를 수동 일시정지해두면
    * `pause === true`가 영구히 참이다. 상한이 없으면 동기화가 조용히 영영 멈춘다.
    * 가드가 기능을 끄는 쪽으로 실패하면 안 된다 — 0.3.9→0.3.10에서 배운 것.
+   *
+   * 재는 것은 **run 횟수가 아니라 경과 시간**이다(BEHIND_MAX_MS 주석 참고).
    */
   private behindBudgetExceeded(): boolean {
-    if (this.behindSince === null) {
-      this.behindSince = Date.now();
-      this.behindRuns = 0;
-    }
-    this.behindRuns++;
-    const over =
-      Date.now() - this.behindSince > BEHIND_MAX_MS ||
-      this.behindRuns > BEHIND_MAX_RUNS;
+    if (this.behindSince === null) this.behindSince = Date.now();
+    const over = Date.now() - this.behindSince > BEHIND_MAX_MS;
     if (over) {
       console.warn(
         "[tasks-gcal-sync] 볼트 뒤처짐 판정이 계속됨 → 상한 초과, 이번 run은 통과시킴"
@@ -710,7 +728,6 @@ export class SyncEngine {
 
   private resetBehindBudget(): void {
     this.behindSince = null;
-    this.behindRuns = 0;
   }
 
   /**
@@ -1193,11 +1210,20 @@ export class SyncEngine {
     const overBudget = behind && this.behindBudgetExceeded();
     if (behind && !overBudget && !opts.force) {
       console.log("[tasks-gcal-sync] 볼트 동기화 중 → 이번 run 보류");
+      // 보류만 하고 끝내면 Sync가 3초 뒤 정착해도 다음 트리거(주기 5분)까지 방치된다.
+      // 호출부(main)가 이 값을 보고 재확인을 예약한다.
+      const sec = Math.round(BEHIND_RECHECK_MS / 1000);
       return {
         ...empty,
         skipped: 1,
         skips: { "vault-behind": 1 },
-        entries: [{ action: "SKIP", detail: SKIP_TEXT["vault-behind"] }],
+        retryAfterMs: BEHIND_RECHECK_MS,
+        entries: [
+          {
+            action: "SKIP",
+            detail: `${SKIP_TEXT["vault-behind"]}(${sec}초 뒤 재확인)`,
+          },
+        ],
       };
     }
     if (!behind) this.resetBehindBudget();
@@ -1577,6 +1603,16 @@ export class SyncEngine {
 
     // pull을 예외 없이 끝냈으면 콜드 스타트 잠금을 푼다(시간 하한은 pushArmed가 따로 본다).
     if (pullOk) this.pullCycleDone = true;
+
+    // 콜드 스타트로 GCal 쓰기를 미뤘고 이제 **시간만** 남았다면, 그 시점에 한 번 더 돈다.
+    // 안 그러면 60초에 잠금이 풀려도 깨우는 사람이 없어 다음 주기(기본 5분)를 기다린다.
+    // pullCycleDone이 아직 false면(=pull 실패) 예약하지 않는다 — 실패가 이어질 때
+    // 2초 간격으로 되도는 것을 막는다. 그 경우는 기존 주기 동기화가 재시도한다.
+    if (coldHold && this.pullCycleDone) {
+      const left =
+        Math.max(0, COLD_START_MS - (Date.now() - this.loadedAt)) + 2_000;
+      result.retryAfterMs = Math.min(result.retryAfterMs ?? left, left);
+    }
 
     await this.saveState();
     return result;

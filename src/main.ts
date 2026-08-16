@@ -244,7 +244,13 @@ export default class TasksGcalSyncPlugin extends Plugin {
       trigger?: string;
     } = {}
   ): Promise<void> {
-    if (this.syncing) return;
+    // 진행 중이면 이번 호출은 버린다. 다만 **그냥 버리면 안 된다** — 2026-08-06 사고에서
+    // 시작 run이 도는 동안 발화한 자동 트리거가 재예약 없이 사라졌다. 보류 재확인이
+    // 촘촘해질수록 겹칠 확률이 올라가므로, 자동 호출은 조금 뒤로 다시 잡는다.
+    if (this.syncing) {
+      if (!opts.force) this.scheduleFollowUp(5_000);
+      return;
+    }
     if (!this.auth.isAuthenticated()) {
       if (!silent) new Notice("먼저 설정에서 Google 인증을 하세요.");
       return;
@@ -255,8 +261,9 @@ export default class TasksGcalSyncPlugin extends Plugin {
       const r = await this.engine.run(opts);
       this.lastResult = r;
       this.lastFatal = null;
-      // 체크 해제는 한 사이클 보류한다(롤백 사고 대비). 보류가 풀리는 시점에 한 번 더
-      // 돌지 않으면 다음 주기(기본 5분)까지 GCal이 그대로라 "아무 일도 안 일어난다"로 보인다.
+      // 엔진이 뭔가를 미뤘으면(체크 해제 보류 · 볼트 뒤처짐 · 콜드 스타트) 그 시점에 한 번
+      // 더 돈다. 이게 없으면 보류가 풀려도 다음 주기(기본 5분)까지 GCal이 그대로라
+      // "아무 일도 안 일어난다"로 보인다.
       if (r.retryAfterMs) this.scheduleFollowUp(r.retryAfterMs);
       const skipDetail = this.describeSkips(r);
       if (skipDetail) console.log("[tasks-gcal-sync] 건너뜀:", skipDetail);
