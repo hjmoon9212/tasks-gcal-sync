@@ -5,6 +5,7 @@
 import { SyncEngine } from "../src/sync/SyncEngine";
 import { DEFAULT_SETTINGS, PluginSettings } from "../src/settings/Settings";
 import { PersistedState, SyncRecord } from "../src/sync/StateStore";
+import { addDays, todayStr } from "../src/sync/dates";
 
 let pass = 0;
 let fail = 0;
@@ -41,6 +42,30 @@ const doneEvent = (id: string, done: boolean, updated: string): Ev => ({
     },
   },
 });
+
+/** 시간지정(타임블록) 이벤트 — 하루짜리. tgsTime 스냅샷까지 심는다. */
+const timedEvent = (id: string, date: string, range = "09:00-11:00"): Ev => {
+  const [st, et] = range.split("-");
+  return {
+    id: "ev-" + id,
+    updated: "100",
+    status: "confirmed",
+    summary: "☐ 샘플",
+    start: { dateTime: `${date}T${st}:00`, timeZone: "Asia/Seoul" },
+    end: { dateTime: `${date}T${et}:00`, timeZone: "Asia/Seoul" },
+    extendedProperties: {
+      private: {
+        tgsTaskId: id,
+        tgsVault: "vault",
+        tgsDue: date,
+        tgsStart: date,
+        tgsTime: range,
+        tgsDone: "0",
+        tgsTitle: "샘플",
+      },
+    },
+  };
+};
 
 /** GCal에서 지워진 이벤트가 pull 응답에 실려 오는 모양. */
 const cancelledEvent = (id: string): Ev => ({
@@ -749,6 +774,109 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     });
     const r = await h.engine.run();
     eq(r.entries, [], "아무 일도 없으면 기록도 없다");
+  }
+
+  /*
+   * ── 🛫 다중일 + ⏰: 시각은 무시하고 종일 블록으로 ──────────────────────────────
+   * GCal 의 시간지정 이벤트는 "첫날 시작시각 → 마지막날 종료시각" 한 덩어리라,
+   * ⏰ 09:00-11:00 에 3일 span 을 얹으면 매일 09-11시가 아니라 50시간짜리 통짜
+   * 블록이 된다. "여러 날 · 매일 같은 시간대"는 반복 이벤트라야 표현되므로,
+   * 표현 못 하는 것을 억지로 만들지 않고 종일 다중일 블록으로 둔다.
+   *
+   * 창(window) 밖 task 는 생성되지 않으므로 날짜는 오늘 기준으로 만든다.
+   */
+  const D1 = addDays(todayStr(), 1);
+  const D3 = addDays(todayStr(), 3);
+
+  {
+    const h = harness({
+      tasks: [{ ...task("M1", false, D3), start: D1, time: "09:00-11:00" }],
+      events: [],
+      records: {},
+    });
+    await h.engine.run();
+    eq(h.calls.insert.length, 1, "다중일+⏰: 이벤트 생성");
+    const ev = h.calls.insert[0];
+    eq(ev.start, { date: D1 }, "다중일+⏰: 🛫부터 종일로 시작");
+    eq(ev.end, { date: addDays(D3, 1) }, "다중일+⏰: 📅+1일(배타적)로 끝");
+    eq(
+      h.state.records.M1.time,
+      "",
+      "다중일+⏰: 스냅샷도 종일 — 다음 run 이 되밀지 않는다"
+    );
+  }
+
+  {
+    // 🛫 == 📅 는 하루짜리다 → 시각을 그대로 쓴다(경계).
+    const h = harness({
+      tasks: [{ ...task("S1", false, D1), start: D1, time: "09:00-11:00" }],
+      events: [],
+      records: {},
+    });
+    await h.engine.run();
+    const ev = h.calls.insert[0];
+    eq(ev.start.dateTime, `${D1}T09:00:00`, "🛫=📅: 시간지정 유지(시작)");
+    eq(ev.end.dateTime, `${D1}T11:00:00`, "🛫=📅: 시간지정 유지(끝)");
+  }
+
+  {
+    // 🛫 없이 ⏰ 만 — 기존 동작 회귀 방지.
+    const h = harness({
+      tasks: [{ ...task("S2", false, D1), time: "09:00-11:00" }],
+      events: [],
+      records: {},
+    });
+    await h.engine.run();
+    eq(
+      h.calls.insert[0].start.dateTime,
+      `${D1}T09:00:00`,
+      "🛫 없음: 시간지정 유지"
+    );
+  }
+
+  {
+    // 🛫 가 📅 보다 뒤면 spanStart 가 무시한다 → 하루짜리, 시각 유지.
+    const h = harness({
+      tasks: [{ ...task("S3", false, D1), start: D3, time: "09:00-11:00" }],
+      events: [],
+      records: {},
+    });
+    await h.engine.run();
+    const ev = h.calls.insert[0];
+    eq(ev.start.dateTime, `${D1}T09:00:00`, "🛫 > 📅: 🛫 무시, 시간지정 유지");
+    eq(ev.end.dateTime, `${D1}T11:00:00`, "🛫 > 📅: 끝도 📅 당일");
+  }
+
+  {
+    // 이미 시간지정으로 올라간 이벤트에 🛫 를 붙여 다중일이 되면 → 종일로 되돌린다.
+    // (⏰ 를 노트에서 뗀 것과 같은 경로: rec.time 은 차 있고 taskTime 은 "")
+    const h = harness({
+      tasks: [{ ...task("M2", false, D3), start: D1, time: "09:00-11:00" }],
+      events: [timedEvent("M2", D3)],
+      records: {
+        M2: rec({
+          eventId: "ev-M2",
+          due: D3,
+          start: D3,
+          time: "09:00-11:00",
+          gcalUpdated: "100",
+        }),
+      },
+    });
+    await h.engine.run();
+    eq(h.calls.patch.length, 1, "다중일 전환: patch 1회");
+    const patch = h.calls.patch[0].patch;
+    eq(
+      patch.start,
+      { date: D1, dateTime: null, timeZone: null },
+      "다중일 전환: 종일 시작 + 시간 표현 제거"
+    );
+    eq(
+      patch.end,
+      { date: addDays(D3, 1), dateTime: null, timeZone: null },
+      "다중일 전환: 종일 끝"
+    );
+    eq(h.state.records.M2.time, "", "다중일 전환: 스냅샷 종일");
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

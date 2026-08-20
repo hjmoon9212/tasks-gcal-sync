@@ -297,8 +297,25 @@ export class SyncEngine {
     return isValidTimeRange(range) ? range : undefined;
   }
 
-  /** 노트의 타임블록("" = 종일). 유효하지 않은 값은 종일로 본다. */
+  /** 🛫 가 📅 보다 앞서 이벤트가 여러 날에 걸치는가. (같은 날이면 하루짜리) */
+  private isMultiDay(t: VaultTask): boolean {
+    return !!(t.start && t.due && t.start < t.due);
+  }
+
+  /**
+   * 노트의 타임블록("" = 종일). 유효하지 않은 값은 종일로 본다.
+   *
+   * **다중일(🛫 < 📅)이면 ⏰ 가 있어도 종일로 본다.** GCal 의 시간지정 이벤트는
+   * "첫날 시작시각 → 마지막날 종료시각" 한 덩어리라, ⏰ 09:00-11:00 에 🛫/📅 가 3일이면
+   * 매일 09-11시가 아니라 50시간짜리 통짜 블록이 된다. "여러 날 · 매일 같은 시간대"는
+   * 반복 이벤트라야 표현되므로, 표현 못 하는 것을 억지로 만들지 않고 종일 다중일 블록으로 둔다.
+   *
+   * 노트의 ⏰ 는 지우지 않는다 — 🛫 를 떼거나 📅 를 당겨 하루짜리로 돌아오면 시각이 그대로
+   * 살아난다. 이 함수가 시각의 **단일 관문**이라 여기서 "" 를 주면 push(timedDates) ·
+   * 스냅샷(tgsTime) · 비교(local.time)가 모두 같은 값을 보고, 노트와 이벤트가 서로 밀지 않는다.
+   */
   private taskTime(t: VaultTask): string {
+    if (this.isMultiDay(t)) return "";
     return isValidTimeRange(t.time) ? t.time : "";
   }
 
