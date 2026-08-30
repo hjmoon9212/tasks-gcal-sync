@@ -1,20 +1,5 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type TasksGcalSyncPlugin from "../main";
-import { FEED_COLOR_FALLBACK } from "./Settings";
-
-/**
- * 색 선택기가 받는 "#rrggbb" 인지 확인. Google 이 주는 backgroundColor 는 보통 이 형식이지만
- * 아닌 값을 그대로 넣으면 선택기가 조용히 검정으로 떨어진다.
- */
-function normalizeHex(v: string | undefined): string | null {
-  if (!v) return null;
-  const s = v.trim();
-  if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
-  if (/^#[0-9a-fA-F]{3}$/.test(s)) {
-    return ("#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3]).toLowerCase();
-  }
-  return null;
-}
 
 /** Google Calendar 이벤트 색(colorId 1~11). */
 const GCAL_COLORS: { id: string; name: string }[] = [
@@ -232,10 +217,9 @@ export class SettingsTab extends PluginSettingTab {
     });
     containerEl.createEl("p", {
       text:
-        "색은 기본적으로 캘린더 뷰의 같은 이름 카테고리를 따릅니다 " +
-        "(예: Growth 캘린더 → growth 카테고리 색). 그래서 같은 캘린더의 task 막대와 " +
-        "색이 저절로 같아집니다. 다르게 하고 싶을 때만 아래에서 고르고, " +
-        "«카테고리 색» 버튼으로 되돌립니다.",
+        "여기서는 «어느 캘린더를 가져올지» 만 정합니다. 색은 그리는 쪽인 " +
+        "gcal-calendar-view 설정 → «GCal 일정 캘린더» 에 모여 있습니다 — " +
+        "카테고리 색 바로 아래라 task 막대와 나란히 놓고 맞출 수 있습니다.",
       cls: "setting-item-description",
     });
 
@@ -265,36 +249,6 @@ export class SettingsTab extends PluginSettingTab {
           this.display();
         })
       );
-      if (picked) {
-        const follows = !normalizeHex(picked.color);
-        row.setDesc(
-          follows
-            ? "색: 카테고리 따름 (같은 이름의 카테고리 색)"
-            : `색: 직접 지정 ${picked.color}`
-        );
-        row.addColorPicker((p) =>
-          // 따르는 중이면 선택기에는 폴백을 보여준다 — 실제 색은 뷰가 카테고리에서 정한다
-          p.setValue(normalizeHex(picked.color) || FEED_COLOR_FALLBACK).onChange(async (v) => {
-            picked.color = v;
-            await this.plugin.saveAll();
-            // 색만 바뀌었으니 다시 받아올 필요는 없다. 뷰에 알리기만 한다.
-            this.plugin.feed.dropUnselected();
-            this.display();
-          })
-        );
-        row.addExtraButton((b) =>
-          b
-            .setIcon("rotate-ccw")
-            .setTooltip("카테고리 색으로 되돌리기")
-            .setDisabled(follows)
-            .onClick(async () => {
-              picked.color = "";
-              await this.plugin.saveAll();
-              this.plugin.feed.dropUnselected();
-              this.display();
-            })
-        );
-      }
     }
 
     new Setting(containerEl).addButton((b) =>
