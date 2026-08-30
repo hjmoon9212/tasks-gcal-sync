@@ -9,13 +9,32 @@ export interface CalendarRef {
  * 캘린더 뷰(gcal-calendar-view)에 **읽기 전용으로 그릴** 캘린더.
  *
  * color가 로컬 설정인 이유: Google 이벤트의 colorId는 1~11 팔레트 인덱스일 뿐
- * 사용자가 캘린더에 지정한 커스텀 HEX를 주지 않는다. calendarList의
- * backgroundColor를 첫 기본값으로만 쓰고, 그 뒤로는 여기 값이 진실원천이다.
+ * 사용자가 캘린더에 지정한 커스텀 HEX를 주지 않는다.
+ *
+ * **`""` 는 "캘린더 뷰의 카테고리 색을 따른다"** 는 뜻이고 그게 기본값이다.
+ * `#gcal/<이름>` 라우팅이 태그 이름과 캘린더 이름을 그대로 맞추므로, 캘린더
+ * "Growth" 의 회의는 growth 카테고리 색이 되어 같은 캘린더의 task 막대와 저절로
+ * 같아진다 — 색을 두 군데서 따로 맞출 필요가 없다. 여기에 값을 넣으면 그게 이긴다.
  */
 export interface FeedCalendar {
   id: string;
   name: string;
-  color: string; // "#rrggbb"
+  color: string; // "#rrggbb" | "" = 카테고리 색 따르기
+}
+
+/** 자동으로 채워 넣던 폴백 회색. 이 값은 "고른 색"이 아니라 "못 정한 색"이었다. */
+export const FEED_COLOR_FALLBACK = "#7f8c8d";
+
+/**
+ * v0.7.0 은 캘린더를 켤 때 색을 반드시 채웠고, calendarList 의 backgroundColor 가
+ * 없으면 폴백 회색을 넣었다. 그래서 고른 캘린더가 전부 같은 회색이 되는 일이 생겼다.
+ * 그 회색은 **선택이 아니라 부재**였으므로 `""`(카테고리 색 따르기)로 되돌린다.
+ * 일부러 그 회색을 원했다면 설정에서 다시 고르면 된다.
+ */
+export function migrateFeedColors(settings: PluginSettings): void {
+  for (const f of settings.feedCalendars ?? []) {
+    if (f.color === FEED_COLOR_FALLBACK) f.color = "";
+  }
 }
 
 /**

@@ -1,5 +1,5 @@
 import { Notice, Plugin, TFile, normalizePath } from "obsidian";
-import { DEFAULT_SETTINGS, PluginSettings } from "./settings/Settings";
+import { DEFAULT_SETTINGS, PluginSettings, migrateFeedColors } from "./settings/Settings";
 import { SettingsTab } from "./settings/SettingsTab";
 import { PersistedState, emptyState } from "./sync/StateStore";
 import { GoogleAuth } from "./auth/GoogleAuth";
@@ -511,6 +511,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
     const data = (await this.loadData()) as PluginData | null;
     this.settings = { ...DEFAULT_SETTINGS, ...(data?.settings ?? {}) };
     this.migrateTiming();
+    migrateFeedColors(this.settings);
 
     // 캐시(records/syncTokens)는 GCal에서 복원되므로 이관할 필요가 없다.
     // 지켜야 하는 건 자격증명뿐 — 우선순위: localStorage > 구 state.json > data.json.

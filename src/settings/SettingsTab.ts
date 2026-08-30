@@ -1,5 +1,6 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type TasksGcalSyncPlugin from "../main";
+import { FEED_COLOR_FALLBACK } from "./Settings";
 
 /**
  * 색 선택기가 받는 "#rrggbb" 인지 확인. Google 이 주는 backgroundColor 는 보통 이 형식이지만
@@ -226,8 +227,15 @@ export class SettingsTab extends PluginSettingTab {
       text:
         "여기서 고른 캘린더의 일정(회의·약속·초대)이 gcal-calendar-view 위젯에 " +
         "읽기 전용으로 그려집니다. task로 만든 이벤트는 자동으로 빠집니다. " +
-        "아무것도 고르지 않으면 기능이 꺼진 것과 같습니다. " +
-        "색은 여기서 정합니다 — Google은 캘린더의 커스텀 색을 API로 주지 않습니다.",
+        "아무것도 고르지 않으면 기능이 꺼진 것과 같습니다.",
+      cls: "setting-item-description",
+    });
+    containerEl.createEl("p", {
+      text:
+        "색은 기본적으로 캘린더 뷰의 같은 이름 카테고리를 따릅니다 " +
+        "(예: Growth 캘린더 → growth 카테고리 색). 그래서 같은 캘린더의 task 막대와 " +
+        "색이 저절로 같아집니다. 다르게 하고 싶을 때만 아래에서 고르고, " +
+        "«카테고리 색» 버튼으로 되돌립니다.",
       cls: "setting-item-description",
     });
 
@@ -245,12 +253,9 @@ export class SettingsTab extends PluginSettingTab {
         t.setValue(!!picked).onChange(async (on) => {
           if (on) {
             if (!s.feedCalendars.some((f) => f.id === c.id)) {
-              s.feedCalendars.push({
-                id: c.id,
-                name: c.name,
-                // Google 목록의 배경색을 첫 기본값으로. 없으면 중립 회색
-                color: normalizeHex(c.color) || "#7f8c8d",
-              });
+              // color "" = 캘린더 뷰의 카테고리 색을 따른다(기본).
+              // 여기서 Google 배경색을 넣어 두면 카테고리와 어긋난 채로 굳는다.
+              s.feedCalendars.push({ id: c.id, name: c.name, color: "" });
             }
           } else {
             s.feedCalendars = s.feedCalendars.filter((f) => f.id !== c.id);
@@ -261,13 +266,33 @@ export class SettingsTab extends PluginSettingTab {
         })
       );
       if (picked) {
+        const follows = !normalizeHex(picked.color);
+        row.setDesc(
+          follows
+            ? "색: 카테고리 따름 (같은 이름의 카테고리 색)"
+            : `색: 직접 지정 ${picked.color}`
+        );
         row.addColorPicker((p) =>
-          p.setValue(normalizeHex(picked.color) || "#7f8c8d").onChange(async (v) => {
+          // 따르는 중이면 선택기에는 폴백을 보여준다 — 실제 색은 뷰가 카테고리에서 정한다
+          p.setValue(normalizeHex(picked.color) || FEED_COLOR_FALLBACK).onChange(async (v) => {
             picked.color = v;
             await this.plugin.saveAll();
             // 색만 바뀌었으니 다시 받아올 필요는 없다. 뷰에 알리기만 한다.
             this.plugin.feed.dropUnselected();
+            this.display();
           })
+        );
+        row.addExtraButton((b) =>
+          b
+            .setIcon("rotate-ccw")
+            .setTooltip("카테고리 색으로 되돌리기")
+            .setDisabled(follows)
+            .onClick(async () => {
+              picked.color = "";
+              await this.plugin.saveAll();
+              this.plugin.feed.dropUnselected();
+              this.display();
+            })
         );
       }
     }
