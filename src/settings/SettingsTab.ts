@@ -1,6 +1,20 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type TasksGcalSyncPlugin from "../main";
 
+/**
+ * 색 선택기가 받는 "#rrggbb" 인지 확인. Google 이 주는 backgroundColor 는 보통 이 형식이지만
+ * 아닌 값을 그대로 넣으면 선택기가 조용히 검정으로 떨어진다.
+ */
+function normalizeHex(v: string | undefined): string | null {
+  if (!v) return null;
+  const s = v.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
+  if (/^#[0-9a-fA-F]{3}$/.test(s)) {
+    return ("#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3]).toLowerCase();
+  }
+  return null;
+}
+
 /** Google Calendar 이벤트 색(colorId 1~11). */
 const GCAL_COLORS: { id: string; name: string }[] = [
   { id: "1", name: "라벤더 (연보라)" },
@@ -115,7 +129,11 @@ export class SettingsTab extends PluginSettingTab {
         b.setButtonText("목록 불러오기").onClick(async () => {
           try {
             const cals = await this.plugin.client.listCalendars();
-            s.calendars = cals.map((c) => ({ id: c.id, name: c.summary }));
+            s.calendars = cals.map((c) => ({
+              id: c.id,
+              name: c.summary,
+              color: c.backgroundColor,
+            }));
             await this.plugin.saveAll();
             new Notice(`${cals.length}개 캘린더 로드됨`);
             this.display();
@@ -200,6 +218,68 @@ export class SettingsTab extends PluginSettingTab {
         await this.plugin.saveAll();
         this.display();
       })
+    );
+
+    // ---- 캘린더 뷰에 표시할 일정 ----
+    containerEl.createEl("h4", { text: "캘린더 뷰에 표시할 일정" });
+    containerEl.createEl("p", {
+      text:
+        "여기서 고른 캘린더의 일정(회의·약속·초대)이 gcal-calendar-view 위젯에 " +
+        "읽기 전용으로 그려집니다. task로 만든 이벤트는 자동으로 빠집니다. " +
+        "아무것도 고르지 않으면 기능이 꺼진 것과 같습니다. " +
+        "색은 여기서 정합니다 — Google은 캘린더의 커스텀 색을 API로 주지 않습니다.",
+      cls: "setting-item-description",
+    });
+
+    if (!cals.length) {
+      containerEl.createEl("p", {
+        text: "먼저 위에서 «목록 불러오기»를 눌러 캘린더를 가져오세요.",
+        cls: "setting-item-description",
+      });
+    }
+
+    for (const c of cals) {
+      const picked = s.feedCalendars.find((f) => f.id === c.id);
+      const row = new Setting(containerEl).setName(c.name);
+      row.addToggle((t) =>
+        t.setValue(!!picked).onChange(async (on) => {
+          if (on) {
+            if (!s.feedCalendars.some((f) => f.id === c.id)) {
+              s.feedCalendars.push({
+                id: c.id,
+                name: c.name,
+                // Google 목록의 배경색을 첫 기본값으로. 없으면 중립 회색
+                color: normalizeHex(c.color) || "#7f8c8d",
+              });
+            }
+          } else {
+            s.feedCalendars = s.feedCalendars.filter((f) => f.id !== c.id);
+          }
+          await this.plugin.saveAll();
+          this.plugin.feed.dropUnselected();
+          this.display();
+        })
+      );
+      if (picked) {
+        row.addColorPicker((p) =>
+          p.setValue(normalizeHex(picked.color) || "#7f8c8d").onChange(async (v) => {
+            picked.color = v;
+            await this.plugin.saveAll();
+            // 색만 바뀌었으니 다시 받아올 필요는 없다. 뷰에 알리기만 한다.
+            this.plugin.feed.dropUnselected();
+          })
+        );
+      }
+    }
+
+    new Setting(containerEl).addButton((b) =>
+      b
+        .setButtonText("지금 다시 받아오기")
+        .setDisabled(!s.feedCalendars.length)
+        .onClick(() => {
+          this.plugin.feed.invalidateAll();
+          new Notice("캘린더 뷰 일정을 다시 받아옵니다.");
+        })
     );
 
     // ---- 3. 동작 ----

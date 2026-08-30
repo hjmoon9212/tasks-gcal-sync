@@ -1,6 +1,21 @@
 export interface CalendarRef {
   id: string;
   name: string;
+  /** 목록 불러오기가 가져온 Google 쪽 배경색. 캘린더 뷰 색의 첫 기본값으로만 쓴다 */
+  color?: string;
+}
+
+/**
+ * 캘린더 뷰(gcal-calendar-view)에 **읽기 전용으로 그릴** 캘린더.
+ *
+ * color가 로컬 설정인 이유: Google 이벤트의 colorId는 1~11 팔레트 인덱스일 뿐
+ * 사용자가 캘린더에 지정한 커스텀 HEX를 주지 않는다. calendarList의
+ * backgroundColor를 첫 기본값으로만 쓰고, 그 뒤로는 여기 값이 진실원천이다.
+ */
+export interface FeedCalendar {
+  id: string;
+  name: string;
+  color: string; // "#rrggbb"
 }
 
 /**
@@ -26,6 +41,9 @@ export interface PluginSettings {
 
   // 설정 UI 드롭다운용 캐시(목록 불러오기 시 저장)
   calendars: CalendarRef[];
+
+  // 캘린더 뷰에 읽기 전용으로 표시할 캘린더. [] = 기능 꺼짐(기본)
+  feedCalendars: FeedCalendar[];
 
   // 라우팅 태그 prefix. 기본 "#gcal/" → task에 #gcal/Growth 식으로 캘린더 지정
   routingTagPrefix: string;
@@ -66,6 +84,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   defaultCalendarId: "",
   defaultCalendarName: "",
   calendars: [],
+  feedCalendars: [], // 빈 배열 = 기능 꺼짐 → 업그레이드해도 동작이 바뀌지 않는다
   routingTagPrefix: "#gcal/",
   globalFilter: "#task",
   doneTag: "#done",

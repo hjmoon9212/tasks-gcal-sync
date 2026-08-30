@@ -22,6 +22,8 @@ export interface CalendarListEntry {
   summary: string;
   primary?: boolean;
   accessRole?: string;
+  /** 캘린더 목록이 주는 배경색("#rrggbb"). 캘린더 뷰 색의 **첫 기본값**으로만 쓴다 */
+  backgroundColor?: string;
 }
 
 const TRANSIENT = new Set([429, 500, 502, 503, 504]);
@@ -123,6 +125,7 @@ export class CalendarClient {
       summary: c.summary,
       primary: c.primary,
       accessRole: c.accessRole,
+      backgroundColor: c.backgroundColor,
     }));
   }
 

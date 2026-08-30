@@ -8,6 +8,8 @@ import { TaskRepository } from "./data/TaskRepository";
 import { TaskWriter } from "./write/TaskWriter";
 import { SkipKind, SyncEngine, SyncResult } from "./sync/SyncEngine";
 import { SyncLogWriter } from "./sync/SyncLog";
+import { EventFeed } from "./gcal/EventFeed";
+import { GcalReadApi } from "./api/PublicApi";
 
 interface PluginData {
   settings: PluginSettings;
@@ -71,6 +73,12 @@ export default class TasksGcalSyncPlugin extends Plugin {
   writer!: TaskWriter;
   engine!: SyncEngine;
   log!: SyncLogWriter;
+  feed!: EventFeed;
+  /**
+   * 다른 플러그인이 쓰는 공개 읽기 API(`gcal-calendar-view`).
+   * 한 번 나간 모양은 없애지 않는다 → src/api/PublicApi.ts
+   */
+  api!: GcalReadApi;
 
   private syncing = false;
   private intervalId: number | null = null;
@@ -114,6 +122,17 @@ export default class TasksGcalSyncPlugin extends Plugin {
       () => this.saveState()
     );
 
+    // 캘린더 뷰용 외부 일정 피드.
+    // ⛔ this.state 를 넘기지 않는다 — syncToken 은 동기화 엔진의 증분 커서이고,
+    //    표시용 소비자가 공유하면 그 자리에서 동기화가 망가진다. 인자가 없다는 사실이
+    //    그 제약의 집행 수단이다(→ src/gcal/EventFeed.ts).
+    this.feed = new EventFeed(
+      this.client,
+      () => this.settings.feedCalendars ?? [],
+      () => this.auth.isAuthenticated()
+    );
+    this.api = this.feed;
+
     // 수동 실행은 force — 사용자가 명시적으로 요청한 것이므로 콜드 스타트/뒤처짐 보류를
     // 우회한다(자동 트리거만 보류 대상).
     this.addRibbonIcon("calendar-clock", "Tasks → Google Calendar 동기화", () =>
@@ -154,6 +173,14 @@ export default class TasksGcalSyncPlugin extends Plugin {
       name: "동기화 로그 열기 (건별 상세 기록)",
       callback: () => this.openSyncLog(),
     });
+    this.addCommand({
+      id: "refresh-events",
+      name: "캘린더 뷰 일정 새로 고침",
+      callback: () => {
+        this.feed.invalidateAll();
+        new Notice("캘린더 뷰 일정을 다시 받아옵니다.");
+      },
+    });
     this.statusBar = this.addStatusBarItem();
     this.statusBar.setText("GCal —");
     this.addSettingTab(new SettingsTab(this.app, this));
@@ -187,6 +214,8 @@ export default class TasksGcalSyncPlugin extends Plugin {
     if (this.intervalId !== null) window.clearInterval(this.intervalId);
     if (this.autoPushTimer !== null) window.clearTimeout(this.autoPushTimer);
     if (this.followUpTimer !== null) window.clearTimeout(this.followUpTimer);
+    // 캐시는 메모리에만 있다 — 언로드하면 남의 회의 제목이 아무데도 안 남는다
+    this.feed?.unload();
   }
 
   /**
@@ -261,6 +290,9 @@ export default class TasksGcalSyncPlugin extends Plugin {
       const r = await this.engine.run(opts);
       this.lastResult = r;
       this.lastFatal = null;
+      // 방금 Google과 이야기했으니 캘린더 뷰가 든 일정도 낡았을 수 있다.
+      // 무효화만 한다 — 네트워크 호출 0. 실제 재조회는 뷰가 필요할 때 한다.
+      this.feed.invalidateAll();
       // 엔진이 뭔가를 미뤘으면(체크 해제 보류 · 볼트 뒤처짐 · 콜드 스타트) 그 시점에 한 번
       // 더 돈다. 이게 없으면 보류가 풀려도 다음 주기(기본 5분)까지 GCal이 그대로라
       // "아무 일도 안 일어난다"로 보인다.
