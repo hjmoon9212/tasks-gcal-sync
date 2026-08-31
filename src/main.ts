@@ -137,12 +137,13 @@ export default class TasksGcalSyncPlugin extends Plugin {
     // 수동 실행은 force — 사용자가 명시적으로 요청한 것이므로 콜드 스타트/뒤처짐 보류를
     // 우회한다(자동 트리거만 보류 대상).
     this.addRibbonIcon("calendar-clock", "Tasks → Google Calendar 동기화", () =>
-      this.runSync(false, { force: true, trigger: "수동(리본)" })
+      this.runSync(false, { force: true, manual: true, trigger: "수동(리본)" })
     );
     this.addCommand({
       id: "sync-now",
       name: "지금 동기화 (Tasks → Google Calendar)",
-      callback: () => this.runSync(false, { force: true, trigger: "수동(명령)" }),
+      callback: () =>
+        this.runSync(false, { force: true, manual: true, trigger: "수동(명령)" }),
     });
     this.addCommand({
       id: "backfill-ids",
@@ -161,6 +162,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
         this.runSync(false, {
           fullScan: true,
           force: true,
+          manual: true,
           trigger: "수동(전수 스캔)",
         }),
     });
@@ -295,6 +297,13 @@ export default class TasksGcalSyncPlugin extends Plugin {
       pull?: boolean;
       fullScan?: boolean;
       force?: boolean;
+      /**
+       * 사람이 직접 누른 실행인가. 그때는 캘린더 뷰의 일정도 같이 다시 받아온다 —
+       * "지금 맞춰라" 는 뜻이므로 회의 쪽만 낡은 채로 두면 절반만 한 것이 된다.
+       * **자동 트리거에는 절대 붙이지 않는다**(v0.7.0~0.7.2 가 그렇게 해서 5분마다
+       * 일정 막대가 깜빡였다 → EventFeed 클래스 주석).
+       */
+      manual?: boolean;
       /** 로그에 남길 실행 계기(수동·주기·편집 등). 원인 추적에 이게 있어야 한다. */
       trigger?: string;
     } = {}
@@ -316,11 +325,16 @@ export default class TasksGcalSyncPlugin extends Plugin {
       const r = await this.engine.run(opts);
       this.lastResult = r;
       this.lastFatal = null;
-      // 여기서 캘린더 뷰 피드를 건드리지 않는다(v0.7.3). 피드는 `tgsTaskId` 가 **없는**
+      // **자동 run 은 피드를 건드리지 않는다**(v0.7.3). 피드는 `tgsTaskId` 가 **없는**
       // 이벤트만 담고, 엔진이 만들고 고치고 지우는 건 전부 task 이벤트다 — 즉 run 이
       // 끝났다는 사실은 피드가 보여 줄 내용과 아무 상관이 없다. 예전엔 여기서 무효화를
       // 했고, 그 탓에 동기화가 돌 때마다 일정 막대가 통째로 사라졌다 돌아왔다.
-      // 일정 갱신은 feedRefreshMinutes 주기로 따로 돈다(→ setupFeedInterval).
+      // 자동 갱신은 feedRefreshMinutes 주기로 따로 돈다(→ setupFeedInterval).
+      //
+      // 다만 **사람이 직접 누른 run 은 예외**(v0.7.4). "지금 맞춰라" 는 뜻이므로 회의
+      // 쪽만 낡은 채로 두면 절반만 한 것이 된다. 던지고 잊는다 — 동기화 결과 보고가
+      // 네트워크 뒤에 갇히면 안 되고, 재조회 중에도 화면은 비지 않는다.
+      if (opts.manual) void this.feed.refreshAll();
       // 엔진이 뭔가를 미뤘으면(체크 해제 보류 · 볼트 뒤처짐 · 콜드 스타트) 그 시점에 한 번
       // 더 돈다. 이게 없으면 보류가 풀려도 다음 주기(기본 5분)까지 GCal이 그대로라
       // "아무 일도 안 일어난다"로 보인다.
