@@ -251,12 +251,28 @@ export class SettingsTab extends PluginSettingTab {
       );
     }
 
+    new Setting(containerEl)
+      .setName("일정 갱신 주기(분)")
+      .setDesc(
+        "이 일정들을 몇 분마다 조용히 다시 받아올지. 0이면 자동 갱신 없음(명령·버튼으로만). " +
+          "동기화 주기와 무관합니다 — 회의는 우리 동기화와 상관없이 바뀝니다. " +
+          "받아오는 동안에도 화면은 비지 않고, 내용이 실제로 달라졌을 때만 다시 그립니다."
+      )
+      .addText((t) =>
+        t.setValue(String(s.feedRefreshMinutes)).onChange(async (v) => {
+          const n = parseInt(v, 10);
+          s.feedRefreshMinutes = isNaN(n) || n < 0 ? 0 : n;
+          await this.plugin.saveAll();
+          this.plugin.setupFeedInterval();
+        })
+      );
+
     new Setting(containerEl).addButton((b) =>
       b
         .setButtonText("지금 다시 받아오기")
         .setDisabled(!s.feedCalendars.length)
         .onClick(() => {
-          this.plugin.feed.invalidateAll();
+          void this.plugin.feed.refreshAll();
           new Notice("캘린더 뷰 일정을 다시 받아옵니다.");
         })
     );

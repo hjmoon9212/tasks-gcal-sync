@@ -13,6 +13,7 @@ import { EventFeed } from "../src/gcal/EventFeed";
 import {
   UID_SEP,
   WallClock,
+  eventsSignature,
   isExternalEvent,
   isStale,
   mergeBuckets,
@@ -280,6 +281,40 @@ eq(isStale(0, 1000, 500), true, "fetchedAt 0 은 무효");
 eq(isStale(1000, 1400, 500), false, "TTL 안이면 신선");
 eq(isStale(1000, 1500, 500), true, "TTL 지나면 낡음");
 
+// ── eventsSignature — "다시 그릴 만큼 달라졌는가" 의 판단 근거 ──
+{
+  const mk = (o: Record<string, unknown> = {}) =>
+    toExternalEvent(ev(o as Partial<GCalEvent>), CAL)!;
+  const a = mk();
+  const b = mk({ id: "ev2" });
+  eq(
+    eventsSignature([a, b]),
+    eventsSignature([b, a]),
+    "★ 순서만 다르면 같은 서명 — Google 은 orderBy 없이 순서를 보장하지 않는다"
+  );
+  ok(
+    eventsSignature([a]) !== eventsSignature([mk({ summary: "제목이 바뀜" })]),
+    "제목이 바뀌면 다른 서명"
+  );
+  ok(
+    eventsSignature([a]) !==
+      eventsSignature([mk({ start: { date: "2026-03-06" }, end: { date: "2026-03-07" } })]),
+    "날짜가 바뀌면 다른 서명"
+  );
+  ok(
+    eventsSignature([a]) !== eventsSignature([mk({ location: "3층 회의실" })]),
+    "장소가 바뀌면 다른 서명(툴팁에 나온다)"
+  );
+  ok(eventsSignature([a]) !== eventsSignature([a, b]), "일정이 늘면 다른 서명");
+  ok(eventsSignature([a]) !== eventsSignature([]), "일정이 사라지면 다른 서명");
+  eq(
+    eventsSignature([a]),
+    eventsSignature([mk({ htmlLink: "https://calendar.google.com/다름" })]),
+    "htmlLink 만 다르면 같은 서명 — 그림이 같으므로 다시 그릴 이유가 없다"
+  );
+  eq(eventsSignature([]), eventsSignature([]), "빈 목록끼리는 같은 서명");
+}
+
 // ─────────────────────── EventFeed — 스텁 client 로 ───────────────────────
 
 interface Call {
@@ -407,31 +442,116 @@ const feedOf = (client: any, cals: FeedCalendar[] = [CAL]) =>
   eq(calls.length, 0, "인증 전에는 호출하지 않는다");
 }
 
-// 무효화 · 구독
+// ★ 갱신은 화면을 비우지 않는다 — v0.7.3 회귀 감지선
+//
+// 예전 invalidateAll() 은 fetchedAt 을 0으로 만들었고, peek 의 게이트가 바로 그
+// fetchedAt 이라 재조회가 끝날 때까지 일정 막대가 통째로 사라졌다. 동기화가 5분마다
+// 돌았으므로 5분마다 깜빡였다. 이 블록이 그게 돌아오는 것을 막는다.
 {
   const { client, calls } = stubClient([ev()]);
   const feed = feedOf(client);
   let fired = 0;
   const off = feed.onChange(() => fired++);
-  await feed.requestEvents("2026-03-05", "2026-03-05");
-  eq(calls.length, 1, "처음 한 번");
-  const afterFetch = fired;
-  ok(afterFetch >= 1, "받아오면 구독자에게 알린다");
+  const range = ["2026-03-05", "2026-03-05"] as const;
 
-  feed.invalidateAll();
-  ok(fired > afterFetch, "무효화도 알린다");
+  await feed.requestEvents(...range);
+  eq(calls.length, 1, "처음 한 번");
+  eq(fired, 1, "첫 페인트는 알린다");
+
+  const inFlight = feed.refreshAll(); // 아직 await 하지 않는다 = 재조회가 도는 중
   eq(
-    feed.peekEvents("2026-03-05", "2026-03-05").length,
-    0,
-    "무효화된 버킷은 peek 에서 빠진다"
+    feed.peekEvents(...range).length,
+    1,
+    "★ 재조회가 도는 동안에도 이전 일정을 계속 준다 (화면이 비지 않는다)"
   );
-  await feed.requestEvents("2026-03-05", "2026-03-05");
-  eq(calls.length, 2, "무효화 뒤에는 다시 받아온다");
+  await inFlight;
+  eq(calls.length, 2, "강제 재조회는 TTL 을 무시한다");
+  eq(feed.peekEvents(...range).length, 1, "재조회 뒤에도 그대로 보인다");
+  eq(fired, 1, "★ 내용이 같으면 다시 그리라고 하지 않는다");
 
   off();
-  const before = fired;
-  feed.invalidateAll();
-  eq(fired, before, "구독 해제하면 더 안 온다");
+}
+
+// 달라졌을 때만, 정확히 한 번 알린다
+{
+  let items: GCalEvent[] = [ev()];
+  const { client } = stubClient(() => items);
+  const feed = feedOf(client);
+  let fired = 0;
+  feed.onChange(() => fired++);
+  const range = ["2026-03-05", "2026-03-05"] as const;
+
+  await feed.requestEvents(...range);
+  eq(fired, 1, "첫 페인트");
+
+  await feed.refreshAll();
+  eq(fired, 1, "같은 내용 → 알림 없음");
+
+  items = [ev({ summary: "주간 회의(장소 변경)" })];
+  await feed.refreshAll();
+  eq(fired, 2, "★ 제목이 바뀌면 정확히 한 번 알린다");
+  eq(feed.peekEvents(...range)[0].title, "주간 회의(장소 변경)", "새 제목이 반영된다");
+
+  items = [];
+  await feed.refreshAll();
+  eq(fired, 3, "회의가 취소돼도 알린다");
+  eq(feed.peekEvents(...range).length, 0, "실제로 사라진 것은 사라진다");
+}
+
+// 보는 사람이 없으면 폴링하지 않는다
+{
+  const { client, calls } = stubClient([ev()]);
+  const feed = feedOf(client);
+  const off = feed.onChange(() => {});
+  await feed.requestEvents("2026-03-05", "2026-03-05");
+  eq(calls.length, 1, "처음 한 번");
+
+  off();
+  await feed.refreshTracked({ force: true });
+  eq(calls.length, 1, "★ 구독자가 0명이면 주기 갱신은 아무것도 하지 않는다");
+  eq((feed as any).windows.size, 0, "기억해 둔 창도 버린다");
+}
+
+// 열려 있는 창을 전부 다시 받는다 (월 뷰 + 다른 달을 보는 두 번째 위젯)
+{
+  const { client, calls } = stubClient([ev()]);
+  const feed = feedOf(client);
+  feed.onChange(() => {});
+  await feed.requestEvents("2026-03-01", "2026-03-31");
+  await feed.requestEvents("2026-06-01", "2026-06-30");
+  eq(calls.length, 2, "창 둘을 각각 받아온다");
+
+  await feed.refreshAll();
+  eq(calls.length, 4, "★ 기억해 둔 창을 전부 다시 받는다");
+}
+
+// 오래 안 본 창은 잊는다
+{
+  const { client, calls } = stubClient([ev()]);
+  const feed = feedOf(client);
+  feed.onChange(() => {});
+  await feed.requestEvents("2026-03-01", "2026-03-31");
+  eq(calls.length, 1, "처음 한 번");
+
+  (feed as any).windows.forEach((w: any, k: string) =>
+    (feed as any).windows.set(k, { ...w, at: Date.now() - 31 * 60 * 1000 })
+  );
+  await feed.refreshAll();
+  eq(calls.length, 1, "★ 30분 넘게 안 본 창은 영원히 폴링하지 않는다");
+  eq((feed as any).windows.size, 0, "잊은 창은 목록에서도 빠진다");
+}
+
+// 구독 해제
+{
+  const { client } = stubClient([ev()]);
+  const feed = feedOf(client);
+  let fired = 0;
+  const off = feed.onChange(() => fired++);
+  await feed.requestEvents("2026-03-05", "2026-03-05");
+  eq(fired, 1, "구독 중에는 온다");
+  off();
+  feed.dropUnselected();
+  eq(fired, 1, "구독 해제하면 더 안 온다");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

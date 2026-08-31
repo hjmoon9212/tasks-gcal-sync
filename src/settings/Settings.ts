@@ -63,6 +63,9 @@ export interface PluginSettings {
 
   // 캘린더 뷰에 읽기 전용으로 표시할 캘린더. [] = 기능 꺼짐(기본)
   feedCalendars: FeedCalendar[];
+  // 그 일정들을 몇 분마다 조용히 다시 받아올지. 0 = 자동 갱신 없음(명령으로만).
+  // **동기화 주기와 무관하다** — 회의는 우리 동기화와 상관없이 바뀐다.
+  feedRefreshMinutes: number;
 
   // 라우팅 태그 prefix. 기본 "#gcal/" → task에 #gcal/Growth 식으로 캘린더 지정
   routingTagPrefix: string;
@@ -104,6 +107,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   defaultCalendarName: "",
   calendars: [],
   feedCalendars: [], // 빈 배열 = 기능 꺼짐 → 업그레이드해도 동작이 바뀌지 않는다
+  feedRefreshMinutes: 15,
   routingTagPrefix: "#gcal/",
   globalFilter: "#task",
   doneTag: "#done",

@@ -84,6 +84,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
   private intervalId: number | null = null;
   private autoPushTimer: number | null = null;
   private followUpTimer: number | null = null;
+  private feedIntervalId: number | null = null;
   private lastSyncAt = 0; // 마지막 동기화 "완료" 시각(ms) — 최소 간격 계산 기준
   private lastResult: SyncResult | null = null;
   private lastFatal: string | null = null;
@@ -177,7 +178,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
       id: "refresh-events",
       name: "캘린더 뷰 일정 새로 고침",
       callback: () => {
-        this.feed.invalidateAll();
+        void this.feed.refreshAll();
         new Notice("캘린더 뷰 일정을 다시 받아옵니다.");
       },
     });
@@ -201,6 +202,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
 
     this.app.workspace.onLayoutReady(() => {
       this.setupInterval();
+      this.setupFeedInterval();
       if (this.settings.syncOnStartup && this.auth.isAuthenticated()) {
         // 메타데이터 캐시가 준비될 시간을 약간 둠.
         // 전수 스캔은 엔진이 하루 1회로 알아서 판단한다(캐시가 비었으면 즉시).
@@ -214,6 +216,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
     if (this.intervalId !== null) window.clearInterval(this.intervalId);
     if (this.autoPushTimer !== null) window.clearTimeout(this.autoPushTimer);
     if (this.followUpTimer !== null) window.clearTimeout(this.followUpTimer);
+    if (this.feedIntervalId !== null) window.clearInterval(this.feedIntervalId);
     // 캐시는 메모리에만 있다 — 언로드하면 남의 회의 제목이 아무데도 안 남는다
     this.feed?.unload();
   }
@@ -263,6 +266,29 @@ export default class TasksGcalSyncPlugin extends Plugin {
     }
   }
 
+  /**
+   * 캘린더 뷰에 그릴 외부 일정만 따로 갱신하는 주기. **동기화 주기와 무관하다.**
+   *
+   * 회의는 우리 동기화와 상관없이 바뀌므로 주기가 달라야 맞고, 실제로 사용자가 볼
+   * 필요가 있는 것은 "회의가 바뀌었을 때" 뿐이다. 그래서 여기서 하는 일은 강제 재조회
+   * 하나이고, 내용이 정말 달라졌을 때만 EventFeed 가 뷰에 알린다(→ eventsSignature).
+   * 재조회 중에도 뷰는 낡은 사본을 계속 그리므로 화면이 비지 않는다.
+   */
+  setupFeedInterval(): void {
+    if (this.feedIntervalId !== null) {
+      window.clearInterval(this.feedIntervalId);
+      this.feedIntervalId = null;
+    }
+    const m = this.settings.feedRefreshMinutes;
+    if (m > 0) {
+      this.feedIntervalId = window.setInterval(
+        () => void this.feed.refreshTracked({ force: true }),
+        m * 60_000
+      );
+      this.registerInterval(this.feedIntervalId);
+    }
+  }
+
   async runSync(
     silent = false,
     opts: {
@@ -290,9 +316,11 @@ export default class TasksGcalSyncPlugin extends Plugin {
       const r = await this.engine.run(opts);
       this.lastResult = r;
       this.lastFatal = null;
-      // 방금 Google과 이야기했으니 캘린더 뷰가 든 일정도 낡았을 수 있다.
-      // 무효화만 한다 — 네트워크 호출 0. 실제 재조회는 뷰가 필요할 때 한다.
-      this.feed.invalidateAll();
+      // 여기서 캘린더 뷰 피드를 건드리지 않는다(v0.7.3). 피드는 `tgsTaskId` 가 **없는**
+      // 이벤트만 담고, 엔진이 만들고 고치고 지우는 건 전부 task 이벤트다 — 즉 run 이
+      // 끝났다는 사실은 피드가 보여 줄 내용과 아무 상관이 없다. 예전엔 여기서 무효화를
+      // 했고, 그 탓에 동기화가 돌 때마다 일정 막대가 통째로 사라졌다 돌아왔다.
+      // 일정 갱신은 feedRefreshMinutes 주기로 따로 돈다(→ setupFeedInterval).
       // 엔진이 뭔가를 미뤘으면(체크 해제 보류 · 볼트 뒤처짐 · 콜드 스타트) 그 시점에 한 번
       // 더 돈다. 이게 없으면 보류가 풀려도 다음 주기(기본 5분)까지 GCal이 그대로라
       // "아무 일도 안 일어난다"로 보인다.

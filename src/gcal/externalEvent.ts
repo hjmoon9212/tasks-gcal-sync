@@ -254,3 +254,34 @@ export function isStale(fetchedAt: number, now: number, ttlMs: number): boolean 
   if (!fetchedAt) return true;
   return now - fetchedAt >= ttlMs;
 }
+
+/**
+ * 버킷 내용이 **실제로 달라졌는지** 판단하기 위한 서명.
+ *
+ * 재조회 대부분은 똑같은 내용을 받아온다. 그때마다 `onChange` 를 쏘면 뷰가 DOM 을
+ * 통째로 교체하므로(호버·포커스가 날아간다) 서명이 같으면 아무 일도 없던 것으로 친다.
+ *
+ * uid 로 정렬한 뒤 만든다 — Google 은 `orderBy` 없이는 순서를 보장하지 않으므로,
+ * 순서만 뒤바뀐 같은 목록이 "변경" 으로 보이면 안 된다. 화면에 드러나는 필드만 넣는다
+ * (`htmlLink` 는 제외 — 바뀌어도 그림이 같다).
+ */
+export function eventsSignature(events: ExternalEvent[]): string {
+  const rows = events.map((e) =>
+    JSON.stringify([
+      e.uid,
+      e.startISO,
+      e.endISO,
+      e.tStart,
+      e.tEnd,
+      e.allDay,
+      e.multiDay,
+      e.recurring,
+      e.title,
+      e.location ?? "",
+      e.color,
+      e.calendarName,
+    ])
+  );
+  rows.sort();
+  return rows.join("\n");
+}
