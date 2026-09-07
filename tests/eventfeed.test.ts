@@ -525,7 +525,12 @@ const feedOf = (client: any, cals: FeedCalendar[] = [CAL]) =>
   eq(calls.length, 4, "★ 기억해 둔 창을 전부 다시 받는다");
 }
 
-// 오래 안 본 창은 잊는다
+// ★★ 조용하다고 폴링을 멈추지 않는다 — 2026-09-07 회귀 감지선
+//
+// 예전엔 30분간 요청이 없던 창을 잊었다. 그런데 뷰는 자기 캐시가 맞는 동안 우리를 부르지
+// 않으므로, 조용한 30분이 한 번 지나가면 창이 사라지고 → 폴링이 멈추고 → 달라질 일이
+// 없으니 뷰의 캐시도 영영 유효하다. 그날 GCal 에서 지운 일정이 **Obsidian 재시작
+// 전까지** 화면에 남았다. 이 블록이 그 교착이 돌아오는 것을 막는다.
 {
   const { client, calls } = stubClient([ev()]);
   const feed = feedOf(client);
@@ -534,11 +539,64 @@ const feedOf = (client: any, cals: FeedCalendar[] = [CAL]) =>
   eq(calls.length, 1, "처음 한 번");
 
   (feed as any).windows.forEach((w: any, k: string) =>
-    (feed as any).windows.set(k, { ...w, at: Date.now() - 31 * 60 * 1000 })
+    (feed as any).windows.set(k, { ...w, at: Date.now() - 24 * 60 * 60 * 1000 })
   );
+  await feed.refreshTracked({ force: true });
+  eq(calls.length, 2, "★ 하루를 조용히 있어도 보고 있는 창은 계속 다시 받는다");
+  eq((feed as any).windows.size, 1, "창을 시간으로 버리지 않는다");
+}
+
+// 창은 시간이 아니라 **개수**로 끊는다 (열어 둔 채 여러 달을 돌아다닌 경우)
+{
+  const { client, calls } = stubClient([ev()]);
+  const feed = feedOf(client);
+  feed.onChange(() => {});
+  for (const mo of ["01", "02", "03", "04", "05"]) {
+    await feed.requestEvents(`2026-${mo}-01`, `2026-${mo}-28`);
+  }
+  eq(calls.length, 5, "다섯 달을 각각 받아온다");
+  eq((feed as any).windows.size, 4, "★ 창은 최근 4개까지만 기억한다");
+  ok(
+    ![...(feed as any).windows.keys()].some((k: string) => k.startsWith("2026-01")),
+    "가장 오래 전에 본 창부터 나간다"
+  );
+}
+
+// ★★ 수동 새로 고침은 무동작이 될 수 없다 — "삭제 → 동기화 → 그대로" 의 나머지 절반
+//
+// refreshAll 이 refreshTracked 한 줄이던 시절엔, 구독자가 0명(=캘린더 노트를 닫아 둠)이면
+// 창을 비우고 그냥 돌아왔다. 사람이 "지금 맞춰라" 를 눌렀는데 일정은 하나도 갱신되지 않았다.
+{
+  const { client, calls } = stubClient([ev()]);
+  const feed = feedOf(client);
+  const off = feed.onChange(() => {});
+  await feed.requestEvents("2026-03-05", "2026-03-05");
+  eq(calls.length, 1, "처음 한 번");
+
+  off(); // 캘린더 노트를 닫았다
   await feed.refreshAll();
-  eq(calls.length, 1, "★ 30분 넘게 안 본 창은 영원히 폴링하지 않는다");
-  eq((feed as any).windows.size, 0, "잊은 창은 목록에서도 빠진다");
+  eq(calls.length, 2, "★ 구독자가 없어도 수동 새로 고침은 가진 것을 다시 받는다");
+}
+
+// 조회 실패가 흔적을 남긴다 — 낡은 사본을 계속 내주는 설계의 대가는 보여야 한다
+{
+  const boom = {
+    async listEvents() {
+      throw new Error("403 rate limit");
+    },
+  } as any;
+  const feed = feedOf(boom);
+  await feed.requestEvents("2026-03-01", "2026-03-31");
+  eq(
+    feed.lastError?.includes("403 rate limit") ?? false,
+    true,
+    "★ 실패 사유가 lastError 에 남는다"
+  );
+
+  const good = stubClient([ev()]);
+  const feed2 = feedOf(good.client);
+  await feed2.requestEvents("2026-03-01", "2026-03-31");
+  eq(feed2.lastError, null, "성공한 조회는 흔적을 남기지 않는다");
 }
 
 // 구독 해제

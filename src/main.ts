@@ -194,8 +194,16 @@ export default class TasksGcalSyncPlugin extends Plugin {
       id: "refresh-events",
       name: "캘린더 뷰 일정 새로 고침",
       callback: () => {
-        void this.feed.refreshAll();
-        new Notice("캘린더 뷰 일정을 다시 받아옵니다.");
+        void (async () => {
+          await this.feed.refreshAll();
+          // 결과를 말한다. "받아옵니다" 만 띄우고 조용히 실패하면, 화면에 남은 낡은
+          // 일정이 **성공한 결과처럼** 보인다.
+          new Notice(
+            this.feed.lastError
+              ? `일정 조회 실패 — ${this.feed.lastError}`
+              : "캘린더 뷰 일정을 다시 받아왔습니다."
+          );
+        })();
       },
     });
     this.statusBar = this.addStatusBarItem();

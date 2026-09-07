@@ -14,8 +14,20 @@ import {
 const TTL_MS = 5 * 60 * 1000;
 /** 실패한 버킷은 짧게만 기억한다 — 죽은 캘린더를 페이지 넘길 때마다 때리지 않으려고. */
 const FAIL_TTL_MS = 60 * 1000;
-/** 이만큼 요청이 없던 창은 잊는다 — 노트를 닫고 나면 영원히 폴링하지 않도록. */
-const WINDOW_TTL_MS = 30 * 60 * 1000;
+/**
+ * 기억할 창의 최대 개수. 시간이 아니라 **개수**로 끊는다 (v0.8.2).
+ *
+ * 예전엔 30분간 요청이 없던 창을 잊었다. 그런데 뷰는 **자기 캐시가 맞는 동안 우리를
+ * 부르지 않는다** — 즉 "뷰가 안 물어봤다" 는 "뷰가 안 보고 있다" 의 근거가 못 된다.
+ * 조용한 30분이 한 번 지나가면 창이 사라지고 → 창이 없으니 폴링이 멈추고 → 폴링이
+ * 멈추니 달라질 일이 없고 → 달라진 게 없으니 뷰의 캐시도 영영 유효하다. 서로 물린 채
+ * 영구 정지한다. 2026-09-07 에 GCal 에서 지운 일정이 **재시작 전까지** 화면에 남았다.
+ *
+ * 창을 잊는 진짜 근거는 **구독자가 0명인 것**이고(노트를 닫으면 그렇게 된다), 그건
+ * refreshTracked 첫 줄이 이미 본다. 여기서는 "열어 둔 채 여러 달을 돌아다닌" 옛 창이
+ * 무한히 쌓이는 것만 개수로 끊으면 된다.
+ */
+const MAX_WINDOWS = 4;
 
 interface Bucket {
   events: ExternalEvent[];
@@ -54,6 +66,14 @@ interface TrackedWindow {
  */
 export class EventFeed implements GcalReadApi {
   readonly version = 1 as const;
+
+  /**
+   * 마지막 조회 묶음에서 난 실패. 없으면 null.
+   *
+   * 낡은 사본을 계속 내주는 설계라, 실패가 **화면에는 전혀 안 보인다.** 수동 새로
+   * 고침이 이걸 읽어 사용자에게 말한다.
+   */
+  lastError: string | null = null;
 
   private buckets = new Map<string, Bucket>();
   private listeners = new Set<() => void>();
@@ -138,7 +158,18 @@ export class EventFeed implements GcalReadApi {
    * DOM 을 통째 교체한다. 정말 달라졌을 때만 `fetchWindow` 안에서 알린다.
    */
   async refreshAll(): Promise<void> {
-    await this.refreshTracked({ force: true });
+    // ⛔ **절대 무동작이 되면 안 된다** (v0.8.2). 예전엔 이게 refreshTracked 한 줄이었고,
+    // 그건 구독자가 0명이면 창을 비우고 그냥 돌아온다. 그래서 캘린더 노트를 닫아 둔 채
+    // 수동 동기화를 누르면 일정은 **하나도** 갱신되지 않았다 — 사람이 "지금 맞춰라" 라고
+    // 누른 것인데 아무 일도 안 일어났다. 가진 것은 전부 다시 받는다.
+    const keys = new Set<string>();
+    for (const w of this.windows.values()) {
+      for (const k of monthKeysFor(w.from, w.to)) keys.add(k);
+    }
+    for (const bk of this.buckets.keys()) {
+      keys.add(bk.slice(bk.lastIndexOf(SEP) + 1));
+    }
+    await this.fetchKeys([...keys], { force: true });
   }
 
   /** 기억해 둔 창들을 순차로 다시 받는다. 보는 사람이 없으면 아무것도 하지 않는다. */
@@ -148,14 +179,7 @@ export class EventFeed implements GcalReadApi {
       this.windows.clear();
       return;
     }
-    const now = Date.now();
-    for (const [k, w] of [...this.windows]) {
-      if (now - w.at >= WINDOW_TTL_MS) {
-        this.windows.delete(k);
-        continue;
-      }
-      // 창 기억(`at`)은 갱신하지 않는다 — 안 보는 구간이 타이머 덕에 영원히 살아남으면
-      // prune 이 영영 안 돈다
+    for (const w of [...this.windows.values()]) {
       await this.fetchWindow(w.from, w.to, opts);
     }
   }
@@ -178,11 +202,15 @@ export class EventFeed implements GcalReadApi {
   // ─────────────────────────────── 내부 ───────────────────────────────
 
   private trackWindow(fromISO: string, toISO: string): void {
-    this.windows.set(fromISO + "|" + toISO, {
-      from: fromISO,
-      to: toISO,
-      at: Date.now(),
-    });
+    const k = fromISO + "|" + toISO;
+    // 지웠다 넣어 Map 삽입 순서를 최근순으로 만든다 → 넘칠 때 가장 오래된 것부터 나간다
+    this.windows.delete(k);
+    this.windows.set(k, { from: fromISO, to: toISO, at: Date.now() });
+    while (this.windows.size > MAX_WINDOWS) {
+      const oldest = this.windows.keys().next().value;
+      if (oldest === undefined) break;
+      this.windows.delete(oldest);
+    }
   }
 
   private async fetchWindow(
@@ -190,11 +218,19 @@ export class EventFeed implements GcalReadApi {
     toISO: string,
     opts?: { force?: boolean }
   ): Promise<void> {
+    await this.fetchKeys(monthKeysFor(fromISO, toISO), opts);
+  }
+
+  /** 월 키 목록을 채운다. 창이든 이미 들고 있는 버킷이든 여기로 모인다. */
+  private async fetchKeys(
+    keys: string[],
+    opts?: { force?: boolean }
+  ): Promise<void> {
     try {
       if (!this.isReady()) return;
       const cals = this.getCalendars();
-      const keys = monthKeysFor(fromISO, toISO);
       const now = Date.now();
+      this.lastError = null;
       let changed = false;
       for (const cal of cals) {
         for (const k of keys) {
@@ -253,7 +289,10 @@ export class EventFeed implements GcalReadApi {
         inFlight: null,
       });
     })().catch((e) => {
-      console.debug(`[tasks-gcal-sync] 일정 조회 실패: ${cal.name} ${key}`, e);
+      // debug 가 아니라 warn 이다. 이게 조용히 반복되면 화면은 **낡은 채로 멀쩡해 보인다** —
+      // 빈 화면보다 낡은 화면이 낫다는 판단의 대가이고, 그 대가는 눈에 보여야 값을 한다.
+      this.lastError = `${cal.name} ${key}: ${(e as Error)?.message ?? String(e)}`;
+      console.warn(`[tasks-gcal-sync] 일정 조회 실패: ${cal.name} ${key}`, e);
       // 있던 것을 지우지 않는다 — 빈 화면보다 낡은 화면이 낫다.
       // fetchedAt 은 **지금**으로 찍는다: FAIL_TTL 동안 죽은 캘린더를 다시 때리지 않기
       // 위한 백오프 기준이고, 동시에 peek 이 낡은 사본을 계속 내주는 근거이기도 하다.
