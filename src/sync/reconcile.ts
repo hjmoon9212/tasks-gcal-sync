@@ -16,6 +16,14 @@
  * 필드를 빌려 인코딩해야 하는데, 빌린 필드는 다른 이유로도 바뀌고 오탐의 결과가 노트에
  * ✅를 쓰는 것(반복이면 다음 회차 줄 생성)이라 파괴적이었다. 그래서 완료는 노트 → 이벤트
  * 한 방향으로만 흐른다. 이벤트의 색·☑️는 표시일 뿐 판정에 쓰지 않는다.
+ *
+ * 충돌 판정(0.8.0~): 같은 필드가 양쪽에서 바뀌었을 때
+ *  - **값이 같으면 충돌이 아니다** — 기준선만 뒤처진 것이라 기준선만 앞당긴다.
+ *  - 값이 갈렸으면 **노트가 이긴다.** 사용자의 "캘린더 드래그"는 gcal-calendar-view
+ *    위젯에서 일어나고 그건 노트 쓰기다 — GCal 쪽 변경은 대개 다른 기기가 옛 노트 값을
+ *    밀어올린 메아리라, GCal을 채택하면 구조적으로 낡은 값을 고른다.
+ *  - 단 **볼트가 정착하기 전에는 그 판정을 미룬다**(conflictResolutionAllowed).
+ *    이 셋이 하나라도 빠지면 스테일한 노트가 원격을 덮는다.
  */
 import { SyncRecord } from "./StateStore";
 
@@ -65,8 +73,16 @@ export interface Guards {
   duplicateId: boolean;
   /** 이번 스캔에서 처음 주운 record. */
   adopted: boolean;
-  /** 볼트가 Obsidian Sync로 아직 따라잡는 중. */
+  /** 볼트가 Obsidian Sync로 아직 따라잡는 중(fail-open 상한 적용 **후**). */
   holdWrites: boolean;
+  /**
+   * 뒤처짐 판정 그 자체 — **fail-open 상한을 적용하기 전** 값.
+   *
+   * `holdWrites`는 상한(10분)을 넘기면 false로 떨어진다. 그건 "기능이 영영 멈추면 안
+   * 된다"는 뜻이지 "이제 노트를 믿어도 된다"는 뜻이 아니다. 충돌 해결처럼 **한쪽 값을
+   * 버리는** 판정은 상한과 무관하게 볼트가 실제로 정착한 뒤에만 해야 하므로 원본을 본다.
+   */
+  vaultBehindRaw: boolean;
   /** 플러그인이 막 로드됨 — 원격에 쓰지 않는다. */
   coldHold: boolean;
 }
@@ -82,11 +98,26 @@ export function destructiveAllowed(g: Guards): boolean {
   return !g.holdWrites && !g.coldHold && !g.adopted;
 }
 
+/**
+ * 진짜 충돌(같은 필드가 양쪽에서 **다른 값으로** 바뀜)을 지금 해결해도 되는가.
+ *
+ * 충돌 해결은 한쪽 값을 버리는 일이고, 0.8.0부터 이기는 쪽이 노트다. 그래서 **노트가
+ * 최신이라는 보장**이 없으면 해서는 안 된다 — 스테일한 노트가 원격을 덮는 바로 그 경로다.
+ *
+ * `holdWrites`가 아니라 `vaultBehindRaw`를 보는 것이 핵심이다. fail-open 상한은
+ * "충돌 아닌 변경까지 영영 막지는 말자"는 장치이지 충돌 판정을 열어주는 장치가 아니다.
+ * 수동 실행(force)도 이 보류는 우회하지 않는다 — 완료 해제 보류와 같은 이유다.
+ */
+export function conflictResolutionAllowed(g: Guards): boolean {
+  return !g.coldHold && !g.vaultBehindRaw;
+}
+
 export type SkipReason =
   | "duplicate-id"
   | "hold-task-gone"
   | "hold-due-invalid"
-  | "hold-unschedule";
+  | "hold-unschedule"
+  | "hold-conflict";
 
 /** 노트에 반영할 쓰기들. 실행 순서는 due → start → title → done(구조 변경 가능성). */
 export interface PullOps {
@@ -103,8 +134,18 @@ export interface MergePlan {
   pull: PullOps;
   /** GCal이 이긴 필드. */
   pulledFields: Field[];
-  /** 같은 필드가 양쪽에서 바뀌어 GCal을 채택한 것(경고용). */
+  /** 같은 필드가 양쪽에서 **다른 값으로** 바뀌어 노트를 채택한 것(GCal 값은 버려진다). */
   conflicts: Field[];
+  /**
+   * 양쪽 다 바뀌었지만 **값이 같아** 충돌이 아니었던 필드. 기준선만 앞당긴다.
+   * 로그에는 남기지 않는다 — 실제로 달라진 게 없다.
+   */
+  agreed: Field[];
+  /**
+   * 원격 쪽 값을 스냅샷 모양으로 담은 것. 충돌에서 **버려진 GCal 값**이 여기에만 남는다
+   * (merged 는 노트 값이므로). 모르는 필드는 기준선 값으로 채운다.
+   */
+  remote: Snapshot;
   /** 노트 변경분 중 GCal이 안 가져간 게 남아 push가 필요한가. */
   pushNeeded: boolean;
   /**
@@ -127,7 +168,20 @@ export interface MergePlan {
 }
 
 export type ReconcilePlan =
-  | { kind: "skip"; reason: SkipReason }
+  | {
+      kind: "skip";
+      reason: SkipReason;
+      /** hold-conflict 일 때 갈린 필드 — 로그에 무엇 때문인지 남긴다. */
+      fields?: Field[];
+      /**
+       * hold-conflict 일 때 갈린 두 값. 보류는 "아무 일도 안 일어난" run이라 이걸
+       * 안 남기면 나중에 무엇 때문에 멈춰 있었는지 알 방법이 없다.
+       */
+      local?: Snapshot;
+      remote?: Snapshot;
+      /** 보류가 풀릴 만한 시점(ms 뒤). 호출부가 후속 run을 예약한다. */
+      retryAfterMs?: number;
+    }
   | { kind: "delete-event"; reason: "task-gone" | "due-invalid" }
   /** 이벤트만 정리하고 📅는 남긴다(완료 회차의 due는 기록이다 — 0.3.15). */
   | { kind: "drop-record" }
@@ -144,6 +198,8 @@ export interface DecideInput {
   guards: Guards;
   now: number;
   uncheckHoldMs: number;
+  /** 충돌 해결을 미뤘을 때 다시 확인하기까지의 간격(ms). */
+  conflictRetryMs: number;
 }
 
 export function decideReconcile(i: DecideInput): ReconcilePlan {
@@ -185,7 +241,7 @@ export function decideReconcile(i: DecideInput): ReconcilePlan {
   return mergePlan(i, local);
 }
 
-function mergePlan(i: DecideInput, local: LocalView): MergePlan {
+function mergePlan(i: DecideInput, local: LocalView): ReconcilePlan {
   const { rec, remote } = i;
   const recStart = rec.start ?? rec.due;
 
@@ -223,21 +279,81 @@ function mergePlan(i: DecideInput, local: LocalView): MergePlan {
     title: gcalChanged && !!remote!.title && remote!.title !== rec.title,
   };
 
-  // 같은 필드가 양쪽 다 바뀐 경우에만 승자가 필요하다 → GCal 채택(직접 조작한 화면).
-  const conflicts: Field[] = [];
-  for (const f of ["due", "start", "time", "title"] as const) {
-    if (gc[f] && obs[f]) conflicts.push(f);
-  }
-
-  const pull: PullOps = {};
-  const pulledFields: Field[] = [];
-  const merged: Snapshot = {
+  // 양쪽 스냅샷을 같은 모양으로 만들어 둔다 — 아래 분류도, 로그도 이 둘만 본다.
+  const localSnap: Snapshot = {
     due: local.due,
     start: local.start,
     time: localTime,
     done: local.done,
     title: local.title,
   };
+  const remoteSnap: Snapshot = {
+    due: remote?.due ?? rec.due,
+    start: remote?.start ?? recStart,
+    time: remote?.time ?? recTime,
+    done: rec.done, // GCal은 "완료"라는 어휘가 없다 — 기준선을 그대로 둔다
+    title: remote?.title ?? rec.title,
+  };
+
+  // ── 같은 필드가 양쪽 다 바뀐 경우 ──
+  //
+  // 1) **값이 같으면 충돌이 아니다.** 기준선만 뒤처진 것이라 어느 쪽에도 쓸 게 없고
+  //    기준선만 앞당기면 된다. 이 검사가 없으면 며칠 꺼둔 기기를 켤 때마다 무더기로
+  //    "충돌 → 변경 폐기"가 찍힌다 — 2026-09-07 실측에서 충돌 127건 중 122건이 이것이었다.
+  //    로그가 오염되는 것만 문제가 아니다: 같은 값을 노트에 다시 써서 modify → 자동 push가 돈다.
+  // 2) 값이 갈렸으면 **노트가 이긴다**(0.8.0~). 이 볼트에서 사용자가 하는 "캘린더 드래그"는
+  //    gcal-calendar-view 위젯에서 일어나고 그건 노트 쓰기다. 즉 "GCal이 바뀌었다"는 대개
+  //    다른 기기가 옛 노트 값을 밀어올린 메아리라, GCal을 채택하면 구조적으로 낡은 값을 고른다.
+  //    (실측된 진짜 충돌 5건이 전부 "노트가 미룬 날짜 → GCal이 당긴 날짜"였다)
+  // 3) 단 **볼트가 정착하기 전에는 그 판정 자체를 미룬다.** 노트 우선은 스테일한 노트가
+  //    원격을 덮는 경로를 열기 때문이다 → conflictResolutionAllowed
+  const conflicts: Field[] = [];
+  const agreed: Field[] = [];
+  const heldConflicts: Field[] = [];
+  for (const f of ["due", "start", "time", "title"] as const) {
+    if (!gc[f] || !obs[f]) continue;
+    if (remoteSnap[f] === localSnap[f]) {
+      agreed.push(f);
+      gc[f] = false;
+      obs[f] = false;
+      continue;
+    }
+    if (!conflictResolutionAllowed(i.guards)) {
+      heldConflicts.push(f);
+      continue;
+    }
+    // 노트 채택 → pull하지 않는다. obs[f]는 그대로 남아 push로 올라간다.
+    conflicts.push(f);
+    gc[f] = false;
+  }
+
+  // 날짜 둘(📅 due·🛫 start)은 **하나의 구간**을 나타낸다. 한쪽이 충돌로 노트를 채택했는데
+  // 다른 쪽만 GCal에서 끌어오면 노트가 정한 적 없는 구간이 만들어진다 — 하루짜리 task를
+  // 노트에서 미뤘고 GCal에서 다른 날로 옮긴 흔한 경우가 곧바로 "🛫가 붙은 여러 날 span"이
+  // 된다. 날짜가 걸린 충돌에서는 두 값을 함께 노트 것으로 둔다.
+  if (conflicts.includes("due") || conflicts.includes("start")) {
+    gc.due = false;
+    gc.start = false;
+  }
+
+  // 해결을 미룬 충돌이 하나라도 있으면 **이 record는 이번 run에 통째로 손대지 않는다.**
+  // push는 이벤트 전체를 다시 그리므로 "한 필드만 빼고 올리기"가 안 되고, 스냅샷을 반쯤
+  // 갱신하면 못 올린 변경이 "이미 반영됨"으로 남아 영영 사라진다. skip이면 스냅샷도
+  // gcalUpdated도 그대로라 다음 run이 같은 상태를 다시 본다.
+  if (heldConflicts.length) {
+    return {
+      kind: "skip",
+      reason: "hold-conflict",
+      fields: heldConflicts,
+      local: localSnap,
+      remote: remoteSnap,
+      retryAfterMs: i.conflictRetryMs,
+    };
+  }
+
+  const pull: PullOps = {};
+  const pulledFields: Field[] = [];
+  const merged: Snapshot = { ...localSnap };
 
   if (gc.due) {
     pull.setDue = remote!.due!;
@@ -303,6 +419,8 @@ function mergePlan(i: DecideInput, local: LocalView): MergePlan {
     pull,
     pulledFields,
     conflicts,
+    agreed,
+    remote: remoteSnap,
     pushNeeded,
     // GCal이 이긴 변경만 있어 push할 게 없더라도 **이벤트의 표현은 다시 찍는다.**
     // 예: GCal에서 제목을 고치면 우리가 붙여 둔 상태 접두사(☐/☑️/🔁)가 떨어져 나간다.
@@ -313,13 +431,7 @@ function mergePlan(i: DecideInput, local: LocalView): MergePlan {
     uncheckSeen,
     gcalChanged,
     merged,
-    local: {
-      due: local.due,
-      start: local.start,
-      time: localTime,
-      done: local.done,
-      title: local.title,
-    },
+    local: localSnap,
   };
 }
 
@@ -330,6 +442,7 @@ export class RunGuards {
       dupIds: Set<string>;
       adopted: Set<string>;
       holdWrites: boolean;
+      vaultBehindRaw: boolean;
       coldHold: boolean;
     }
   ) {}
@@ -339,6 +452,7 @@ export class RunGuards {
       duplicateId: this.ctx.dupIds.has(id),
       adopted: this.ctx.adopted.has(id),
       holdWrites: this.ctx.holdWrites,
+      vaultBehindRaw: this.ctx.vaultBehindRaw,
       coldHold: this.ctx.coldHold,
     };
   }

@@ -102,6 +102,8 @@ function harness(opts: {
     removeDue: [] as string[],
     /** 전수 스캔(rebuildRecords) 호출 — timeMax 를 넘기는 건 이쪽뿐이다. */
     fullScan: 0,
+    /** 노트에 실제로 쓴 것 — "가짜 충돌은 노트를 다시 쓰지 않는다"를 보려면 필요하다. */
+    writes: [] as string[],
   };
   const settings: PluginSettings = {
     ...DEFAULT_SETTINGS,
@@ -136,11 +138,26 @@ function harness(opts: {
   const writer: any = {
     removeDue: async (t: any) => {
       calls.removeDue.push(t.id);
+      calls.writes.push("removeDue");
     },
-    setDue: async () => {},
-    setStart: async () => {},
-    removeStart: async () => {},
-    replaceTitle: async () => {},
+    setDue: async () => {
+      calls.writes.push("setDue");
+    },
+    setStart: async () => {
+      calls.writes.push("setStart");
+    },
+    removeStart: async () => {
+      calls.writes.push("removeStart");
+    },
+    setTime: async () => {
+      calls.writes.push("setTime");
+    },
+    removeTime: async () => {
+      calls.writes.push("removeTime");
+    },
+    replaceTitle: async () => {
+      calls.writes.push("replaceTitle");
+    },
     ensureId: async () => {},
     wroteRecently: () => false,
   };
@@ -745,7 +762,8 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     eq(del.detail!.includes(TODAY), true, "삭제 기록: 마지막 스냅샷 due");
   }
   {
-    // (b) 같은 필드를 양쪽에서 수정 → GCal 채택. 폐기된 노트 값이 로그에 남아야 한다.
+    // (b) 같은 필드를 양쪽에서 **다른 값으로** 수정 → 노트 채택(0.8.0~).
+    //     폐기된 GCal 값이 로그에 남아야 한다 — 한쪽 변경이 사라지는 유일한 경로다.
     const ev = doneEvent("A1", false, "200");
     ev.start = { date: "2026-08-20" };
     ev.end = { date: "2026-08-21" };
@@ -759,13 +777,42 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     const merged = r.entries.find((e) => e.action === "PULL" || e.action === "UPDATE")!;
     eq(merged.id, "A1", "충돌 기록: 대상");
     eq(merged.detail!.includes("⚔️ 충돌"), true, "충돌 기록: 충돌 표시");
-    eq(merged.detail!.includes("2026-08-19"), true, "충돌 기록: 폐기된 노트 값");
-    eq(merged.detail!.includes("2026-08-20"), true, "충돌 기록: 채택된 GCal 값");
-    eq(merged.detail!.includes("GCal 채택"), true, "충돌 기록: 승자");
+    eq(merged.detail!.includes("2026-08-19"), true, "충돌 기록: 채택된 노트 값");
+    eq(merged.detail!.includes("2026-08-20"), true, "충돌 기록: 폐기된 GCal 값");
+    eq(merged.detail!.includes("노트 채택"), true, "충돌 기록: 승자");
     eq(merged.where, "note.md:1", "충돌 기록: 노트 위치");
+    eq(h.calls.writes, [], "노트 채택: GCal 값을 노트에 쓰지 않는다");
+    eq(h.calls.patch.length, 1, "노트 채택: 노트 값을 GCal로 올린다");
   }
   {
-    // (c) 조용한 run은 로그를 남기지 않는다 — 5분마다 "변화 없음"이 쌓이면
+    // (c) 양쪽 다 기준선과 다르지만 **값이 같다** → 충돌이 아니다.
+    //     며칠 꺼둔 기기를 켜면 기준선만 뒤처져 이 모양이 된다. 예전엔 이걸 충돌로 세어
+    //     같은 값을 노트에 다시 쓰고(→ modify → 자동 push) 로그를 "폐기"로 채웠다.
+    const ev = doneEvent("A1", false, "200");
+    ev.start = { date: "2026-08-20" };
+    ev.end = { date: "2026-08-21" };
+    ev.extendedProperties.private.tgsDue = "2026-08-20";
+    ev.extendedProperties.private.tgsStart = "2026-08-20";
+    const h = harness({
+      tasks: [task("A1", false, "2026-08-20")], // 노트도 같은 값으로 바뀌어 있다
+      events: [ev],
+      records: { A1: rec({ gcalUpdated: "100" }) },
+    });
+    const r = await h.engine.run();
+    eq(h.calls.writes, [], "합의: 노트를 다시 쓰지 않는다 ★");
+    eq(h.calls.patch, [], "합의: GCal도 건드리지 않는다 ★");
+    eq(r.pulled, 0, "합의: pull 카운트 없음");
+    eq(r.updated, 0, "합의: update 카운트 없음");
+    eq(
+      r.entries.some((e) => (e.detail ?? "").includes("충돌")),
+      false,
+      "합의: 로그에 충돌로 남기지 않는다 ★"
+    );
+    eq(h.state.records.A1.due, "2026-08-20", "합의: 기준선만 앞당긴다");
+    eq(h.state.records.A1.gcalUpdated, "200", "합의: 다음 run이 또 보지 않도록 updated도 갱신");
+  }
+  {
+    // (d) 조용한 run은 로그를 남기지 않는다 — 5분마다 "변화 없음"이 쌓이면
     //     정작 찾아야 할 삭제 한 줄이 묻힌다.
     const h = harness({
       tasks: [task("A1", false)],

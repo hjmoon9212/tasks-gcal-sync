@@ -7,7 +7,7 @@ import { CalendarClient } from "./gcal/CalendarClient";
 import { TaskRepository } from "./data/TaskRepository";
 import { TaskWriter } from "./write/TaskWriter";
 import { SkipKind, SyncEngine, SyncResult } from "./sync/SyncEngine";
-import { SyncLogWriter } from "./sync/SyncLog";
+import { SyncLogWriter, withDeviceTag } from "./sync/SyncLog";
 import { EventFeed } from "./gcal/EventFeed";
 import { GcalReadApi } from "./api/PublicApi";
 
@@ -34,6 +34,7 @@ const SKIP_LABEL: Record<SkipKind, string> = {
   "hold-task-gone": "task 없음(보류)",
   "hold-due-invalid": "📅 없음(보류)",
   "hold-unschedule": "이벤트 삭제됨(보류)",
+  "hold-conflict": "충돌 해결 보류(볼트 정착 대기)",
   "cold-start-create": "콜드 스타트(생성 보류)",
   "ensure-id-failed": "🆔 쓰기 실패",
   "create-failed": "이벤트 생성 실패",
@@ -42,6 +43,9 @@ const SKIP_LABEL: Record<SkipKind, string> = {
 
 /** localStorage 키. App.saveLocalStorage가 볼트 단위로 네임스페이스를 붙인다. */
 const STATE_LS_KEY = "tasks-gcal-sync:state";
+
+/** 로그 파일의 기본 경로. 실제 파일에는 여기에 기기 태그가 붙는다. */
+const DEFAULT_LOG_PATH = "Logs/GCal 동기화 로그.md";
 
 /**
  * 기기-로컬 state 구조. 항목마다 성격이 다르다:
@@ -62,6 +66,14 @@ interface StateFile {
   clientId?: string;
   clientSecret?: string;
   refreshToken?: string | null;
+  /**
+   * 동기화 로그 파일에 붙는 이 기기의 이름.
+   *
+   * **자격증명과 같은 이유로 여기(localStorage)에 있다** — data.json에 두면 기기끼리
+   * 동기화돼 서로의 태그를 덮어쓰고, 그러면 두 기기가 결국 같은 파일에 쓰게 되어
+   * 분리한 의미가 없어진다. 한 번 정해지면 바뀌지 않는다(사용자가 설정에서 바꾸기 전까지).
+   */
+  logDeviceTag?: string;
 }
 
 export default class TasksGcalSyncPlugin extends Plugin {
@@ -92,6 +104,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadAll();
+    void this.noteLegacyLogFile();
 
     this.auth = new GoogleAuth(
       () => ({
@@ -439,9 +452,68 @@ export default class TasksGcalSyncPlugin extends Plugin {
   }
 
   /** 동기화 로그 경로(볼트 루트 기준). 비어 있으면 기본값. */
-  logPath(): string {
+  /** 설정에 적힌 '기본 경로'. 실제 파일은 여기에 기기 태그가 붙은 형제 파일이다. */
+  logBasePath(): string {
     const p = this.settings.syncLogPath?.trim();
-    return normalizePath(p || "Logs/GCal 동기화 로그.md");
+    return normalizePath(p || DEFAULT_LOG_PATH);
+  }
+
+  /**
+   * 이 기기가 실제로 쓰는 로그 파일 경로.
+   *
+   * 기기마다 다른 파일에 쓴다 → withDeviceTag 주석 참고. `vault.on("modify")`의
+   * 자기 파일 제외도 이 값을 보므로 경로가 바뀌어도 따라온다.
+   */
+  logPath(): string {
+    return withDeviceTag(this.logBasePath(), this.deviceTag());
+  }
+
+  /**
+   * 이 기기의 이름. 최초 1회 정해 localStorage에 굳힌다.
+   *
+   * Obsidian Sync의 기기 이름을 빌리되 **라벨로만 쓴다** — 비공식 API이고 Sync가
+   * 꺼져 있거나 아직 준비되지 않았을 수 있다. 없으면 난수로 대체하고, 그 뒤로는
+   * 신호가 오든 말든 굳힌 값을 쓴다(파일 이름이 도중에 바뀌면 기록이 두 파일로 갈린다).
+   */
+  deviceTag(): string {
+    if (!this.state) return ""; // loadAll 전 — withDeviceTag가 기본 경로를 그대로 준다
+    if (this.state.logDeviceTag) return this.state.logDeviceTag;
+    const sync = (this.app as any).internalPlugins?.plugins?.sync?.instance;
+    const name =
+      typeof sync?.deviceName === "string" && sync.deviceName.trim()
+        ? sync.deviceName.trim()
+        : `기기-${Math.random().toString(36).slice(2, 6)}`;
+    this.state.logDeviceTag = name;
+    void this.saveState();
+    return name;
+  }
+
+  /**
+   * 0.8.0 이전의 **기기 공용** 로그가 남아 있으면 한 번 알린다.
+   *
+   * 이름을 바꾸거나 지우지 않는다 — 그 자체가 동기화 이벤트라 지금 없애려는 바로 그
+   * 충돌 표면을 다시 만든다. 새 파일로 옮겨 가고, 옛 파일은 사용자가 판단한다.
+   */
+  private async noteLegacyLogFile(): Promise<void> {
+    try {
+      const legacy = this.logBasePath();
+      if (legacy === this.logPath()) return;
+      if (!(await this.app.vault.adapter.exists(legacy))) return;
+      console.log(
+        `[tasks-gcal-sync] 이 기기의 로그는 이제 "${this.logPath()}" 에 쌓입니다. ` +
+          `이전 통합 로그 "${legacy}" 는 그대로 두었습니다(필요 없으면 직접 삭제).`
+      );
+    } catch {
+      /* 안내일 뿐이라 실패해도 무시한다 */
+    }
+  }
+
+  /** 설정에서 기기 이름을 바꾼다. 옛 파일은 그대로 두고 새 파일로 옮겨 간다. */
+  async setDeviceTag(name: string): Promise<void> {
+    const v = name.trim();
+    if (!v || v === this.state.logDeviceTag) return;
+    this.state.logDeviceTag = v;
+    await this.saveState();
   }
 
   /**
@@ -563,6 +635,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
           records: local.records ?? {},
           syncTokens: local.syncTokens ?? {},
           lastFullScanAt: local.lastFullScanAt,
+          logDeviceTag: local.logDeviceTag,
         }
       : data?.state ?? emptyState(); // 아주 옛 버전: data.json 내장 state
     const legacy = await this.loadLegacyStateFile();
@@ -648,6 +721,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
       clientId: this.settings.clientId,
       clientSecret: this.settings.clientSecret,
       refreshToken: this.settings.refreshToken,
+      logDeviceTag: this.state.logDeviceTag,
     };
     this.app.saveLocalStorage(STATE_LS_KEY, JSON.stringify(sf));
   }

@@ -14,6 +14,7 @@ import {
   ReconcilePlan,
   decideReconcile,
   destructiveAllowed,
+  conflictResolutionAllowed,
 } from "../src/sync/reconcile";
 import { SyncRecord } from "../src/sync/StateStore";
 
@@ -32,6 +33,7 @@ function eq(actual: unknown, expected: unknown, msg: string) {
 const DAY = "2026-08-06";
 const NOW = 1_800_000_000_000;
 const HOLD = 60_000;
+const CRETRY = 15_000;
 
 const rec = (o: Partial<SyncRecord> = {}): SyncRecord => ({
   eventId: "ev-1",
@@ -68,6 +70,7 @@ const guards = (o: Partial<Guards> = {}): Guards => ({
   duplicateId: false,
   adopted: false,
   holdWrites: false,
+  vaultBehindRaw: false,
   coldHold: false,
   ...o,
 });
@@ -81,6 +84,7 @@ function decide(o: Partial<DecideInput> = {}): ReconcilePlan {
     guards: guards(),
     now: NOW,
     uncheckHoldMs: HOLD,
+    conflictRetryMs: CRETRY,
     ...o,
   } as DecideInput);
 }
@@ -168,8 +172,14 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
     remote: remote({ updated: "200", due: "2026-08-09", start: "2026-08-09" }),
   });
   eq(clash.conflicts, ["due"], "같은 필드 충돌 기록");
-  eq(clash.pull.setDue, "2026-08-09", "충돌 시 GCal 채택");
-  eq(clash.pushNeeded, false, "충돌 필드는 push하지 않는다");
+  eq(clash.pull.setDue, undefined, "충돌 시 노트 채택 → pull하지 않는다");
+  eq(clash.pushNeeded, true, "충돌 필드는 노트 값으로 push된다");
+  eq(clash.merged.due, "2026-08-10", "병합 결과는 노트 값");
+  eq(clash.remote.due, "2026-08-09", "버려진 GCal 값은 remote에 남는다(로그용)");
+  // 날짜 둘은 한 구간이다 — due가 노트로 결정났으면 start만 GCal에서 끌어오지 않는다.
+  // 안 그러면 하루짜리 task에 🛫가 붙어 여러 날 span이 된다.
+  eq(clash.pull.start, undefined, "날짜 충돌이면 start도 노트 값으로 둔다");
+  eq(clash.merged.start, DAY, "start는 노트 값 유지");
 
   const split = merge({
     task: { kind: "ok", local: local({ done: true }) },
@@ -293,8 +303,10 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
     remote: remote({ updated: "200", time: T }),
   });
   eq(conflict.conflicts, ["time"], "시각 충돌 보고");
-  eq(conflict.pull.time, { value: T }, "충돌 시 GCal 채택");
-  eq(conflict.pushNeeded, false, "GCal이 가져간 필드는 되돌려 쓰지 않는다");
+  eq(conflict.pull.time, undefined, "시각 충돌도 노트 채택 → pull하지 않는다");
+  eq(conflict.pushNeeded, true, "노트의 시각이 GCal로 올라간다");
+  eq(conflict.merged.time, "09:00-10:00", "병합 결과는 노트 시각");
+  eq(conflict.remote.time, T, "버려진 GCal 시각이 remote에 남는다");
 
   // 읽지 못한 이벤트(혼합형 등, time=undefined)는 손대지 않는다 —
   // 이걸 ""로 뭉개면 근거 없이 노트의 ⏰를 지운다.
@@ -309,6 +321,106 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
   // 0.4.5 이전 record엔 time 키가 없다 → 종일로 읽어야 한다(불필요한 push 방지)
   const legacy = merge({ rec: rec({ time: undefined }), remote: undefined });
   eq(legacy.pushNeeded, false, "구버전 record + 종일 노트 → 변경 없음");
+}
+
+// ── 값이 같으면 충돌이 아니다 (0.8.0~) ──
+//
+// 기기를 며칠 꺼두면 기준선만 뒤처진다. 그 상태로 켜면 노트도 GCal도 "기준선과 다르다"가
+// 되지만 **둘의 값은 같다.** 예전엔 이걸 충돌로 세어 "노트 변경 폐기"를 찍고 같은 값을
+// 노트에 다시 썼다(→ modify → 자동 push). 2026-09-07 실측: 충돌 127건 중 122건이 이것.
+{
+  const agreedPlan = merge({
+    rec: rec({ due: "2026-08-06", start: "2026-08-06" }),
+    task: { kind: "ok", local: local({ due: "2026-08-20", start: "2026-08-20" }) },
+    remote: remote({ updated: "200", due: "2026-08-20", start: "2026-08-20" }),
+  });
+  eq(agreedPlan.conflicts, [], "값이 같으면 충돌이 아니다");
+  eq(agreedPlan.agreed, ["due", "start"], "합의된 필드로 기록된다");
+  eq(agreedPlan.pull.setDue, undefined, "합의: 노트에 다시 쓰지 않는다");
+  eq(agreedPlan.pull.start, undefined, "합의: 🛫도 건드리지 않는다");
+  eq(agreedPlan.pushNeeded, false, "합의: GCal에도 올리지 않는다");
+  eq(agreedPlan.merged.due, "2026-08-20", "합의: 기준선만 그 값으로 앞당긴다");
+
+  // 제목도 마찬가지 — 양쪽이 같은 제목으로 바뀌었으면 폐기할 것이 없다.
+  const sameTitle = merge({
+    task: { kind: "ok", local: local({ title: "새 제목" }) },
+    remote: remote({ updated: "200", title: "새 제목" }),
+  });
+  eq(sameTitle.conflicts, [], "제목이 같으면 충돌 아님");
+  eq(sameTitle.pull.title, undefined, "제목 합의: 노트에 다시 쓰지 않는다");
+  eq(sameTitle.pushNeeded, false, "제목 합의: push도 없다");
+
+  // 값이 **다르면** 그때는 진짜 충돌이다.
+  const real = merge({
+    task: { kind: "ok", local: local({ title: "노트 제목" }) },
+    remote: remote({ updated: "200", title: "GCal 제목" }),
+  });
+  eq(real.conflicts, ["title"], "값이 다르면 진짜 충돌");
+  eq(real.agreed, [], "진짜 충돌은 합의가 아니다");
+  eq(real.pushNeeded, true, "진짜 충돌: 노트 제목이 올라간다");
+}
+
+// ── 진짜 충돌은 볼트가 정착한 뒤에만 해결한다 ──
+//
+// 노트 우선은 "스테일한 노트가 원격을 덮는" 경로를 연다. 그래서 콜드 스타트/볼트 뒤처짐
+// 중에는 판정 자체를 미룬다 — 어느 쪽도 쓰지 않고 record를 통째로 건너뛴다.
+{
+  const clashing = {
+    task: { kind: "ok" as const, local: local({ due: "2026-08-10" }) },
+    remote: remote({ updated: "200", due: "2026-08-09", start: "2026-08-09" }),
+  };
+
+  for (const k of ["coldHold", "vaultBehindRaw"] as const) {
+    const held = decide({ ...clashing, guards: guards({ [k]: true }) });
+    eq(held.kind, "skip", `${k} → 충돌 해결 보류`);
+    if (held.kind === "skip") {
+      eq(held.reason, "hold-conflict", `${k} → hold-conflict`);
+      eq(held.fields, ["due"], `${k} → 갈린 필드를 남긴다`);
+      eq(held.retryAfterMs, CRETRY, `${k} → 후속 run을 예약한다`);
+      eq(held.local?.due, "2026-08-10", `${k} → 노트 값을 로그용으로 남긴다`);
+      eq(held.remote?.due, "2026-08-09", `${k} → GCal 값을 로그용으로 남긴다`);
+    }
+  }
+
+  // ★ fail-open 상한이 열려도 충돌 해결만은 계속 보류한다.
+  //   holdWrites는 상한(10분)을 넘기면 false로 떨어진다. 그건 "충돌 아닌 변경까지 영영
+  //   막지는 말자"는 뜻이지 "이제 노트를 믿어도 된다"는 뜻이 아니다.
+  const failOpen = decide({
+    ...clashing,
+    guards: guards({ holdWrites: false, vaultBehindRaw: true }),
+  });
+  eq(failOpen.kind, "skip", "fail-open 통과 중이어도 충돌은 보류 ★");
+
+  // 반대로 뒤처짐이 풀렸으면 보류하지 않는다(가드가 기능을 죽이면 안 된다).
+  const settled = merge({ ...clashing, guards: guards() });
+  eq(settled.conflicts, ["due"], "정착 후에는 충돌을 해결한다");
+
+  // 합의는 보류 중이어도 그대로 합의다 — 버려지는 값이 없으니 미룰 이유가 없다.
+  const agreedWhileBehind = merge({
+    task: { kind: "ok", local: local({ due: "2026-08-20", start: "2026-08-20" }) },
+    remote: remote({ updated: "200", due: "2026-08-20", start: "2026-08-20" }),
+    guards: guards({ coldHold: true, vaultBehindRaw: true }),
+  });
+  eq(agreedWhileBehind.kind, "merge", "보류 중에도 합의는 그냥 합의");
+  eq(agreedWhileBehind.agreed, ["due", "start"], "보류 중 합의도 기준선을 앞당긴다");
+}
+
+// ── 충돌 해결 허용 조건표 ──
+{
+  eq(conflictResolutionAllowed(guards()), true, "가드 없음 → 해결 허용");
+  eq(conflictResolutionAllowed(guards({ coldHold: true })), false, "콜드 스타트 → 보류");
+  eq(conflictResolutionAllowed(guards({ vaultBehindRaw: true })), false, "볼트 뒤처짐 → 보류");
+  // holdWrites는 상한이 반영된 값이라 이 판정의 근거가 아니다.
+  eq(
+    conflictResolutionAllowed(guards({ holdWrites: true, vaultBehindRaw: true })),
+    false,
+    "뒤처짐이 원본에 남아 있으면 보류"
+  );
+  eq(
+    conflictResolutionAllowed(guards({ adopted: true })),
+    true,
+    "입양 여부는 충돌 해결과 무관(파괴적 동작 가드다)"
+  );
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -63,6 +63,39 @@ function flat(s: string): string {
  * 한 줄 형식: `- ACTION `🆔` "제목" cal=… ev=… @노트:줄 — 상세`
  * 식별 정보를 앞에 고정해 훑기 쉽게 하고, 길이가 들쭉날쭉한 상세는 맨 뒤로 보낸다.
  */
+/** 파일명에 못 쓰는 문자와 경로 구분자를 없앤다. 태그는 사람이 고칠 수 있는 값이다. */
+function safeTag(tag: string): string {
+  return tag
+    .replace(/[\\/:*?"<>|#^[\]]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 40);
+}
+
+/**
+ * `Logs/x.md` + `HJMoon` → `Logs/x (HJMoon).md`
+ *
+ * **한 파일에 두 기기가 쓰면 안 된다.** 로그는 볼트 안 일반 노트라 Obsidian Sync의
+ * 텍스트 병합 대상이고, 접기(× N회)는 파일 끝 블록을 고쳐 쓰는 동작이라 두 기기가 같은
+ * 줄을 다르게 고치는 상황이 정상 동작으로 생긴다. 그러면 병합기가 할 수 있는 최선이
+ * "둘 다 남기거나 한쪽을 버리는 것"이고, 실제로 그렇게 됐다 — 2026-09-07 실측에서
+ * 한 볼트의 로그는 **11%가 완전 중복 블록**이었고 시각이 역전된 지점이 6곳,
+ * 콘솔에 남은 run이 통째로 사라진 구간도 있었다.
+ *
+ * 감지나 병합으로 풀 문제가 아니다. **파일마다 기록자를 하나로 두면** 병합기가
+ * 무엇이든(LWW든 텍스트 병합이든) 손상 자체가 성립하지 않는다. 다른 기기로는 여전히
+ * 동기화돼 읽을 수 있고, 덤으로 "어느 기기가 했나"를 파일 이름이 답해준다.
+ */
+export function withDeviceTag(basePath: string, tag: string): string {
+  const clean = safeTag(tag);
+  if (!clean) return basePath;
+  const slash = basePath.lastIndexOf("/");
+  const dot = basePath.lastIndexOf(".");
+  // 확장자가 없거나(`Logs/log`) 점이 폴더명에만 있으면(`a.b/log`) 뒤에 붙인다.
+  if (dot <= slash) return `${basePath} (${clean})`;
+  return `${basePath.slice(0, dot)} (${clean})${basePath.slice(dot)}`;
+}
+
 export function formatEntry(e: SyncLogEntry): string {
   const head: string[] = [`- ${e.action}`];
   if (e.id) head.push(`\`${e.id}\``);
@@ -260,11 +293,23 @@ export class SyncLogWriter {
     if (!stat || stat.size <= limit) return;
 
     const text = await adapter.read(path);
+    if (!text.length) return;
     // 상한의 80%만 남긴다. 딱 상한에 맞추면 다음 run마다 다시 자르게 된다.
-    const keep = Math.floor(limit * 0.8);
-    let cut = Math.max(0, text.length - keep);
+    //
+    // ⚠️ **상한은 바이트인데 자르는 위치는 문자 인덱스다.** 둘을 섞으면 안 된다 —
+    // 한국어는 UTF-8에서 3바이트라 실측 1.33~1.35배 차이가 나고, 예전 코드는
+    // stat.size(바이트)로 판정하고 text.length(문자)로 잘라 **상한을 넘겨도 아무것도
+    // 잘리지 않은 채 "잘라냈다" 안내만 찍혔다**(2026-09-07: 512KB 상한에 563KB 파일).
+    // 파일 전체의 실측 비율로 목표 문자 수를 환산한다.
+    const keepBytes = Math.floor(limit * 0.8);
+    const bytesPerChar = stat.size / text.length;
+    const keepChars = Math.floor(keepBytes / bytesPerChar);
+    let cut = Math.max(0, text.length - keepChars);
     const boundary = text.indexOf("\n## ", cut);
     cut = boundary >= 0 ? boundary + 1 : cut;
+    // 실제로 잘라낸 게 없으면 안내도 쓰지 않는다. 안 자르고 "잘라냈다"고 적으면
+    // 로그 자체를 못 믿게 된다 — 이 파일의 존재 이유가 사후 추적이다.
+    if (cut <= 0) return;
     await adapter.write(
       path,
       HEADER +

@@ -17,6 +17,9 @@ const GCAL_COLORS: { id: string; name: string }[] = [
 ];
 
 export class SettingsTab extends PluginSettingTab {
+  /** 기기 태그가 붙은 실제 로그 경로를 보여주는 줄. 경로·기기명이 바뀌면 다시 그린다. */
+  private logPathEl?: HTMLElement;
+
   /** 접힘 상태는 화면 상태일 뿐이라 저장하지 않는다(설정 창을 닫으면 초기값으로). */
   private showDoneDetails = false;
 
@@ -44,6 +47,15 @@ export class SettingsTab extends PluginSettingTab {
     box = parent.createDiv();
     box.style.display = open ? "" : "none";
     return box;
+  }
+
+  /**
+   * 세부 값이 바뀔 때 display()로 전체를 다시 그리면 텍스트 입력 중 포커스가 날아간다.
+   * 그래서 이 한 줄만 갈아끼운다.
+   */
+  private renderLogPath(): void {
+    if (!this.logPathEl) return;
+    this.logPathEl.setText(`실제 파일: ${this.plugin.logPath()}`);
   }
 
   display(): void {
@@ -483,10 +495,36 @@ export class SettingsTab extends PluginSettingTab {
           .onChange(async (v) => {
             s.syncLogPath = v.trim();
             await this.plugin.saveAll();
+            this.renderLogPath();
           })
       )
       .addButton((b) =>
         b.setButtonText("열기").onClick(() => this.plugin.openSyncLog())
+      );
+
+    // 기기마다 다른 파일에 쓴다는 사실이 **화면에 보여야** 한다. 설정에 적은 경로와
+    // 실제 파일 이름이 다르면, 그걸 모르는 채로는 "왜 저 파일에 안 쌓이지"가 된다.
+    this.logPathEl = containerEl.createEl("div", {
+      cls: "setting-item-description",
+    });
+    this.renderLogPath();
+
+    new Setting(containerEl)
+      .setName("이 기기 이름")
+      .setDesc(
+        "로그 파일 이름에 붙습니다. 기기마다 자기 파일에만 써야 하기 때문입니다 — " +
+          "한 파일에 두 기기가 쓰면 Obsidian Sync가 두 사본을 병합하면서 기록이 중복·재정렬되고 " +
+          "일부가 사라집니다. 이 값은 동기화되지 않습니다(기기 로컬). " +
+          "바꾸면 새 파일로 옮겨 가고 옛 파일은 그대로 남습니다."
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder("예: 회사PC")
+          .setValue(this.plugin.deviceTag())
+          .onChange(async (v) => {
+            await this.plugin.setDeviceTag(v);
+            this.renderLogPath();
+          })
       );
 
     new Setting(containerEl)

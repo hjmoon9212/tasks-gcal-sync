@@ -16,6 +16,7 @@ import {
   newBlock,
   renderBlock,
   selectEntries,
+  withDeviceTag,
 } from "../src/sync/SyncLog";
 
 let pass = 0;
@@ -151,7 +152,12 @@ function fakeVault(seed: Record<string, string> = {}) {
       files[p] = (files[p] ?? "") + d;
     },
     mkdir: async () => {},
-    stat: async (p: string) => ({ size: files[p]?.length ?? 0 }),
+    // ⚠️ **바이트**를 돌려준다. Obsidian의 adapter.stat도 바이트이고, 문자 수를 돌려주면
+    // 한국어(UTF-8 3바이트)에서 트림이 안 도는 버그가 테스트에 잡히지 않는다 — 실제로
+    // 2026-09-07까지 그랬다.
+    stat: async (p: string) => ({
+      size: new TextEncoder().encode(files[p] ?? "").length,
+    }),
   };
   return { app: { vault: { adapter } } as any, files };
 }
@@ -212,6 +218,97 @@ function fakeVault(seed: Record<string, string> = {}) {
     "남의 텍스트를 덮어쓰지 않는다"
   );
   eq((files["Logs/log.md"].match(/^## /gm) ?? []).length, 2, "대신 새 블록으로 붙인다");
+}
+
+// --- 기기별 로그 파일 이름 ---
+//
+// 한 파일에 두 기기가 쓰면 Obsidian Sync의 텍스트 병합이 블록을 중복·재정렬하고 일부를
+// 잃는다(2026-09-07 실측: 한 볼트 로그의 11%가 완전 중복, 시각 역전 6곳). 감지로 풀
+// 문제가 아니라 **기록자를 하나로** 두는 문제다.
+{
+  eq(
+    withDeviceTag("Logs/GCal 동기화 로그.md", "HJMoon"),
+    "Logs/GCal 동기화 로그 (HJMoon).md",
+    "확장자 앞에 태그를 붙인다"
+  );
+  eq(
+    withDeviceTag("Logs/log", "집PC"),
+    "Logs/log (집PC)",
+    "확장자가 없으면 끝에 붙인다"
+  );
+  eq(
+    withDeviceTag("a.b/log", "PC"),
+    "a.b/log (PC)",
+    "점이 폴더명에만 있으면 확장자로 보지 않는다"
+  );
+  eq(
+    withDeviceTag("log.md", "DESKTOP-8RL6HT9"),
+    "log (DESKTOP-8RL6HT9).md",
+    "루트 경로도 된다"
+  );
+  // 태그는 사람이 고칠 수 있는 값이다 — 경로 구분자나 금지문자가 들어오면 파일이 엉뚱한
+  // 곳에 생기거나 쓰기가 실패한다.
+  eq(
+    withDeviceTag("Logs/log.md", "a/b:c*?"),
+    "Logs/log (a-b-c--).md",
+    "파일명에 못 쓰는 문자는 치환한다"
+  );
+  eq(withDeviceTag("Logs/log.md", "   "), "Logs/log.md", "빈 태그면 그대로 둔다");
+  ok(
+    withDeviceTag("Logs/log.md", "x".repeat(80)).length < 60,
+    "지나치게 긴 태그는 자른다"
+  );
+  // 두 기기는 반드시 서로 다른 파일에 쓴다 — 이게 이 함수의 존재 이유다.
+  ok(
+    withDeviceTag("Logs/log.md", "A") !== withDeviceTag("Logs/log.md", "B"),
+    "기기가 다르면 파일도 다르다 ★"
+  );
+}
+
+// --- 크기 상한: 바이트 기준으로 잘린다 ---
+//
+// 상한은 바이트(adapter.stat)인데 자를 위치는 문자 인덱스다. 예전엔 이 둘을 섞어서
+// 한국어 로그가 상한을 33% 넘겨도 아무것도 안 잘린 채 "잘라냈다" 안내만 찍혔다
+// (2026-09-07 실측: 512KB 상한에 563KB 파일). 이 블록이 그 회귀 감지선이다.
+{
+  const { app, files } = fakeVault();
+  const LIMIT_KB = 1;
+  const w = new SyncLogWriter(app, () => ({
+    enabled: true,
+    path: "Logs/log.md",
+    maxKB: LIMIT_KB,
+    logSkips: true,
+  }));
+  // 내용을 매번 다르게 해야 접기(× N회)가 아니라 새 블록이 쌓인다 — 트림은 append 뒤에만 돈다.
+  for (let n = 0; n < 40; n++) {
+    await w.append("+0 ~0", [{ action: "SKIP", detail: `볼트 동기화 중 ${n}번째 보류` }], "주기(5분)");
+  }
+  const text = files["Logs/log.md"];
+  const bytes = new TextEncoder().encode(text).length;
+  ok(bytes <= LIMIT_KB * 1024, `상한(바이트) 이하로 잘린다 — 실제 ${bytes}B ★`);
+  ok(bytes > text.length, "한국어라 바이트가 문자 수보다 크다(전제 확인)");
+  ok(!text.includes("0번째 보류"), "오래된 앞부분이 실제로 사라졌다");
+  ok(text.includes("39번째 보류"), "최근 기록은 남는다");
+  eq((text.match(/KB 상한/g) ?? []).length, 1, "트림 안내는 하나만 남는다");
+  // 항목 중간에서 끊기면 반쪽 기록이 오해를 만든다 → 블록 경계에서만 자른다.
+  const afterNotice = text.slice(text.indexOf("KB 상한"));
+  ok(
+    afterNotice.slice(afterNotice.indexOf("## ")).startsWith("## 2"),
+    "잘린 지점이 run 블록 경계다"
+  );
+}
+
+// 상한 안이면 손대지 않는다 — 안 잘랐는데 "잘라냈다"고 적으면 로그를 못 믿게 된다.
+{
+  const { app, files } = fakeVault();
+  const w = new SyncLogWriter(app, () => ({
+    enabled: true,
+    path: "Logs/log.md",
+    maxKB: 512,
+    logSkips: true,
+  }));
+  await w.append("+0 ~0", [{ action: "SKIP", detail: "볼트 동기화 중" }], "편집 자동");
+  ok(!files["Logs/log.md"].includes("KB 상한"), "상한 안이면 트림 안내가 없다");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

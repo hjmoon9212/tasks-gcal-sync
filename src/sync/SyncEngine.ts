@@ -42,6 +42,7 @@ export type SkipKind =
   | "hold-task-gone" // task 없음, 그러나 지우기엔 이른 상태
   | "hold-due-invalid" // 📅 유실, 그러나 지우기엔 이른 상태
   | "hold-unschedule" // 이벤트 삭제됨, 그러나 미일정화하기엔 이른 상태
+  | "hold-conflict" // 값이 갈렸으나 볼트가 정착 전 → 충돌 해결 보류
   | "cold-start-create" // 콜드 스타트라 새 이벤트를 안 만듦
   | "ensure-id-failed" // 🆔 쓰기 실패(줄이 그 사이 바뀜 등)
   | "create-failed" // 이벤트 생성 실패
@@ -59,6 +60,8 @@ const SKIP_TEXT: Record<SkipKind, string> = {
   "hold-task-gone": "task가 안 보이지만 지우기엔 이름 → 이벤트 유지",
   "hold-due-invalid": "📅가 없지만 지우기엔 이름 → 이벤트 유지",
   "hold-unschedule": "이벤트가 삭제됐지만 미일정화하기엔 이름 → 📅 유지",
+  "hold-conflict":
+    "노트·GCal 값이 갈렸으나 볼트가 아직 정착 전 → 충돌 해결 보류(어느 쪽도 쓰지 않음)",
   "cold-start-create": "콜드 스타트 → 새 이벤트 생성 보류",
   "ensure-id-failed": "🆔를 노트에 쓰지 못함",
   "create-failed": "이벤트 생성 실패",
@@ -998,7 +1001,7 @@ export class SyncEngine {
     }
     if (plan.conflicts.length) {
       console.warn(
-        `[tasks-gcal-sync] 충돌 → GCal 채택 (${plan.conflicts.join(", ")}):`,
+        `[tasks-gcal-sync] 충돌 → 노트 채택 (${plan.conflicts.join(", ")}):`,
         where
       );
     }
@@ -1138,7 +1141,9 @@ export class SyncEngine {
     const { plan, before, applied, pushKind } = c;
     const parts: string[] = [];
 
-    // 1) 충돌 — 같은 필드를 양쪽에서 바꾼 것. GCal이 이기고 노트 변경은 버려진다.
+    // 1) 충돌 — 같은 필드를 양쪽에서 **다른 값으로** 바꾼 것. 노트가 이기고 GCal 값은
+    //    버려진다. 한쪽 변경이 조용히 사라지는 유일한 경로라 폐기된 값까지 적는다.
+    //    (양쪽이 같은 값이면 애초에 충돌이 아니므로 여기 오지 않는다 → reconcile.ts)
     if (plan.conflicts.length) {
       const each = plan.conflicts
         .map(
@@ -1146,10 +1151,10 @@ export class SyncEngine {
             `${f}(노트 ${this.fieldText(before, f)}→${this.fieldText(
               plan.local,
               f
-            )} / GCal ${this.fieldText(before, f)}→${this.fieldText(plan.merged, f)})`
+            )} / GCal ${this.fieldText(before, f)}→${this.fieldText(plan.remote, f)})`
         )
         .join(", ");
-      parts.push(`⚔️ 충돌 ${each} → GCal 채택, 노트 변경 폐기`);
+      parts.push(`⚔️ 충돌 ${each} → 노트 채택, GCal 변경 폐기`);
     }
 
     // 2) GCal → 노트로 실제로 쓴 것 / 쓰려다 실패한 것
@@ -1345,7 +1350,15 @@ export class SyncEngine {
 
     // ---- 1) 기존 record 양방향 조정 ----
     // 판단은 전부 reconcile.ts의 순수 함수가 한다. 여기서는 그 결정을 실행만 한다.
-    const guards = new RunGuards({ dupIds, adopted, holdWrites, coldHold });
+    // vaultBehindRaw 는 fail-open 상한을 적용하기 **전** 값이다. 충돌 해결은 상한과
+    // 무관하게 볼트가 실제로 정착한 뒤에만 한다 → reconcile.conflictResolutionAllowed
+    const guards = new RunGuards({
+      dupIds,
+      adopted,
+      holdWrites,
+      vaultBehindRaw: behind,
+      coldHold,
+    });
 
     for (const id of Object.keys(records)) {
       const rec = records[id];
@@ -1363,6 +1376,7 @@ export class SyncEngine {
           guards: guards.for(id),
           now: Date.now(),
           uncheckHoldMs: UNCHECK_HOLD_MS,
+          conflictRetryMs: BEHIND_RECHECK_MS,
         });
 
         if (plan.kind === "merge") {
@@ -1380,18 +1394,41 @@ export class SyncEngine {
 
         const logWhere = task ? `${task.path}:${task.line + 1}` : undefined;
         switch (plan.kind) {
-          case "skip":
+          case "skip": {
             this.skip(result, plan.reason);
+            // 보류로 끝난 run은 그대로 두면 다음 주기(기본 5분)까지 방치된다.
+            if (plan.retryAfterMs !== undefined) {
+              result.retryAfterMs = Math.min(
+                result.retryAfterMs ?? plan.retryAfterMs,
+                plan.retryAfterMs
+              );
+            }
+            let detail = SKIP_TEXT[plan.reason];
+            if (plan.reason === "hold-conflict" && plan.local && plan.remote) {
+              const sec = Math.round((plan.retryAfterMs ?? 0) / 1000);
+              const each = (plan.fields ?? [])
+                .map(
+                  (f) =>
+                    `${f}(노트 ${this.fieldText(plan.local!, f)} / GCal ${this.fieldText(
+                      plan.remote!,
+                      f
+                    )})`
+                )
+                .join(", ");
+              detail = `⚔️⏸ ${detail} — ${each}, ${sec}초 뒤 재확인`;
+            }
             result.entries.push({
-              action: "SKIP",
+              // 되돌아올 보류와 영영 손대지 않는 스킵은 사후 추적에서 다르게 읽힌다.
+              action: plan.reason === "hold-conflict" ? "HOLD" : "SKIP",
               id,
               title: rec.title,
               calendar: this.calName(rec.calendarId),
               eventId: rec.eventId,
               where: logWhere,
-              detail: SKIP_TEXT[plan.reason],
+              detail,
             });
             break;
+          }
           case "delete-event":
             await this.client.deleteEvent(rec.calendarId, rec.eventId);
             delete records[id];

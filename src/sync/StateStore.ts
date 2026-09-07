@@ -35,6 +35,11 @@ export interface PersistedState {
    * 이 스캔은 캘린더마다 ±2년치를 페이지네이션하므로 매 실행마다 돌릴 이유가 없다.
    */
   lastFullScanAt?: number;
+  /**
+   * 동기화 로그 파일에 붙는 이 기기의 이름(SyncLog.withDeviceTag).
+   * 기기-로컬이어야 하므로 localStorage에만 산다 — data.json에 두면 기기끼리 덮어쓴다.
+   */
+  logDeviceTag?: string;
 }
 
 export function emptyState(): PersistedState {
