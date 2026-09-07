@@ -25,6 +25,18 @@ export interface SyncRecord {
    * 한 사이클 늦춰 재확인한다(2단계 삭제 가드와 같은 패턴). 회귀가 아니게 되면 지운다.
    */
   uncheckSeenAt?: number;
+
+  /**
+   * 마지막으로 본 task 줄의 **원문과 위치**.
+   *
+   * 이벤트를 지울 때 "무엇을 지웠는지" 를 로그에 남기려면 이것뿐이다 — 지우는 시점에는
+   * 이미 줄이 노트에 없어서 읽을 방법이 없다. 2026-09-07 에 편집·Sync 경합으로 노트에서
+   * 줄이 사라졌고, 플러그인은 그 상태를 정확히 읽어 이벤트를 지웠지만, 남은 기록이
+   * `마지막 스냅샷 due=…` 뿐이라 **복구하려면 Obsidian 버전 기록을 뒤져야 했다.**
+   * Sync 는 앞으로도 노트를 잃을 수 있다 — 막을 수 없다면 되살릴 수 있어야 한다.
+   */
+  lastLine?: string;
+  lastWhere?: string;
 }
 
 export interface PersistedState {

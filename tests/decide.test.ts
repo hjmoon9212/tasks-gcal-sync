@@ -70,7 +70,7 @@ const guards = (o: Partial<Guards> = {}): Guards => ({
   duplicateId: false,
   adopted: false,
   holdWrites: false,
-  vaultBehindRaw: false,
+  vaultUnsettled: false,
   coldHold: false,
   ...o,
 });
@@ -95,9 +95,17 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
 // ── 파괴적 동작 가드: 셋 중 하나라도 서 있으면 막힌다 ──
 {
   eq(destructiveAllowed(guards()), true, "가드 없음 → 허용");
-  for (const k of ["holdWrites", "coldHold", "adopted"] as const) {
+  for (const k of ["holdWrites", "coldHold", "adopted", "vaultUnsettled"] as const) {
     eq(destructiveAllowed(guards({ [k]: true })), false, `${k} → 차단`);
   }
+  // ★ 2026-09-07 회귀선. 그날 삭제가 통과한 조건이 정확히 이것이다 —
+  //   뒤처짐 판정은 순간적으로 false(=holdWrites false)였고, 그 2초 틈에 이벤트가 지워졌다.
+  //   정착 시계가 없으면 여기서 true 가 돌아온다.
+  eq(
+    destructiveAllowed(guards({ holdWrites: false, vaultUnsettled: true })),
+    false,
+    "뒤처짐 구간 사이의 순간 틈으로는 삭제가 열리지 않는다 ★"
+  );
 }
 
 // ── 진입 순서: 🆔 중복이 가장 먼저 (삭제 경로로 새면 안 된다) ──
@@ -370,7 +378,7 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
     remote: remote({ updated: "200", due: "2026-08-09", start: "2026-08-09" }),
   };
 
-  for (const k of ["coldHold", "vaultBehindRaw"] as const) {
+  for (const k of ["coldHold", "vaultUnsettled"] as const) {
     const held = decide({ ...clashing, guards: guards({ [k]: true }) });
     eq(held.kind, "skip", `${k} → 충돌 해결 보류`);
     if (held.kind === "skip") {
@@ -387,7 +395,7 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
   //   막지는 말자"는 뜻이지 "이제 노트를 믿어도 된다"는 뜻이 아니다.
   const failOpen = decide({
     ...clashing,
-    guards: guards({ holdWrites: false, vaultBehindRaw: true }),
+    guards: guards({ holdWrites: false, vaultUnsettled: true }),
   });
   eq(failOpen.kind, "skip", "fail-open 통과 중이어도 충돌은 보류 ★");
 
@@ -399,22 +407,46 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
   const agreedWhileBehind = merge({
     task: { kind: "ok", local: local({ due: "2026-08-20", start: "2026-08-20" }) },
     remote: remote({ updated: "200", due: "2026-08-20", start: "2026-08-20" }),
-    guards: guards({ coldHold: true, vaultBehindRaw: true }),
+    guards: guards({ coldHold: true, vaultUnsettled: true }),
   });
   eq(agreedWhileBehind.kind, "merge", "보류 중에도 합의는 그냥 합의");
   eq(agreedWhileBehind.agreed, ["due", "start"], "보류 중 합의도 기준선을 앞당긴다");
+}
+
+// ── 정착 전에는 삭제하지 않는다 (v0.8.1~) ──
+//
+// 2026-09-07: 갤탭에서 추가 → Windows 로 Sync → 사용자가 다른 md 로 잘라내기·붙여넣기
+// → 편집이 Sync 경합으로 되돌아가 노트에서 줄이 사라짐 → 플러그인이 그 상태를 정확히
+// 읽고 이벤트를 지웠다. 볼트가 40분째 따라잡는 중이었고, 삭제가 통과한 건 그 사이의
+// 2초짜리 틈이었다.
+{
+  const gone = { task: { kind: "missing" as const } };
+  eq(decide({ ...gone, guards: guards({ vaultUnsettled: true }) }),
+     { kind: "skip", reason: "hold-task-gone" },
+     "task 줄이 사라져도 정착 전이면 이벤트를 지우지 않는다 ★");
+  eq(decide({ ...gone, guards: guards() }),
+     { kind: "delete-event", reason: "task-gone" },
+     "정착 후에는 정상적으로 지운다(가드가 기능을 죽이면 안 된다)");
+
+  // 📅 유실과 미일정화도 같은 문 하나를 지난다.
+  eq(decide({ task: { kind: "due-invalid" }, guards: guards({ vaultUnsettled: true }) }),
+     { kind: "skip", reason: "hold-due-invalid" },
+     "📅 유실도 정착 전이면 보류");
+  eq(decide({ evCancelled: true, guards: guards({ vaultUnsettled: true }) }),
+     { kind: "skip", reason: "hold-unschedule" },
+     "이벤트 삭제 → 미일정화도 정착 전이면 보류");
 }
 
 // ── 충돌 해결 허용 조건표 ──
 {
   eq(conflictResolutionAllowed(guards()), true, "가드 없음 → 해결 허용");
   eq(conflictResolutionAllowed(guards({ coldHold: true })), false, "콜드 스타트 → 보류");
-  eq(conflictResolutionAllowed(guards({ vaultBehindRaw: true })), false, "볼트 뒤처짐 → 보류");
-  // holdWrites는 상한이 반영된 값이라 이 판정의 근거가 아니다.
+  eq(conflictResolutionAllowed(guards({ vaultUnsettled: true })), false, "정착 전 → 보류");
+  // holdWrites는 fail-open 상한이 반영된 값이라 이 판정의 근거가 아니다.
   eq(
-    conflictResolutionAllowed(guards({ holdWrites: true, vaultBehindRaw: true })),
+    conflictResolutionAllowed(guards({ holdWrites: false, vaultUnsettled: true })),
     false,
-    "뒤처짐이 원본에 남아 있으면 보류"
+    "fail-open 통과 중(holdWrites=false)이어도 정착 전이면 보류 ★"
   );
   eq(
     conflictResolutionAllowed(guards({ adopted: true })),

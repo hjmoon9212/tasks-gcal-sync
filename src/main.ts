@@ -36,6 +36,7 @@ const SKIP_LABEL: Record<SkipKind, string> = {
   "hold-unschedule": "이벤트 삭제됨(보류)",
   "hold-conflict": "충돌 해결 보류(볼트 정착 대기)",
   "cold-start-create": "콜드 스타트(생성 보류)",
+  "unsettled-create": "볼트 정착 대기(생성 보류)",
   "ensure-id-failed": "🆔 쓰기 실패",
   "create-failed": "이벤트 생성 실패",
   "reconcile-error": "조정 실패",

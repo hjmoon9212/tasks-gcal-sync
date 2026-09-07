@@ -76,13 +76,19 @@ export interface Guards {
   /** 볼트가 Obsidian Sync로 아직 따라잡는 중(fail-open 상한 적용 **후**). */
   holdWrites: boolean;
   /**
-   * 뒤처짐 판정 그 자체 — **fail-open 상한을 적용하기 전** 값.
+   * 볼트가 **아직 정착하지 않았다** — 뒤처짐이 풀린 뒤 충분한 시간이 이어지지 않았다.
    *
-   * `holdWrites`는 상한(10분)을 넘기면 false로 떨어진다. 그건 "기능이 영영 멈추면 안
-   * 된다"는 뜻이지 "이제 노트를 믿어도 된다"는 뜻이 아니다. 충돌 해결처럼 **한쪽 값을
-   * 버리는** 판정은 상한과 무관하게 볼트가 실제로 정착한 뒤에만 해야 하므로 원본을 본다.
+   * `holdWrites`(뒤처짐 판정)와 두 가지가 다르다.
+   *  1. **fail-open 상한을 보지 않는다.** 상한은 "충돌 아닌 변경까지 영영 막지는 말자"는
+   *     장치이지 "이제 노트를 믿어도 된다"는 신호가 아니다.
+   *  2. **순간이 아니라 구간을 본다.** 2026-09-07 에 40분짜리 보류 구간 두 개 사이의
+   *     **2초 틈**에서 `vaultBehind()`가 한 번 false 를 돌려줬고, 그 한 번의 표본을 근거로
+   *     (a) 새 🆔 를 노트에 써넣고 (b) 40분 뒤 같은 틈에서 이벤트를 지웠다. 볼트가 40분째
+   *     따라잡는 중인데 2초 조용했다고 정착이라고 볼 수는 없다.
+   *
+   * 되돌리기 힘든 동작(삭제·미일정화·충돌 해결·새 🆔 발급)은 전부 이 값을 본다.
    */
-  vaultBehindRaw: boolean;
+  vaultUnsettled: boolean;
   /** 플러그인이 막 로드됨 — 원격에 쓰지 않는다. */
   coldHold: boolean;
 }
@@ -93,9 +99,12 @@ export interface Guards {
  * **이 규칙은 여기 한 곳에만 있다.** 볼트가 뒤처졌거나, 방금 로드됐거나, 이번 스캔에서
  * 처음 본 record라면 — 우리가 보고 있는 "없음"이 진짜 없음이 아니라 아직 안 내려온
  * 것일 수 있다. 그 상태로 지우면 다른 기기가 방금 만든 일정을 없앤다.
+ *
+ * `vaultUnsettled`가 v0.8.1에서 더해졌다. `holdWrites`만 보던 동안은 **뒤처짐 구간
+ * 사이의 2초 틈**과 **fail-open 상한 초과** 둘 다 삭제를 열어줬다 → Guards.vaultUnsettled.
  */
 export function destructiveAllowed(g: Guards): boolean {
-  return !g.holdWrites && !g.coldHold && !g.adopted;
+  return !g.holdWrites && !g.coldHold && !g.adopted && !g.vaultUnsettled;
 }
 
 /**
@@ -104,12 +113,12 @@ export function destructiveAllowed(g: Guards): boolean {
  * 충돌 해결은 한쪽 값을 버리는 일이고, 0.8.0부터 이기는 쪽이 노트다. 그래서 **노트가
  * 최신이라는 보장**이 없으면 해서는 안 된다 — 스테일한 노트가 원격을 덮는 바로 그 경로다.
  *
- * `holdWrites`가 아니라 `vaultBehindRaw`를 보는 것이 핵심이다. fail-open 상한은
+ * `holdWrites`가 아니라 `vaultUnsettled`를 보는 것이 핵심이다. fail-open 상한은
  * "충돌 아닌 변경까지 영영 막지는 말자"는 장치이지 충돌 판정을 열어주는 장치가 아니다.
  * 수동 실행(force)도 이 보류는 우회하지 않는다 — 완료 해제 보류와 같은 이유다.
  */
 export function conflictResolutionAllowed(g: Guards): boolean {
-  return !g.coldHold && !g.vaultBehindRaw;
+  return !g.coldHold && !g.vaultUnsettled;
 }
 
 export type SkipReason =
@@ -442,7 +451,7 @@ export class RunGuards {
       dupIds: Set<string>;
       adopted: Set<string>;
       holdWrites: boolean;
-      vaultBehindRaw: boolean;
+      vaultUnsettled: boolean;
       coldHold: boolean;
     }
   ) {}
@@ -452,7 +461,7 @@ export class RunGuards {
       duplicateId: this.ctx.dupIds.has(id),
       adopted: this.ctx.adopted.has(id),
       holdWrites: this.ctx.holdWrites,
-      vaultBehindRaw: this.ctx.vaultBehindRaw,
+      vaultUnsettled: this.ctx.vaultUnsettled,
       coldHold: this.ctx.coldHold,
     };
   }

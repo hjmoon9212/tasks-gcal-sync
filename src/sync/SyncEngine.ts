@@ -44,6 +44,7 @@ export type SkipKind =
   | "hold-unschedule" // 이벤트 삭제됨, 그러나 미일정화하기엔 이른 상태
   | "hold-conflict" // 값이 갈렸으나 볼트가 정착 전 → 충돌 해결 보류
   | "cold-start-create" // 콜드 스타트라 새 이벤트를 안 만듦
+  | "unsettled-create" // 볼트가 아직 정착 전이라 새 🆔·이벤트를 안 만듦
   | "ensure-id-failed" // 🆔 쓰기 실패(줄이 그 사이 바뀜 등)
   | "create-failed" // 이벤트 생성 실패
   | "reconcile-error"; // 조정 중 예외
@@ -63,6 +64,8 @@ const SKIP_TEXT: Record<SkipKind, string> = {
   "hold-conflict":
     "노트·GCal 값이 갈렸으나 볼트가 아직 정착 전 → 충돌 해결 보류(어느 쪽도 쓰지 않음)",
   "cold-start-create": "콜드 스타트 → 새 이벤트 생성 보류",
+  "unsettled-create":
+    "볼트가 아직 정착 전 → 새 🆔 발급·이벤트 생성 보류(노트에 쓰는 순간 편집·Sync와 겹친다)",
   "ensure-id-failed": "🆔를 노트에 쓰지 못함",
   "create-failed": "이벤트 생성 실패",
   "reconcile-error": "조정 중 예외",
@@ -134,6 +137,14 @@ const BEHIND_MAX_MS = 10 * 60_000;
  * 정착해도 다음 트리거(주기 5분)까지 아무 일도 안 일어난다.
  */
 const BEHIND_RECHECK_MS = 15_000;
+/**
+ * 뒤처짐이 풀린 뒤 "정착했다"로 인정하기까지 이어져야 하는 시간.
+ *
+ * **한 번의 표본은 정착이 아니다.** 2026-09-07 에 40분짜리 보류 구간 두 개 사이의 2초
+ * 틈에서 `vaultBehind()`가 false 를 돌려줬고, 그 틈에 (a) 새 🆔 를 노트에 써넣고
+ * (b) 40분 뒤 같은 틈에서 이벤트를 지웠다. 되돌리기 힘든 동작은 구간을 보고 결정한다.
+ */
+const SETTLE_MS = 30_000;
 
 export class SyncEngine {
   /** 플러그인 로드 시각. 콜드 스타트 판정 기준(인스턴스는 로드마다 새로 만들어진다). */
@@ -142,6 +153,11 @@ export class SyncEngine {
   private pullCycleDone = false;
   /** 볼트 뒤처짐 판정이 **연속으로** 참이기 시작한 시각. fail-open 상한의 기준. */
   private behindSince: number | null = null;
+  /**
+   * 뒤처짐 판정이 **연속으로** 거짓이기 시작한 시각. 정착(SETTLE_MS) 판정의 기준.
+   * 뒤처짐이 한 번이라도 관측되면 다시 null 이 된다 — 시계를 처음부터 다시 센다.
+   */
+  private settledSince: number | null = null;
 
   constructor(
     private app: App,
@@ -733,6 +749,20 @@ export class SyncEngine {
     return `"${s.title}"`;
   }
 
+  /**
+   * 되돌리기 위한 원문. 삭제·미일정화 기록에 붙인다.
+   *
+   * 로그의 존재 이유가 "되돌리기 힘든 일을 사후에 따라가는 것"인데, 정작 삭제 기록에
+   * **무엇이 지워졌는지가 없었다.** 2026-09-07 에 편집·Sync 경합으로 노트에서 줄이
+   * 사라졌을 때, 복구하려면 Obsidian 버전 기록을 뒤지는 수밖에 없었다. 이제 이 줄만
+   * 복사해 노트에 붙이면 된다.
+   */
+  private lastLineText(rec: SyncRecord): string {
+    if (!rec.lastLine) return "";
+    const where = rec.lastWhere ? ` @${rec.lastWhere}` : "";
+    return ` · 마지막으로 본 줄${where}: \`${rec.lastLine.trim()}\``;
+  }
+
   /** `due 2026-08-14→2026-08-16` 형태로 필드별 변화를 나열. */
   private diffText(
     before: { due: string; start?: string; time?: string; done: boolean; title: string },
@@ -1238,6 +1268,14 @@ export class SyncEngine {
     // 결론나고 **낡은 로컬 상태가 그대로 GCal로 올라갔다** — 보호 장치를 끄면서
     // 파괴 경로는 열어두는 구조였다. 읽지 못할 때는 쓰지도 않는다.
     const behind = this.vaultBehind();
+    // 정착 시계. 뒤처짐이 보이면 처음부터 다시 센다 — 조용한 순간이 아니라 **조용한
+    // 구간**이어야 되돌리기 힘든 동작을 연다. 아래 early return 보다 먼저 갱신해야
+    // 보류로 끝나는 run 도 시계를 리셋한다.
+    if (behind) this.settledSince = null;
+    else if (this.settledSince === null) this.settledSince = Date.now();
+    const settledFor =
+      this.settledSince === null ? 0 : Date.now() - this.settledSince;
+    const vaultUnsettled = settledFor < SETTLE_MS;
     const overBudget = behind && this.behindBudgetExceeded();
     if (behind && !overBudget && !opts.force) {
       console.log("[tasks-gcal-sync] 볼트 동기화 중 → 이번 run 보류");
@@ -1350,13 +1388,25 @@ export class SyncEngine {
 
     // ---- 1) 기존 record 양방향 조정 ----
     // 판단은 전부 reconcile.ts의 순수 함수가 한다. 여기서는 그 결정을 실행만 한다.
-    // vaultBehindRaw 는 fail-open 상한을 적용하기 **전** 값이다. 충돌 해결은 상한과
-    // 무관하게 볼트가 실제로 정착한 뒤에만 한다 → reconcile.conflictResolutionAllowed
+    // vaultUnsettled 는 fail-open 상한도 순간 표본도 보지 않는다 — 뒤처짐이 풀린 뒤
+    // SETTLE_MS 가 이어져야 참이 아니게 된다. 삭제·미일정화·충돌 해결·새 🆔 발급이
+    // 전부 이 값을 본다 → reconcile.destructiveAllowed / conflictResolutionAllowed
+    if (vaultUnsettled) {
+      console.log(
+        `[tasks-gcal-sync] 볼트 정착 대기(${Math.round(
+          settledFor / 1000
+        )}/${SETTLE_MS / 1000}초) → 삭제·충돌 해결·새 🆔 발급 보류`
+      );
+      result.retryAfterMs = Math.min(
+        result.retryAfterMs ?? SETTLE_MS - settledFor + 2_000,
+        SETTLE_MS - settledFor + 2_000
+      );
+    }
     const guards = new RunGuards({
       dupIds,
       adopted,
       holdWrites,
-      vaultBehindRaw: behind,
+      vaultUnsettled,
       coldHold,
     });
 
@@ -1366,6 +1416,13 @@ export class SyncEngine {
       const calData = pullByCal.get(rec.calendarId);
       const ev = calData?.byTaskId.get(id);
       const evCancelled = calData?.cancelledEventIds.has(rec.eventId) ?? false;
+
+      // 줄이 보이는 동안 원문을 보관해 둔다. 지우는 시점에는 이미 노트에 없어서
+      // "무엇을 지웠는지"를 로그에 남길 방법이 이것뿐이다.
+      if (task) {
+        rec.lastLine = task.raw;
+        rec.lastWhere = `${task.path}:${task.line + 1}`;
+      }
 
       try {
         const plan = decideReconcile({
@@ -1441,11 +1498,12 @@ export class SyncEngine {
               eventId: rec.eventId,
               where: logWhere,
               detail:
-                plan.reason === "task-gone"
+                (plan.reason === "task-gone"
                   ? `노트에서 task 줄이 사라짐 → 이벤트 삭제 (마지막 스냅샷 due=${rec.due}${
                       rec.time ? ` ${rec.time}` : ""
                     })`
-                  : `task는 있으나 📅가 없음 → 이벤트 삭제 (마지막 스냅샷 due=${rec.due})`,
+                  : `task는 있으나 📅가 없음 → 이벤트 삭제 (마지막 스냅샷 due=${rec.due})`) +
+                this.lastLineText(rec),
             });
             break;
           case "drop-record":
@@ -1576,6 +1634,21 @@ export class SyncEngine {
 
       // 콜드 스타트에는 새 이벤트를 만들지 않는다. 노트가 아직 안 내려왔을 뿐인데
       // 만들면 다른 기기가 이미 만든 것과 겹치거나, 곧 사라질 task의 이벤트가 남는다.
+      // 새 🆔 발급은 **노트에 쓰는** 동작이다. 볼트가 정착하기 전에 쓰면 사용자의 편집·
+      // Sync 와 같은 파일을 두고 겹친다 — 2026-09-07 에 그 틈에서 쓴 🆔 가 그대로
+      // 유실로 이어졌다. 이벤트만 만들고 🆔 를 못 쓰면 다음 run 이 또 만든다(중복).
+      if (vaultUnsettled) {
+        this.skip(result, "unsettled-create");
+        result.entries.push({
+          action: "HOLD",
+          id: t.id,
+          title: this.titleBase(t),
+          calendar: target.name || target.id,
+          where: `${t.path}:${t.line + 1}`,
+          detail: SKIP_TEXT["unsettled-create"],
+        });
+        continue;
+      }
       if (coldHold) {
         this.skip(result, "cold-start-create");
         result.entries.push({

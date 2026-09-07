@@ -77,6 +77,7 @@ const task = (id: string, checked: boolean, due = TODAY) => ({
   id,
   checked,
   due,
+  raw: `- [${checked ? "x" : " "}] #task 샘플 📅 ${due} 🆔 ${id}`,
   start: undefined,
   title: "샘플",
   tags: ["#task"],
@@ -170,9 +171,10 @@ function harness(opts: {
     writer,
     async () => {}
   );
-  // 기본은 "콜드 스타트 지난 상태" — 콜드 스타트 자체는 따로 테스트한다.
+  // 기본은 "콜드 스타트 지난 + 볼트가 정착한 상태" — 각각은 따로 테스트한다.
   (engine as any).loadedAt = Date.now() - 10 * 60_000;
   (engine as any).pullCycleDone = true;
+  (engine as any).settledSince = Date.now() - 10 * 60_000;
   return { engine, calls, state, settings, client };
 }
 
@@ -821,6 +823,72 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     });
     const r = await h.engine.run();
     eq(r.entries, [], "아무 일도 없으면 기록도 없다");
+  }
+
+  /*
+   * ── 정착 전에는 지우지 않는다 · 지웠으면 원문을 남긴다 (v0.8.1) ──────────────
+   *
+   * 2026-09-07 실제 사건: 갤탭에서 task 추가 → Windows 로 Sync → 사용자가 다른 md 로
+   * 잘라내기·붙여넣기 → 편집이 Sync 경합으로 되돌아가 노트에서 줄이 사라짐 →
+   * 플러그인이 그 상태를 정확히 읽고 이벤트를 지웠다. 로그에 남은 건 `마지막 스냅샷
+   * due=…` 뿐이라 복구하려면 Obsidian 버전 기록을 뒤져야 했다.
+   *
+   * 삭제가 통과한 지점은 **40분짜리 보류 구간 두 개 사이의 2초 틈**이었다.
+   */
+  {
+    // (a) 볼트가 막 정착하기 시작했으면(=순간 틈) 줄이 사라져도 지우지 않는다
+    const h = harness({
+      tasks: [],
+      events: [doneEvent("A1", false, "100")],
+      records: { A1: rec({ lastLine: "- [ ] #task 음산협 계약서 변경건 확인 📅 2026-09-07 🆔 A1", lastWhere: "note.md:45" }) },
+    });
+    (h.engine as any).settledSince = Date.now() - 1_000; // 1초 전에야 조용해졌다
+    const r = await h.engine.run();
+    eq(h.calls.del, [], "정착 전이면 줄이 사라져도 이벤트를 지우지 않는다 ★");
+    eq(!!h.state.records.A1, true, "record 도 유지된다");
+    eq(r.skips["hold-task-gone"], 1, "보류 사유가 집계된다");
+    eq((r.retryAfterMs ?? 0) > 0, true, "정착되면 다시 보도록 후속 run 을 예약한다");
+  }
+  {
+    // (b) 정착한 뒤에는 정상적으로 지우고, **무엇을 지웠는지 원문을 남긴다**
+    const LINE = "- [ ] #task 음산협 계약서 변경건 확인 📅 2026-09-07 🆔 A1";
+    const h = harness({
+      tasks: [],
+      events: [doneEvent("A1", false, "100")],
+      records: { A1: rec({ lastLine: LINE, lastWhere: "note.md:45" }) },
+    });
+    const r = await h.engine.run();
+    eq(h.calls.del, ["ev-A1"], "정착 후에는 지운다");
+    const del = r.entries.find((e) => e.action === "DELETE")!;
+    eq(del.detail!.includes(LINE), true, "삭제 기록에 원문 줄이 그대로 남는다 ★★");
+    eq(del.detail!.includes("note.md:45"), true, "어느 노트 몇 번째 줄이었는지도 남는다");
+  }
+  {
+    // (c) 줄이 보이는 동안 원문을 계속 보관한다 — 사라진 뒤에는 읽을 방법이 없다.
+    const h = harness({
+      tasks: [task("A1", false)],
+      events: [doneEvent("A1", false, "100")],
+      records: { A1: rec({ gcalUpdated: "100" }) },
+    });
+    await h.engine.run();
+    eq(
+      h.state.records.A1.lastLine,
+      "- [ ] #task 샘플 📅 2026-08-06 🆔 A1",
+      "마지막으로 본 줄 원문을 record 에 보관한다"
+    );
+    eq(h.state.records.A1.lastWhere, "note.md:1", "위치도 함께 보관한다");
+  }
+  {
+    // (d) 새 🆔 발급도 정착 뒤에만 — 노트에 쓰는 동작이라 편집·Sync 와 겹친다.
+    const h = harness({
+      tasks: [{ ...task("", false, todayStr()), id: "" }],
+      events: [],
+      records: {},
+    });
+    (h.engine as any).settledSince = Date.now() - 1_000;
+    const r = await h.engine.run();
+    eq(h.calls.insert, [], "정착 전에는 새 이벤트를 만들지 않는다");
+    eq(r.skips["unsettled-create"], 1, "보류 사유가 집계된다");
   }
 
   /*
