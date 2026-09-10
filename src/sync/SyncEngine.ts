@@ -2,7 +2,11 @@ import { App, Notice } from "obsidian";
 import { PluginSettings, resolveCalendar } from "../settings/Settings";
 import { PersistedState, SyncRecord } from "./StateStore";
 import { TaskRepository, VaultTask } from "../data/TaskRepository";
-import { CalendarClient, GCalEvent } from "../gcal/CalendarClient";
+import {
+  CalendarClient,
+  GCalEvent,
+  PreconditionFailedError,
+} from "../gcal/CalendarClient";
 import { TaskWriter } from "../write/TaskWriter";
 import { SyncLogEntry } from "./SyncLog";
 import {
@@ -47,6 +51,8 @@ export type SkipKind =
   | "unsettled-create" // 볼트가 아직 정착 전이라 새 🆔·이벤트를 안 만듦
   | "ensure-id-failed" // 🆔 쓰기 실패(줄이 그 사이 바뀜 등)
   | "create-failed" // 이벤트 생성 실패
+  | "pull-failed" // 그 캘린더를 읽지 못함 → 읽지 못한 곳에는 쓰지 않는다
+  | "push-precondition" // If-Match 412 — pull 이후 원격이 또 바뀌었다
   | "reconcile-error"; // 조정 중 예외
 
 export interface SyncFailure {
@@ -68,6 +74,10 @@ const SKIP_TEXT: Record<SkipKind, string> = {
     "볼트가 아직 정착 전 → 새 🆔 발급·이벤트 생성 보류(노트에 쓰는 순간 편집·Sync와 겹친다)",
   "ensure-id-failed": "🆔를 노트에 쓰지 못함",
   "create-failed": "이벤트 생성 실패",
+  "pull-failed":
+    "캘린더를 읽지 못함 → 그 캘린더의 record는 손대지 않음(읽지 못할 때는 쓰지도 않는다)",
+  "push-precondition":
+    "pull 이후 GCal이 또 바뀜 → push 포기(다음 run이 새 상태로 다시 판정한다)",
   "reconcile-error": "조정 중 예외",
 };
 
@@ -399,7 +409,8 @@ export class SyncEngine {
     return this.client.patchEvent(
       rec.calendarId,
       rec.eventId,
-      this.presentationPatch(id, task, ev)
+      this.presentationPatch(id, task, ev),
+      ev?.etag // 조건부: pull 이후 또 바뀌었으면 덮지 않고 412
     );
   }
 
@@ -492,7 +503,9 @@ export class SyncEngine {
     // 설명 병합은 현재 이벤트를 알아야 하므로 getEvent 뒤에 만든다.
     const patch = this.presentationPatch(id, t, cur);
     if (dates) Object.assign(patch, this.exclusiveDates(dates));
-    return this.client.patchEvent(rec.calendarId, rec.eventId, patch);
+    // 조건부 수정: 우리가 마지막으로 **읽은** 버전(getEvent를 탔으면 그쪽이 더 최신) 기준.
+    // 그 사이 사람이 캘린더에서 고쳤으면 덮지 않고 412 → 이번 push 포기.
+    return this.client.patchEvent(rec.calendarId, rec.eventId, patch, cur?.etag);
   }
 
   /**
@@ -945,6 +958,7 @@ export class SyncEngine {
       done: t.checked,
       title: this.titleBase(t),
       hasStart: !!t.start,
+      multiDay: this.isMultiDay(t),
     };
   }
 
@@ -958,6 +972,28 @@ export class SyncEngine {
       start: due ? this.eventStartDate(ev) ?? due : undefined,
       time: this.eventTimeRange(ev),
       title: this.gcalTitleBase(ev),
+      stamp: this.eventStamp(ev),
+    };
+  }
+
+  /**
+   * 이벤트에 심긴 마지막 push 스냅샷(`tgs*`). **원격 변경이 사람의 GCal 편집인지
+   * 메아리인지 가르는 유일한 근거**다 → RemoteView.stamp
+   *
+   * `tgsDue`가 없으면(우리가 올린 적 없는/아주 옛 이벤트) 통째로 undefined —
+   * **판정 불가는 "사람이 편집했다"가 아니다.** 없는 키를 빈 문자열로 메우면 현재 값과
+   * 무조건 달라 보여서 모든 메아리가 사람 편집으로 승격된다.
+   */
+  private eventStamp(ev: GCalEvent): RemoteView["stamp"] {
+    const p = ev.extendedProperties?.private;
+    if (!p?.tgsDue) return undefined;
+    return {
+      due: p.tgsDue,
+      start: p.tgsStart ?? p.tgsDue,
+      // 옛 이벤트는 이 키가 없다. "" 로 메우면 시각이 지정된 이벤트가 전부 사람 편집으로
+      // 읽히므로 그대로 undefined 로 둬서 시각만 판정 불가로 남긴다.
+      time: p.tgsTime,
+      title: p.tgsTitle,
     };
   }
 
@@ -1031,7 +1067,17 @@ export class SyncEngine {
     }
     if (plan.conflicts.length) {
       console.warn(
-        `[tasks-gcal-sync] 충돌 → 노트 채택 (${plan.conflicts.join(", ")}):`,
+        `[tasks-gcal-sync] 충돌 → 노트 채택, GCal은 메아리 (${plan.conflicts.join(
+          ", "
+        )}):`,
+        where
+      );
+    }
+    if (plan.gcalWins.length) {
+      console.warn(
+        `[tasks-gcal-sync] 충돌 → GCal 채택, 사람이 캘린더에서 편집함 (${plan.gcalWins.join(
+          ", "
+        )}):`,
         where
       );
     }
@@ -1061,7 +1107,9 @@ export class SyncEngine {
 
     let pushed = false;
     let pushKind: "move" | "update" | "presentation" | null = null;
+    let precondFailed = false;
     if ((plan.pushNeeded || normalizeNeeded) && canWriteRemote) {
+      try {
       // done을 보류 중이면 완료 상태만 기존 값으로 고정해서 올린다 —
       // 안 그러면 날짜/제목 push에 미완료가 딸려가 보류가 무의미해진다.
       const pushTask = plan.holdDone ? { ...task, checked: rec.done } : task;
@@ -1112,6 +1160,26 @@ export class SyncEngine {
         console.warn(`[tasks-gcal-sync] 완료 해제를 GCal에 반영: ${id} ${where}`);
       }
       pushed = true;
+      } catch (e) {
+        // **412 는 실패가 아니라 정보다.** pull 이후 사람이 캘린더를 또 고쳤다는 뜻이고,
+        // 지금 우리가 든 값은 그 변경을 못 본 값이다. 덮지 않고 물러난다 — 스냅샷도
+        // `rec.gcalUpdated` 도 그대로라 다음 run 이 새 상태로 처음부터 다시 판정한다.
+        if (!(e instanceof PreconditionFailedError)) throw e;
+        precondFailed = true;
+        console.warn(
+          `[tasks-gcal-sync] push 포기(412, pull 이후 GCal이 또 바뀜): ${id} ${where}`
+        );
+        this.skip(c.result, "push-precondition");
+        c.result.entries.push({
+          action: "SKIP",
+          id,
+          title: rec.title,
+          calendar: this.calName(rec.calendarId),
+          eventId: rec.eventId,
+          where,
+          detail: SKIP_TEXT["push-precondition"],
+        });
+      }
     } else if (plan.gcalChanged) {
       // push하지 않았으면 GCal의 현재 updated가 다음 비교 기준.
       rec.gcalUpdated = c.ev!.updated;
@@ -1143,6 +1211,7 @@ export class SyncEngine {
       applied,
       pushKind,
       blockedByCold: (plan.pushNeeded || normalizeNeeded) && !canWriteRemote,
+      precondFailed,
       result: c.result,
       where,
     });
@@ -1165,26 +1234,36 @@ export class SyncEngine {
     applied: Field[];
     pushKind: "move" | "update" | "presentation" | null;
     blockedByCold: boolean;
+    /** If-Match 412 로 push 를 포기했는가(0.9.0~). */
+    precondFailed: boolean;
     result: SyncResult;
     where: string;
   }): void {
     const { plan, before, applied, pushKind } = c;
     const parts: string[] = [];
 
-    // 1) 충돌 — 같은 필드를 양쪽에서 **다른 값으로** 바꾼 것. 노트가 이기고 GCal 값은
-    //    버려진다. 한쪽 변경이 조용히 사라지는 유일한 경로라 폐기된 값까지 적는다.
-    //    (양쪽이 같은 값이면 애초에 충돌이 아니므로 여기 오지 않는다 → reconcile.ts)
+    // 1) 충돌 — 같은 필드를 양쪽에서 **다른 값으로** 바꾼 것. 한쪽 변경이 조용히 사라지는
+    //    유일한 경로라 폐기된 값까지 적는다. 어느 쪽이 이기는지는 원격 변경이 **사람의 GCal
+    //    편집**이었는지 **메아리**였는지로 갈린다 → reconcile.ts § 충돌 판정
+    //    (양쪽이 같은 값이면 애초에 충돌이 아니므로 여기 오지 않는다)
+    const conflictText = (f: Field) =>
+      `${f}(노트 ${this.fieldText(before, f)}→${this.fieldText(
+        plan.local,
+        f
+      )} / GCal ${this.fieldText(before, f)}→${this.fieldText(plan.remote, f)})`;
     if (plan.conflicts.length) {
-      const each = plan.conflicts
-        .map(
-          (f) =>
-            `${f}(노트 ${this.fieldText(before, f)}→${this.fieldText(
-              plan.local,
-              f
-            )} / GCal ${this.fieldText(before, f)}→${this.fieldText(plan.remote, f)})`
-        )
-        .join(", ");
-      parts.push(`⚔️ 충돌 ${each} → 노트 채택, GCal 변경 폐기`);
+      parts.push(
+        `⚔️ 충돌 ${plan.conflicts
+          .map(conflictText)
+          .join(", ")} → 노트 채택(GCal 변경은 메아리), GCal 변경 폐기`
+      );
+    }
+    if (plan.gcalWins.length) {
+      parts.push(
+        `⚔️ 충돌 ${plan.gcalWins
+          .map(conflictText)
+          .join(", ")} → GCal 채택(사람이 캘린더에서 편집), 노트 변경 폐기`
+      );
     }
 
     // 2) GCal → 노트로 실제로 쓴 것 / 쓰려다 실패한 것
@@ -1226,6 +1305,17 @@ export class SyncEngine {
     }
     if (c.blockedByCold) {
       parts.push("⏸ 콜드 스타트 → GCal 쓰기 보류(다음 run에 올라감)");
+    }
+    if (plan.timeIgnoredMultiDay) {
+      parts.push(
+        "⚠ GCal이 시각을 지정했으나 여러 날에 걸친 task 라 받지 않음 " +
+          "(🛫<📅 구간은 종일로만 표현된다 — 🛫를 떼면 시각을 쓸 수 있다)"
+      );
+    }
+    if (c.precondFailed) {
+      parts.push(
+        "⏸ pull 이후 GCal이 또 바뀜 → push 포기(덮지 않는다. 다음 run이 새 상태로 재판정)"
+      );
     }
 
     if (!parts.length) return; // 실제로 한 일이 없으면 남기지 않는다
@@ -1364,6 +1454,14 @@ export class SyncEngine {
 
     // ---- PULL: 우리가 record를 가진 캘린더들의 변경분 가져오기 ----
     const pullByCal = new Map<string, CalPull>();
+    /**
+     * 이번 run 에 **읽지 못한** 캘린더. 그 캘린더의 record 는 아래에서 통째로 건너뛴다.
+     *
+     * ⛔ **"이벤트가 안 왔다"를 근거로 삼으면 안 된다** — 증분 pull 은 변경된 이벤트만
+     * 주므로 안 바뀐 이벤트는 원래 응답에 없다. 근거가 될 수 있는 것은 오직
+     * **"이 캘린더를 읽는 데 실패했다"** 뿐이다.
+     */
+    const pullFailedCals = new Set<string>();
     let pullOk = doPull;
     if (doPull) {
       const calIds = new Set<string>();
@@ -1377,10 +1475,11 @@ export class SyncEngine {
           result.entries.push({
             action: "FAIL",
             calendar: this.calName(cal),
-            detail: `캘린더를 읽지 못함 → 이번 run은 이 캘린더의 GCal 변경을 반영하지 못함: ${
+            detail: `캘린더를 읽지 못함 → 이 캘린더의 record 는 이번 run 에서 손대지 않는다: ${
               e instanceof Error ? e.message : String(e)
             }`,
           });
+          pullFailedCals.add(cal);
           pullOk = false; // 한 캘린더라도 못 읽었으면 콜드 스타트 잠금을 풀지 않는다
         }
       }
@@ -1412,6 +1511,28 @@ export class SyncEngine {
 
     for (const id of Object.keys(records)) {
       const rec = records[id];
+
+      // **읽지 못한 캘린더에는 쓰지 않는다.** pull 이 실패하면 그 캘린더의 이벤트는
+      // `remote = undefined` 로 들어와 `gcalChanged = false` 가 되고, 그러면 노트 변경만
+      // 참이라 **원격을 못 본 채로 push 가 나간다** — 그 사이 사람이 GCal 에서 고쳐 뒀다면
+      // 그대로 덮인다. `vaultBehind` 에만 걸어 두었던 *"읽지 못할 때는 쓰지도 않는다"* 를
+      // 캘린더 단위에도 적용한다. 다음 run 이 같은 상태를 다시 본다(스냅샷 무변경).
+      if (pullFailedCals.has(rec.calendarId)) {
+        this.skip(result, "pull-failed");
+        result.entries.push({
+          action: "SKIP",
+          id,
+          title: rec.title,
+          calendar: this.calName(rec.calendarId),
+          eventId: rec.eventId,
+          where: tasksById.get(id)
+            ? `${tasksById.get(id)!.path}:${tasksById.get(id)!.line + 1}`
+            : undefined,
+          detail: SKIP_TEXT["pull-failed"],
+        });
+        continue;
+      }
+
       const task = tasksById.get(id);
       const calData = pullByCal.get(rec.calendarId);
       const ev = calData?.byTaskId.get(id);
@@ -1520,7 +1641,7 @@ export class SyncEngine {
             });
             break;
           case "unschedule":
-            await this.writer.removeDue(task!);
+            await this.writer.unschedule(task!);
             delete records[id];
             result.pulled++;
             result.entries.push({
@@ -1530,7 +1651,7 @@ export class SyncEngine {
               calendar: this.calName(rec.calendarId),
               eventId: rec.eventId,
               where: logWhere,
-              detail: `GCal에서 이벤트가 삭제됨 → 노트의 📅 ${rec.due} 제거(미일정화)`,
+              detail: `GCal에서 이벤트가 삭제됨 → 노트의 📅 ${rec.due} · 🆔 ${id} 제거(미일정화)`,
             });
             break;
         }

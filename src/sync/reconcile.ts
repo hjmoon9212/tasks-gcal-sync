@@ -17,13 +17,19 @@
  * ✅를 쓰는 것(반복이면 다음 회차 줄 생성)이라 파괴적이었다. 그래서 완료는 노트 → 이벤트
  * 한 방향으로만 흐른다. 이벤트의 색·☑️는 표시일 뿐 판정에 쓰지 않는다.
  *
- * 충돌 판정(0.8.0~): 같은 필드가 양쪽에서 바뀌었을 때
+ * 충돌 판정(0.9.0~): 같은 필드가 양쪽에서 바뀌었을 때
  *  - **값이 같으면 충돌이 아니다** — 기준선만 뒤처진 것이라 기준선만 앞당긴다.
- *  - 값이 갈렸으면 **노트가 이긴다.** 사용자의 "캘린더 드래그"는 gcal-calendar-view
- *    위젯에서 일어나고 그건 노트 쓰기다 — GCal 쪽 변경은 대개 다른 기기가 옛 노트 값을
- *    밀어올린 메아리라, GCal을 채택하면 구조적으로 낡은 값을 고른다.
+ *  - 값이 갈렸으면 **누가 원격을 바꿨는지**로 갈린다(RemoteView.stamp):
+ *      · 사람이 GCal에서 편집 → **GCal이 이긴다.** GCal이 통합 관리 면이고 거기서 하는
+ *        조작(날짜·시각·제목·삭제)은 1급 입력이다.
+ *      · 어느 기기가 노트 값을 올린 **메아리** → 충돌이 아니다. 노트를 채택해 올린다.
+ *    0.8.0은 이 둘을 구분하지 못해 **무조건 노트**였다. 구분 없이 GCal을 채택하면
+ *    메아리가 노트의 최신 편집을 덮는다 — 2026-09-07 실측 "충돌" 127건 중 122건이 그것.
  *  - 단 **볼트가 정착하기 전에는 그 판정을 미룬다**(conflictResolutionAllowed).
- *    이 셋이 하나라도 빠지면 스테일한 노트가 원격을 덮는다.
+ *    이 셋이 하나라도 빠지면 한쪽 편집이 조용히 사라진다.
+ *
+ * 날짜 둘(📅·🛫)은 **한 구간**이라 항상 함께 판정한다. 한쪽만 상대 값을 채택하면
+ * 아무도 정한 적 없는 구간이 만들어진다(하루짜리 task가 여러 날 span이 되는 식).
  */
 import { SyncRecord } from "./StateStore";
 
@@ -46,6 +52,16 @@ export interface Snapshot {
 export interface LocalView extends Snapshot {
   /** 🛫가 실제로 줄에 있는가. 단일일로 바뀌었을 때 제거할지 판단한다. */
   hasStart: boolean;
+  /**
+   * 🛫 < 📅 로 **여러 날에 걸치는가.** 그러면 시각을 표현할 수 없다 — GCal의 시간지정
+   * 이벤트는 "첫날 시작시각 → 마지막날 종료시각" 한 덩어리라 3일 span에 09:00-11:00을
+   * 주면 50시간짜리 통짜 블록이 된다(v0.6.6) → SyncEngine.taskTime
+   *
+   * push 쪽은 `taskTime()`이 이미 ""로 막지만 **pull 쪽에 관문이 없었다.** 그래서 GCal에서
+   * 여러 날 이벤트에 시각을 주면 노트에 ⏰가 써지고 다음 push가 곧바로 종일로 되돌렸다 —
+   * 사용자에게는 "GCal에서 준 시각이 그냥 사라진다"로 보인다. 여기서 아예 안 받는다.
+   */
+  multiDay: boolean;
 }
 
 /** 이벤트에서 뽑은 원격 값. 이번 run의 pull에 이벤트가 안 왔으면 undefined. */
@@ -61,6 +77,18 @@ export interface RemoteView {
    * 근거로 노트의 ⏰ 를 지운다.
    */
   time?: string;
+  /**
+   * 이벤트에 심긴 **마지막 push 스냅샷**(`tgs*` extendedProperties).
+   *
+   * 위의 값들과 대조하면 원격 변경이 **사람이 GCal에서 한 편집**인지 **어느 기기가 노트
+   * 값을 올린 메아리**인지 갈린다 — `updated`만으로는 그 둘이 똑같아 보인다.
+   * GCal PATCH는 키 단위 병합이고 우리는 값과 스탬프를 **항상 함께** 보내므로, 우리
+   * push 뒤에는 둘이 반드시 일치한다. 사람이 캘린더에서 드래그하면 이벤트 필드만 바뀌고
+   * `extendedProperties`는 그대로 남는다.
+   *
+   * 스탬프가 없는 옛 이벤트는 **판정 불가**라 undefined — 그때는 사람 편집으로 치지 않는다.
+   */
+  stamp?: { due?: string; start?: string; time?: string; title?: string };
 }
 
 export type TaskState =
@@ -143,8 +171,16 @@ export interface MergePlan {
   pull: PullOps;
   /** GCal이 이긴 필드. */
   pulledFields: Field[];
-  /** 같은 필드가 양쪽에서 **다른 값으로** 바뀌어 노트를 채택한 것(GCal 값은 버려진다). */
+  /**
+   * 양쪽에서 다른 값으로 바뀌었으나 원격 변경이 **메아리**여서 노트를 채택한 것
+   * (버려진 GCal 값은 `remote` 에 남는다).
+   */
   conflicts: Field[];
+  /**
+   * 양쪽에서 다른 값으로 바뀌었고 원격이 **사람의 GCal 편집**이라 GCal을 채택한 것
+   * (버려진 노트 값은 `local` 에 남는다). 0.9.0~.
+   */
+  gcalWins: Field[];
   /**
    * 양쪽 다 바뀌었지만 **값이 같아** 충돌이 아니었던 필드. 기준선만 앞당긴다.
    * 로그에는 남기지 않는다 — 실제로 달라진 게 없다.
@@ -170,6 +206,11 @@ export interface MergePlan {
   uncheckSeen: "set" | "clear" | undefined;
   /** 우리 push가 아닌 외부 수정이 감지됐는가. */
   gcalChanged: boolean;
+  /**
+   * GCal이 시각을 줬는데 **여러 날 span 이라 받지 않았다**(0.9.0~). 조용히 버리면
+   * "GCal에서 준 시각이 사라진다"로 보이므로 로그에 이유를 남긴다 → LocalView.multiDay
+   */
+  timeIgnoredMultiDay: boolean;
   /** 병합 결과(스냅샷 후보). pull이 실패한 필드는 호출부가 local 값으로 되돌린다. */
   merged: Snapshot;
   /** 노트 현재값 — pull 실패 시 폴백. */
@@ -284,8 +325,37 @@ function mergePlan(i: DecideInput, local: LocalView): ReconcilePlan {
     start: gcalChanged && datesOk && remote!.start !== recStart,
     // 시각은 날짜와 별개로 판정한다: GCal에서 드래그로 시간만 바꾸는 게 가장 흔한 조작이고,
     // 그때 due/start 는 그대로다. remote.time 이 undefined 면 읽지 못한 것이므로 손대지 않는다.
-    time: gcalChanged && remote!.time !== undefined && remote!.time !== recTime,
+    // 여러 날 span 이면 시각을 **표현할 수 없으므로** 받지도 않는다 → LocalView.multiDay
+    time:
+      gcalChanged &&
+      !local.multiDay &&
+      remote!.time !== undefined &&
+      remote!.time !== recTime,
     title: gcalChanged && !!remote!.title && remote!.title !== rec.title,
+  };
+
+  // ── 그 원격 변경을 **사람이 GCal에서** 했는가 ──
+  // 이벤트의 현재 값 vs 그 이벤트에 심긴 마지막 push 스냅샷(tgs*). 다르면 플러그인 밖에서
+  // 바뀐 것 = 사람의 편집이고, 같으면 어느 기기가 올린 그대로 = 메아리다 → RemoteView.stamp
+  //
+  // **충돌 판정에만 쓴다.** gc[f](일반 pull)는 손대지 않는다 — 메아리라도 이 기기의 노트가
+  // 아직 옛 값이면 받아 두는 게 맞고(Obsidian Sync보다 빠르다), 스탬프가 없는 옛 이벤트의
+  // 동기화를 조용히 멈춰서도 안 된다.
+  const st = remote?.stamp;
+  const byHuman = (f: "due" | "start" | "time" | "title"): boolean => {
+    if (!st) return false; // 스탬프 없음 = 판정 불가 → 사람 편집으로 치지 않는다
+    const was = st[f];
+    const now = remote![f];
+    return was !== undefined && now !== undefined && now !== was;
+  };
+  // 날짜 둘은 한 구간이라 **하나로 묶어 판정한다.** 한쪽만 사람이 옮겼어도 그 구간 전체가
+  // 사람의 것이다 — 나눠 판정하면 아무도 정한 적 없는 구간이 만들어진다.
+  const humanDates = byHuman("due") || byHuman("start");
+  const humanEdited = {
+    due: humanDates,
+    start: humanDates,
+    time: byHuman("time"),
+    title: byHuman("title"),
   };
 
   // 양쪽 스냅샷을 같은 모양으로 만들어 둔다 — 아래 분류도, 로그도 이 둘만 본다.
@@ -310,13 +380,15 @@ function mergePlan(i: DecideInput, local: LocalView): ReconcilePlan {
   //    기준선만 앞당기면 된다. 이 검사가 없으면 며칠 꺼둔 기기를 켤 때마다 무더기로
   //    "충돌 → 변경 폐기"가 찍힌다 — 2026-09-07 실측에서 충돌 127건 중 122건이 이것이었다.
   //    로그가 오염되는 것만 문제가 아니다: 같은 값을 노트에 다시 써서 modify → 자동 push가 돈다.
-  // 2) 값이 갈렸으면 **노트가 이긴다**(0.8.0~). 이 볼트에서 사용자가 하는 "캘린더 드래그"는
-  //    gcal-calendar-view 위젯에서 일어나고 그건 노트 쓰기다. 즉 "GCal이 바뀌었다"는 대개
-  //    다른 기기가 옛 노트 값을 밀어올린 메아리라, GCal을 채택하면 구조적으로 낡은 값을 고른다.
-  //    (실측된 진짜 충돌 5건이 전부 "노트가 미룬 날짜 → GCal이 당긴 날짜"였다)
-  // 3) 단 **볼트가 정착하기 전에는 그 판정 자체를 미룬다.** 노트 우선은 스테일한 노트가
-  //    원격을 덮는 경로를 열기 때문이다 → conflictResolutionAllowed
+  // 2) 값이 갈렸으면 **누가 원격을 바꿨는지**로 갈린다(0.9.0~).
+  //    · 사람이 GCal에서 편집했다 → **GCal이 이긴다.** GCal이 통합 관리 면이라 거기서 하는
+  //      날짜·시각·제목 변경은 1급 입력이다. pull하고 obs[f]를 꺼서 노트 값을 안 올린다.
+  //    · 메아리(어느 기기가 노트 값을 올린 것)다 → **노트를 채택한다.** 이건 충돌이 아니라
+  //      기준선이 뒤처져 충돌처럼 보이는 것뿐이고, GCal을 채택하면 구조적으로 낡은 값을 고른다.
+  // 3) 단 **볼트가 정착하기 전에는 그 판정 자체를 미룬다.** 어느 쪽이 이기든 한쪽 값을
+  //    버리는 일이라, 노트가 최신이라는 보장이 없으면 해서는 안 된다 → conflictResolutionAllowed
   const conflicts: Field[] = [];
+  const gcalWins: Field[] = [];
   const agreed: Field[] = [];
   const heldConflicts: Field[] = [];
   for (const f of ["due", "start", "time", "title"] as const) {
@@ -331,16 +403,29 @@ function mergePlan(i: DecideInput, local: LocalView): ReconcilePlan {
       heldConflicts.push(f);
       continue;
     }
-    // 노트 채택 → pull하지 않는다. obs[f]는 그대로 남아 push로 올라간다.
-    conflicts.push(f);
-    gc[f] = false;
+    if (humanEdited[f]) {
+      // GCal 채택 → pull한다. obs[f]를 꺼서 노트 값이 push로 올라가지 않게 한다.
+      gcalWins.push(f);
+      obs[f] = false;
+    } else {
+      // 메아리 → 노트 채택. pull하지 않고, obs[f]는 그대로 남아 push로 올라간다.
+      conflicts.push(f);
+      gc[f] = false;
+    }
   }
 
-  // 날짜 둘(📅 due·🛫 start)은 **하나의 구간**을 나타낸다. 한쪽이 충돌로 노트를 채택했는데
-  // 다른 쪽만 GCal에서 끌어오면 노트가 정한 적 없는 구간이 만들어진다 — 하루짜리 task를
-  // 노트에서 미뤘고 GCal에서 다른 날로 옮긴 흔한 경우가 곧바로 "🛫가 붙은 여러 날 span"이
-  // 된다. 날짜가 걸린 충돌에서는 두 값을 함께 노트 것으로 둔다.
-  if (conflicts.includes("due") || conflicts.includes("start")) {
+  // 날짜 둘(📅 due·🛫 start)은 **하나의 구간**을 나타낸다. 한쪽만 상대 값을 채택하면
+  // 아무도 정한 적 없는 구간이 만들어진다 — 하루짜리 task가 "🛫가 붙은 여러 날 span"이
+  // 되는 식이다. 그래서 구간을 통째로 한쪽 것으로 맞춘다.
+  if (gcalWins.includes("due") || gcalWins.includes("start")) {
+    // 구간 전체를 GCal 것으로. 원격이 기준선과 같아 gc가 꺼져 있던 쪽도, 노트와 다르면
+    // 끌어와야 구간이 맞는다. 노트 쪽 날짜는 어느 것도 올리지 않는다.
+    gc.due = remoteSnap.due !== localSnap.due;
+    gc.start = remoteSnap.start !== localSnap.start;
+    obs.due = false;
+    obs.start = false;
+  } else if (conflicts.includes("due") || conflicts.includes("start")) {
+    // 구간 전체를 노트 것으로.
     gc.due = false;
     gc.start = false;
   }
@@ -428,6 +513,7 @@ function mergePlan(i: DecideInput, local: LocalView): ReconcilePlan {
     pull,
     pulledFields,
     conflicts,
+    gcalWins,
     agreed,
     remote: remoteSnap,
     pushNeeded,
@@ -439,6 +525,11 @@ function mergePlan(i: DecideInput, local: LocalView): ReconcilePlan {
     retryAfterMs,
     uncheckSeen,
     gcalChanged,
+    timeIgnoredMultiDay:
+      gcalChanged &&
+      local.multiDay &&
+      remote?.time !== undefined &&
+      remote.time !== recTime,
     merged,
     local: localSnap,
   };

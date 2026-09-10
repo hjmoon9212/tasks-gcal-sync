@@ -74,8 +74,17 @@ export class TaskWriter {
     return this.apply(task, (raw) => TaskLine.setDue(raw, date));
   }
 
-  removeDue(task: VaultTask): Promise<string> {
-    return this.apply(task, (raw) => TaskLine.removeDue(raw));
+  /**
+   * 미일정화 — 📅 와 🆔 를 **함께** 뗀다(0.9.0~).
+   *
+   * GCal에서 이벤트가 지워졌으면 매핑(record)도 함께 폐기되므로, 줄에 남은 🆔 는 아무것도
+   * 가리키지 않는 찌꺼기가 된다. 날짜를 다시 주면 그때 새로 발급된다 — 생성 루프의 첫
+   * 관문이 `isValidDate(t.due)` 라 due 없는 줄에는 🆔 가 나가지 않는다.
+   *
+   * **한 번의 `apply` 로 처리한다** — 두 번 쓰면 드리프트 검사도 `modify` 이벤트도 두 번이다.
+   */
+  unschedule(task: VaultTask): Promise<string> {
+    return this.apply(task, (raw) => TaskLine.removeId(TaskLine.removeDue(raw)));
   }
 
   setStart(task: VaultTask, date: string): Promise<string> {

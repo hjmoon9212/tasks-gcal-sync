@@ -39,6 +39,8 @@ const SKIP_LABEL: Record<SkipKind, string> = {
   "unsettled-create": "볼트 정착 대기(생성 보류)",
   "ensure-id-failed": "🆔 쓰기 실패",
   "create-failed": "이벤트 생성 실패",
+  "pull-failed": "캘린더를 읽지 못함(쓰기 보류)",
+  "push-precondition": "GCal이 그 사이 또 바뀜(push 포기)",
   "reconcile-error": "조정 실패",
 };
 
@@ -47,6 +49,15 @@ const STATE_LS_KEY = "tasks-gcal-sync:state";
 
 /** 로그 파일의 기본 경로. 실제 파일에는 여기에 기기 태그가 붙는다. */
 const DEFAULT_LOG_PATH = "Logs/GCal 동기화 로그.md";
+
+/**
+ * 종료 직전 플러시에 허용하는 최대 시간(ms).
+ *
+ * Obsidian 이 `Tasks` 의 promise 를 await 하므로 **상한이 없으면 네트워크가 멎을 때 앱
+ * 종료가 같이 멈춘다.** 끄려는 사람을 붙잡느니 그 편집을 다음 실행으로 미루는 편이 낫다 —
+ * 미뤄도 잃지 않는다(못 올린 run 은 스냅샷을 안 건드린다).
+ */
+const QUIT_FLUSH_MAX_MS = 5_000;
 
 /**
  * 기기-로컬 state 구조. 항목마다 성격이 다르다:
@@ -224,6 +235,9 @@ export default class TasksGcalSyncPlugin extends Plugin {
       })
     );
 
+    // 종료 직전에 밀린 편집 push 를 흘려보낸다 — onunload 는 타이머를 버리기만 한다.
+    this.registerQuitFlush();
+
     this.app.workspace.onLayoutReady(() => {
       this.setupInterval();
       this.setupFeedInterval();
@@ -248,17 +262,22 @@ export default class TasksGcalSyncPlugin extends Plugin {
   /**
    * 편집 후 디바운스하여 동기화.
    *  - 디바운스: 편집이 멎고 autoPushDebounceSeconds 뒤에 실행. 연속 편집(날짜 → 시작일 →
-   *    우선순위)이 한 번으로 합쳐진다.
-   *  - 최소 간격: 직전 동기화 완료 후 minSyncIntervalSeconds가 안 지났으면 남은 만큼 더 미룬다.
-   *    타이머를 하나만 쓰므로 그 사이 편집이 더 들어와도 실행 횟수는 늘지 않는다.
+   *    우선순위)이 한 번으로 합쳐진다. 타이머를 하나만 쓰므로 그 사이 편집이 더 들어와도
+   *    실행 횟수는 늘지 않는다.
+   *
+   * ⛔ **최소 간격을 여기 걸지 않는다**(0.9.0~). 그 값의 목적은 *"빈 run 을 자주 돌리지
+   * 말자"* 인데 편집 트리거는 **사용자가 실제로 뭔가 바꾼 시점**이라 해당하지 않는다.
+   * 걸어 두면 직전 run 직후의 편집이 최대 minSyncIntervalSeconds 만큼 밀리고 — 기본값
+   * 조합에서 최대 60초였다 — 그 창 안에 Obsidian 이 꺼지면 그 편집은 이 세션에서 GCal 에
+   * 닿지 못한다. 창을 좁히는 것이 「편집 → push 전 종료」를 줄이는 첫 번째 수단이다.
+   * (남은 창은 `quit` 훅이 회수한다 → onload 의 workspace.on("quit"))
    */
   scheduleAutoPush(): void {
     if (!this.settings.autoPushOnEdit) return;
     if (!this.auth.isAuthenticated()) return;
     if (this.autoPushTimer !== null) window.clearTimeout(this.autoPushTimer);
 
-    const debounce = Math.max(0, this.settings.autoPushDebounceSeconds) * 1000;
-    const delay = Math.max(debounce, this.cooldownRemaining());
+    const delay = Math.max(0, this.settings.autoPushDebounceSeconds) * 1000;
 
     this.autoPushTimer = window.setTimeout(() => {
       this.autoPushTimer = null;
@@ -266,6 +285,41 @@ export default class TasksGcalSyncPlugin extends Plugin {
       // 원격을 안 보고 미는 run은 "로컬 무조건 승"이 되어 GCal의 최신 변경을 덮어쓴다.
       this.runSync(true, { trigger: "편집 자동" });
     }, delay);
+  }
+
+  /**
+   * 종료 직전, 밀린 편집 push 를 흘려보낸다(0.9.0~).
+   *
+   * `onunload()` 는 예약된 타이머를 **취소만** 하고 버린다. 그래서 편집 후 디바운스가
+   * 끝나기 전에 Obsidian 을 끄면 그 편집은 이 세션에서 GCal 에 닿지 못했다.
+   * `workspace.on("quit")` 이 넘겨주는 `Tasks.add()` 는 Obsidian 이 **종료 전에 await**
+   * 해 주는 공식 창구다.
+   *
+   * 짚어둘 것:
+   *  - 새 트리거를 만드는 게 아니라 **이미 예약된 push 를 앞당길 뿐**이다. 그래서 0.3.11의
+   *    창 전환 트리거를 0.3.13이 없앤 이유(*"스테일 구간에서 push 를 한 번 더 유발한다"*)에
+   *    걸리지 않는다 — 밀린 편집이 없으면 아무것도 하지 않는다.
+   *  - **반드시 상한을 건다.** Obsidian 이 이 promise 를 await 하므로 네트워크가 멎으면
+   *    종료가 그만큼 멈춘다.
+   *  - **force 를 붙이지 않는다.** 볼트가 뒤처졌으면 보류되는 게 맞고, 보류돼도 잃지 않는다 —
+   *    push 못 한 run 은 스냅샷을 안 건드리므로 다음 실행에서 정상 push 로 흘러간다.
+   *  - 문서상 "Not guaranteed to actually run"(강제종료·크래시)이라 best-effort 다. 그래도
+   *    지금은 100% 버리고 있으므로 순수 개선이다.
+   */
+  private registerQuitFlush(): void {
+    this.registerEvent(
+      this.app.workspace.on("quit", (tasks) => {
+        if (this.autoPushTimer === null) return; // 밀린 편집 없음
+        window.clearTimeout(this.autoPushTimer);
+        this.autoPushTimer = null;
+        tasks.add(() =>
+          Promise.race([
+            this.runSync(true, { trigger: "종료 직전" }),
+            new Promise<void>((r) => window.setTimeout(r, QUIT_FLUSH_MAX_MS)),
+          ])
+        );
+      })
+    );
   }
 
   /** 최소 간격이 지나기까지 남은 시간(ms). 0이면 지금 돌아도 된다. */

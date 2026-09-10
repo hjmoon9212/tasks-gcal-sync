@@ -3,6 +3,7 @@
  * 다시 나지 않는지 확인한다. 실제 SyncEngine에 스텁 의존성을 물려 run()을 돌린다.
  */
 import { SyncEngine } from "../src/sync/SyncEngine";
+import { PreconditionFailedError } from "../src/gcal/CalendarClient";
 import { DEFAULT_SETTINGS, PluginSettings } from "../src/settings/Settings";
 import { PersistedState, SyncRecord } from "../src/sync/StateStore";
 import { addDays, todayStr } from "../src/sync/dates";
@@ -95,12 +96,15 @@ function harness(opts: {
   settings?: Partial<PluginSettings>;
   /** pull을 실패시킨다(원격 미확인 재현). */
   pullFails?: boolean;
+  /** patch를 412로 실패시킨다(pull 이후 원격이 또 바뀐 상황 재현). */
+  patchPrecondition?: boolean;
 }) {
   const calls = {
     patch: [] as any[],
     insert: [] as any[],
     del: [] as string[],
-    removeDue: [] as string[],
+    /** 미일정화(📅+🆔 동시 제거) 호출 — 0.9.0~ 엔진이 부르는 것은 이쪽이다. */
+    unschedule: [] as string[],
     /** 전수 스캔(rebuildRecords) 호출 — timeMax 를 넘기는 건 이쪽뿐이다. */
     fullScan: 0,
     /** 노트에 실제로 쓴 것 — "가짜 충돌은 노트를 다시 쓰지 않는다"를 보려면 필요하다. */
@@ -123,8 +127,9 @@ function harness(opts: {
     },
     getEvent: async (_c: string, id: string) =>
       opts.events.find((e) => e.id === id),
-    patchEvent: async (_c: string, id: string, patch: any) => {
-      calls.patch.push({ id, patch });
+    patchEvent: async (_c: string, id: string, patch: any, etag?: string) => {
+      if (opts.patchPrecondition) throw new PreconditionFailedError("test");
+      calls.patch.push({ id, patch, etag });
       return { ...opts.events.find((e) => e.id === id), updated: "9999" };
     },
     insertEvent: async (_c: string, ev: any) => {
@@ -137,27 +142,36 @@ function harness(opts: {
     findByTaskId: async () => [],
   };
   const writer: any = {
-    removeDue: async (t: any) => {
-      calls.removeDue.push(t.id);
-      calls.writes.push("removeDue");
+    unschedule: async (t: any) => {
+      calls.unschedule.push(t.id);
+      calls.writes.push("unschedule");
     },
-    setDue: async () => {
+    // ⚠️ 실제 TaskWriter 는 쓰기 뒤 `refresh()` 로 **인메모리 task 의 파싱 필드를 갱신한다**
+    //    (같은 run 안에서 이어지는 push 가 낡은 값을 올리지 않도록). 스텁도 그렇게 해야
+    //    "pull 로 노트를 고친 뒤 스냅샷에 무엇이 남는가"를 제대로 검증할 수 있다.
+    setDue: async (t: any, date: string) => {
       calls.writes.push("setDue");
+      t.due = date;
     },
-    setStart: async () => {
+    setStart: async (t: any, date: string) => {
       calls.writes.push("setStart");
+      t.start = date;
     },
-    removeStart: async () => {
+    removeStart: async (t: any) => {
       calls.writes.push("removeStart");
+      t.start = undefined;
     },
-    setTime: async () => {
+    setTime: async (t: any, range: string) => {
       calls.writes.push("setTime");
+      t.time = range;
     },
-    removeTime: async () => {
+    removeTime: async (t: any) => {
       calls.writes.push("removeTime");
+      t.time = undefined;
     },
-    replaceTitle: async () => {
+    replaceTitle: async (t: any, _from: string, to: string) => {
       calls.writes.push("replaceTitle");
+      t.text = to;
     },
     ensureId: async () => {},
     wroteRecently: () => false,
@@ -214,8 +228,12 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     eq(h.state.records.A1.done, false, "push 후 스냅샷 갱신");
   }
 
-  // ── 3) pull이 실패해도 완료 해제 규칙은 그대로다(완료는 노트가 소유하므로
-  //     GCal에 물어볼 것이 없다 — 한 사이클 재확인만 한다)
+  // ── 3) ★★ 캘린더를 읽지 못하면 그 캘린더에는 **쓰지도 않는다**(0.9.0~)
+  //
+  //     예전에는 pull 이 실패해도 run 이 그대로 이어졌다. 그러면 그 캘린더의 이벤트는
+  //     `remote = undefined` 로 들어와 "GCal은 안 바뀜"으로 읽히고, 노트 변경만 참이라
+  //     **원격을 못 본 채로 push 가 나갔다** — 그 사이 사람이 캘린더에서 고쳐 뒀다면
+  //     그대로 덮인다. push 는 이벤트 전체를 다시 그리므로 "완료만 올린다"도 성립하지 않는다.
   {
     const h = harness({
       tasks: [task("A1", false)],
@@ -223,10 +241,15 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
       records: { A1: rec({ done: true, gcalUpdated: "200" }) },
       pullFails: true,
     });
-    await h.engine.run();
-    eq(h.calls.patch.length, 0, "첫 관측은 보류");
-    eq(h.state.records.A1.done, true, "보류 중 스냅샷 유지");
-    eq(typeof h.state.records.A1.uncheckSeenAt, "number", "대기 시계 시작");
+    const r = await h.engine.run();
+    eq(h.calls.patch.length, 0, "읽지 못한 캘린더에 push하지 않는다 ★");
+    eq(h.calls.writes, [], "노트도 건드리지 않는다 ★");
+    eq(h.state.records.A1.done, true, "스냅샷 그대로 — 다음 run이 다시 판정한다");
+    eq(
+      r.entries.some((e) => (e.detail ?? "").includes("캘린더를 읽지 못함")),
+      true,
+      "무엇을 왜 건너뛰었는지 로그에 남는다"
+    );
   }
 
   // ── 4) 콜드 스타트: 로드 직후 run은 원격에 아무것도 쓰지 않는다
@@ -333,7 +356,7 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
       records: { A1: rec({ done: true }) },
     });
     await h.engine.run();
-    eq(h.calls.removeDue, [], "완료 줄: 이벤트가 지워져도 📅 유지");
+    eq(h.calls.unschedule, [], "완료 줄: 이벤트가 지워져도 📅·🆔 유지");
     eq(h.state.records.A1, undefined, "완료 줄: record는 정리");
   }
 
@@ -345,7 +368,7 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
       records: { A1: rec() },
     });
     await h.engine.run();
-    eq(h.calls.removeDue, ["A1"], "미완료 줄: 미일정화");
+    eq(h.calls.unschedule, ["A1"], "미완료 줄: 미일정화(📅+🆔)");
     eq(h.state.records.A1, undefined, "미완료 줄: record 정리");
   }
 
@@ -360,7 +383,7 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     (h.engine as any).loadedAt = Date.now();
     (h.engine as any).pullCycleDone = false;
     await h.engine.run();
-    eq(h.calls.removeDue, [], "콜드 스타트: 미일정화 보류");
+    eq(h.calls.unschedule, [], "콜드 스타트: 미일정화 보류");
     eq(h.state.records.A1 !== undefined, true, "콜드 스타트: record 유지");
   }
 
@@ -494,7 +517,7 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     });
     await h.engine.run();
     eq(h.state.records.A1.done, false, "이벤트가 완료여도 스냅샷은 미완료 그대로");
-    eq(h.calls.removeDue, [], "노트를 건드리지 않는다");
+    eq(h.calls.unschedule, [], "노트를 건드리지 않는다");
     eq(h.calls.patch.length, 0, "되돌려 쓰지도 않는다");
   }
 
@@ -764,12 +787,14 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     eq(del.detail!.includes(TODAY), true, "삭제 기록: 마지막 스냅샷 due");
   }
   {
-    // (b) 같은 필드를 양쪽에서 **다른 값으로** 수정 → 노트 채택(0.8.0~).
-    //     폐기된 GCal 값이 로그에 남아야 한다 — 한쪽 변경이 사라지는 유일한 경로다.
+    // (b) 같은 필드를 양쪽에서 다른 값으로 수정 — **원격 변경이 메아리**인 경우.
+    //     tgs* 스탬프가 이벤트의 현재 값과 **같다** = 어느 기기가 이 값을 올린 것이지
+    //     사람이 캘린더에서 고친 게 아니다 → 노트를 채택하고 노트 값을 올린다.
     const ev = doneEvent("A1", false, "200");
     ev.start = { date: "2026-08-20" };
     ev.end = { date: "2026-08-21" };
     ev.extendedProperties.private.tgsDue = "2026-08-20";
+    ev.extendedProperties.private.tgsStart = "2026-08-20";
     const h = harness({
       tasks: [task("A1", false, "2026-08-19")], // 노트도 같은 필드(due)를 바꿨다
       events: [ev],
@@ -783,8 +808,50 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     eq(merged.detail!.includes("2026-08-20"), true, "충돌 기록: 폐기된 GCal 값");
     eq(merged.detail!.includes("노트 채택"), true, "충돌 기록: 승자");
     eq(merged.where, "note.md:1", "충돌 기록: 노트 위치");
-    eq(h.calls.writes, [], "노트 채택: GCal 값을 노트에 쓰지 않는다");
-    eq(h.calls.patch.length, 1, "노트 채택: 노트 값을 GCal로 올린다");
+    eq(h.calls.writes, [], "메아리: GCal 값을 노트에 쓰지 않는다");
+    eq(h.calls.patch.length, 1, "메아리: 노트 값을 GCal로 올린다");
+  }
+  {
+    // (b-2) ★★ 같은 상황인데 **사람이 GCal에서 고쳤다**(0.9.0~).
+    //       스탬프는 우리가 마지막에 올린 옛 값 그대로인데 이벤트만 옮겨져 있다 →
+    //       플러그인 밖에서 바뀐 것 = 사람의 편집이므로 **GCal이 이긴다.**
+    //       (b)와 픽스처 차이가 tgs* 하나뿐이라는 점이 이 판별의 전부다.
+    const ev = doneEvent("A1", false, "200");
+    ev.start = { date: "2026-08-20" };
+    ev.end = { date: "2026-08-21" };
+    // tgsDue/tgsStart 는 TODAY 그대로 — 우리가 올린 뒤 사람이 옮겼다는 뜻이다.
+    const h = harness({
+      tasks: [task("A1", false, "2026-08-19")],
+      events: [ev],
+      records: { A1: rec({ gcalUpdated: "100" }) },
+    });
+    const r = await h.engine.run();
+    const merged = r.entries.find((e) => e.action === "PULL" || e.action === "UPDATE")!;
+    eq(merged.detail!.includes("GCal 채택"), true, "사람 편집: 승자는 GCal ★");
+    eq(merged.detail!.includes("사람이 캘린더에서 편집"), true, "사람 편집: 사유");
+    eq(merged.detail!.includes("2026-08-19"), true, "사람 편집: 폐기된 노트 값도 남긴다");
+    eq(h.calls.writes.includes("setDue"), true, "사람 편집: GCal 값을 노트에 쓴다 ★");
+    eq(h.state.records.A1.due, "2026-08-20", "사람 편집: 스냅샷도 GCal 값");
+  }
+  {
+    // (b-3) ★ 날짜 둘은 **한 구간**이라 함께 넘어간다.
+    //       🛫만 사람이 옮겼어도 📅까지 GCal 것으로 맞춰야 아무도 정한 적 없는 구간이
+    //       만들어지지 않는다.
+    const ev = doneEvent("A1", false, "200");
+    ev.start = { date: "2026-08-18" }; // 사람이 🛫만 앞으로 당겼다
+    ev.end = { date: "2026-08-21" };
+    const h = harness({
+      tasks: [task("A1", false, "2026-08-19")],
+      events: [ev],
+      records: { A1: rec({ gcalUpdated: "100" }) },
+    });
+    await h.engine.run();
+    eq(h.state.records.A1.due, "2026-08-20", "구간 전체가 GCal 것 (📅)");
+    eq(h.state.records.A1.start, "2026-08-18", "구간 전체가 GCal 것 (🛫) ★");
+    // 표현 정규화(☐ 접두사 다시 찍기)는 돌지만 **날짜는 실리지 않는다** —
+    // GCal 이 방금 정한 일정을 되돌리면 안 된다.
+    eq(h.calls.patch.length, 1, "표현만 다시 찍는다");
+    eq(h.calls.patch[0].patch.start, undefined, "노트 날짜를 되올리지 않는다 ★");
   }
   {
     // (c) 양쪽 다 기준선과 다르지만 **값이 같다** → 충돌이 아니다.
@@ -994,6 +1061,45 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     eq(h.state.records.M2.time, "", "다중일 전환: 스냅샷 종일");
   }
 
-  console.log(`\n${pass} passed, ${fail} failed`);
+  // ── 조건부 push (If-Match) — pull 과 push 사이의 창 (0.9.0~) ──
+//
+// pull 을 T0 에 하고 push 를 T2 에 하는 사이 몇 초에 사람이 캘린더에서 고치면 우리는 못 본다.
+// 그 창까지 닫는 유일한 방법이 ETag 조건부 수정이다: 우리가 **읽은 버전**을 실어 보내고,
+// 그 사이 바뀌었으면 Google 이 412 를 준다.
+{
+  // (a) 우리가 읽은 이벤트의 etag 가 실제로 실려 나간다
+  const ev = doneEvent("A1", false, "100");
+  (ev as any).etag = '"etag-v1"';
+  const h = harness({
+    tasks: [task("A1", false, "2026-08-19")], // 노트만 바뀜 → push
+    events: [ev],
+    records: { A1: rec() },
+  });
+  await h.engine.run();
+  eq(h.calls.patch.length, 1, "push 가 돌았다");
+  eq(h.calls.patch[0].etag, '"etag-v1"', "읽은 버전을 If-Match 로 실어 보낸다 ★");
+}
+{
+  // (b) ★★ 412 = pull 이후 원격이 또 바뀌었다. **덮지 않고 물러난다.**
+  //     스냅샷도 그대로여야 다음 run 이 새 상태로 처음부터 다시 판정한다 —
+  //     여기서 스냅샷을 갱신하면 그 노트 변경이 "이미 반영됨"이 되어 영영 사라진다.
+  const h = harness({
+    tasks: [task("A1", false, "2026-08-19")],
+    events: [doneEvent("A1", false, "100")],
+    records: { A1: rec() },
+    patchPrecondition: true,
+  });
+  const r = await h.engine.run();
+  eq(h.state.records.A1.due, TODAY, "412: 스냅샷을 갱신하지 않는다 ★");
+  eq(h.state.records.A1.gcalUpdated, "100", "412: gcalUpdated 도 그대로");
+  eq(
+    r.entries.some((e) => (e.detail ?? "").includes("push 포기")),
+    true,
+    "412: 무엇을 왜 포기했는지 로그에 남는다"
+  );
+  eq(r.failures.length, 0, "412 는 실패가 아니라 정보다 — ⚠ 로 세지 않는다 ★");
+}
+
+console.log(`\n${pass} passed, ${fail} failed`);
   if (fail > 0) process.exit(1);
 })();

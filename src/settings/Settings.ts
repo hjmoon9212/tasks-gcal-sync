@@ -85,7 +85,14 @@ export interface PluginSettings {
   syncIntervalMinutes: number; // 0 = 주기 동기화 없음
   autoPushOnEdit: boolean; // task 편집 시 자동 push(Obsidian→GCal, 디바운스)
   autoPushDebounceSeconds: number; // 편집이 멎고 몇 초 뒤에 동기화할지
-  minSyncIntervalSeconds: number; // 자동 동기화 최소 간격(수동/리본은 무시). 0 = 제한 없음
+  /**
+   * 자동 동기화 최소 간격(수동/리본은 무시). 0 = 제한 없음.
+   *
+   * ⚠️ **편집 트리거에는 걸리지 않는다**(0.9.0~). 이 값의 목적은 "빈 run 을 자주 돌리지
+   * 말자" 인데 편집 트리거는 사용자가 실제로 뭔가 바꾼 시점이라 해당하지 않는다. 걸어 두면
+   * 편집이 GCal 에 닿기까지 최대 이 시간만큼 밀리고, 그 사이 Obsidian 이 꺼지면 못 올린다.
+   */
+  minSyncIntervalSeconds: number;
 
   // 상세 로그 — Notice·상태바·console이 모두 휘발성이라, 사후 추적은 이 파일로만 가능하다
   syncLogEnabled: boolean;
@@ -120,7 +127,9 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   syncOnStartup: true,
   syncIntervalMinutes: 5,
   autoPushOnEdit: true,
-  autoPushDebounceSeconds: 20,
+  // 편집이 GCal에 닿기까지의 창이 곧 "Obsidian을 껐더니 안 올라갔다"의 크기다(0.9.0~).
+  // 연속 편집을 합치는 데는 3초면 충분하다.
+  autoPushDebounceSeconds: 3,
   minSyncIntervalSeconds: 60,
   syncLogEnabled: true,
   syncLogPath: "Logs/GCal 동기화 로그.md",

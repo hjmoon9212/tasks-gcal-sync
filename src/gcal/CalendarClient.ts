@@ -3,8 +3,24 @@ import { GoogleAuth } from "../auth/GoogleAuth";
 
 const BASE = "https://www.googleapis.com/calendar/v3";
 
+/**
+ * `If-Match` 조건부 수정이 거부됐다 — pull 이후 그 이벤트가 또 바뀌었다는 뜻.
+ *
+ * 실패가 아니라 **정보**다. 지금 우리가 든 값은 남의 변경을 못 본 값이므로 이번 push 를
+ * 포기하고 다음 run 이 새 상태로 다시 판정하게 둔다.
+ */
+export class PreconditionFailedError extends Error {
+  readonly precondition = true;
+  constructor(url: string) {
+    super(`GCal 412 (pull 이후 원격이 또 바뀜): ${url}`);
+    this.name = "PreconditionFailedError";
+  }
+}
+
 export interface GCalEvent {
   id?: string;
+  /** 조건부 수정(If-Match)에 쓰는 버전 표식. Google이 모든 이벤트에 실어 준다. */
+  etag?: string;
   summary?: string;
   description?: string;
   colorId?: string | null; // 1~11 (Google 이벤트 색). null=색 제거(기본색 복귀).
@@ -91,19 +107,29 @@ export class CalendarClient {
     return lastResp;
   }
 
-  private async req(url: string, method: string, body?: unknown): Promise<any> {
+  private async req(
+    url: string,
+    method: string,
+    body?: unknown,
+    /**
+     * 조건부 수정용 ETag. 주면 `If-Match` 로 실려 나가고, 그 사이 이벤트가 바뀌었으면
+     * Google이 **412** 를 준다 → `PreconditionFailedError`.
+     */
+    etag?: string
+  ): Promise<any> {
     const token = await this.auth.getAccessToken();
     const payload = body !== undefined ? JSON.stringify(body) : undefined;
-    const resp = await this.fetchWithRetry({
-      url,
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: payload,
-    });
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    };
+    if (etag) headers["If-Match"] = etag;
+    const resp = await this.fetchWithRetry({ url, method, headers, body: payload });
     if (resp.status === 204) return null;
+    // 412 = pull 이후 원격이 또 바뀌었다. **재시도하면 안 된다** — 다시 보내도 같은 결과이고,
+    // 무엇보다 지금 우리가 든 값은 남의 변경을 못 본 값이다. 호출부가 이번 push 를 포기한다.
+    // (TRANSIENT 목록에 412 가 없으므로 fetchWithRetry 도 이미 재시도하지 않는다)
+    if (resp.status === 412) throw new PreconditionFailedError(url);
     if (resp.status < 200 || resp.status >= 300) {
       // 4xx(특히 400 badRequest) 진단용: 어떤 요청 본문이 거부됐는지 로그로 남긴다.
       // body엔 자격증명이 없음(토큰은 헤더). 400/422는 본문 문제이므로 특히 유용.
@@ -146,17 +172,24 @@ export class CalendarClient {
     );
   }
 
+  /**
+   * @param etag pull 시점의 이벤트 버전. 주면 **조건부 수정**이 되어, 그 사이 이벤트가
+   *   바뀌었으면 덮어쓰는 대신 `PreconditionFailedError`(412)를 던진다. pull 과 push
+   *   사이의 몇 초에 사람이 캘린더에서 고친 경우가 여기 걸린다.
+   */
   patchEvent(
     calendarId: string,
     eventId: string,
-    patch: Partial<GCalEvent>
+    patch: Partial<GCalEvent>,
+    etag?: string
   ): Promise<GCalEvent> {
     return this.req(
       `${BASE}/calendars/${encodeURIComponent(
         calendarId
       )}/events/${encodeURIComponent(eventId)}`,
       "PATCH",
-      patch
+      patch,
+      etag
     );
   }
 

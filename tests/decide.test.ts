@@ -53,6 +53,7 @@ const local = (o: Partial<LocalView> = {}): LocalView => ({
   done: false,
   title: "샘플",
   hasStart: false,
+  multiDay: false,
   ...o,
 });
 
@@ -453,6 +454,123 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
     true,
     "입양 여부는 충돌 해결과 무관(파괴적 동작 가드다)"
   );
+}
+
+// ── 원격 변경이 **사람의 GCal 편집**인가, **메아리**인가 (0.9.0~) ──
+//
+// 이벤트의 현재 값 vs 그 이벤트에 심긴 마지막 push 스냅샷(tgs*). 이 한 가지 대조가
+// "충돌 시 누가 이기는가"를 통째로 결정한다 → RemoteView.stamp
+//
+// 이게 없던 0.8.0은 둘을 구분하지 못해 **무조건 노트**였다. 구분 없이 GCal을 채택하면
+// 기준선만 뒤처진 기기에서 메아리가 노트의 최신 편집을 덮는다.
+{
+  const MOVED = "2026-08-20"; // GCal 쪽 값
+  const NOTED = "2026-08-19"; // 노트 쪽 값
+
+  // (1) 스탬프가 이벤트의 현재 값과 **같다** = 어느 기기가 올린 그대로 = 메아리
+  const echo = merge({
+    task: { kind: "ok", local: local({ due: NOTED, start: NOTED }) },
+    remote: remote({
+      updated: "200",
+      due: MOVED,
+      start: MOVED,
+      stamp: { due: MOVED, start: MOVED, time: "", title: "샘플" },
+    }),
+  });
+  eq(echo.conflicts, ["due", "start"], "메아리: 노트 채택");
+  eq(echo.gcalWins, [], "메아리: GCal은 이기지 않는다");
+  eq(echo.pull.setDue, undefined, "메아리: 노트에 쓰지 않는다");
+  eq(echo.pushNeeded, true, "메아리: 노트 값을 올린다");
+
+  // (2) 스탬프가 **옛 값** = 우리가 올린 뒤 사람이 캘린더에서 옮겼다
+  const human = merge({
+    task: { kind: "ok", local: local({ due: NOTED, start: NOTED }) },
+    remote: remote({
+      updated: "200",
+      due: MOVED,
+      start: MOVED,
+      stamp: { due: DAY, start: DAY, time: "", title: "샘플" },
+    }),
+  });
+  eq(human.gcalWins, ["due", "start"], "사람 편집: GCal 채택 ★");
+  eq(human.conflicts, [], "사람 편집: 노트는 이기지 않는다");
+  eq(human.pull.setDue, MOVED, "사람 편집: GCal 값을 노트에 쓴다 ★");
+  eq(human.pushNeeded, false, "사람 편집: 노트 값을 되올리지 않는다 ★");
+  eq(human.merged.due, MOVED, "사람 편집: 스냅샷도 GCal 값");
+
+  // (3) ★ 스탬프가 **없는** 옛 이벤트 = 판정 불가. 사람 편집으로 치지 않는다.
+  //     없는 키를 ""로 메우면 모든 메아리가 사람 편집으로 승격된다 → SyncEngine.eventStamp
+  const unknown = merge({
+    task: { kind: "ok", local: local({ due: NOTED, start: NOTED }) },
+    remote: remote({ updated: "200", due: MOVED, start: MOVED }),
+  });
+  eq(unknown.gcalWins, [], "스탬프 없음: 사람 편집으로 치지 않는다 ★");
+  eq(unknown.conflicts, ["due", "start"], "스탬프 없음: 노트 채택(0.8.0 동작 유지)");
+
+  // (4) ★★ 날짜 둘은 **한 구간**이다 — 🛫만 사람이 옮겨도 📅까지 GCal 것으로 맞춘다.
+  //     한쪽만 채택하면 아무도 정한 적 없는 구간이 만들어진다.
+  const spanPair = merge({
+    task: { kind: "ok", local: local({ due: NOTED, start: NOTED, hasStart: true }) },
+    remote: remote({
+      updated: "200",
+      due: MOVED,
+      start: "2026-08-18", // 사람이 🛫만 당겼다
+      stamp: { due: MOVED, start: DAY, time: "", title: "샘플" }, // 📅는 메아리, 🛫만 사람
+    }),
+  });
+  eq(spanPair.gcalWins.includes("due"), true, "구간: 📅도 GCal 것으로 ★");
+  eq(spanPair.pull.setDue, MOVED, "구간: 📅를 노트에 쓴다");
+  eq(spanPair.pull.start?.value, "2026-08-18", "구간: 🛫도 노트에 쓴다");
+  eq(spanPair.pushNeeded, false, "구간: 노트 날짜를 되올리지 않는다 ★");
+
+  // (5) 시각은 날짜와 **독립**으로 판정한다(GCal에서 시간만 드래그하는 게 가장 흔하다)
+  const timeOnly = merge({
+    rec: rec({ time: "09:00-10:00" }),
+    task: { kind: "ok", local: local({ time: "13:00-14:00" }) },
+    remote: remote({
+      updated: "200",
+      time: "15:00-16:00",
+      stamp: { due: DAY, start: DAY, time: "09:00-10:00", title: "샘플" },
+    }),
+  });
+  eq(timeOnly.gcalWins, ["time"], "시각: 사람이 GCal에서 옮겼다 → GCal 채택");
+  eq(timeOnly.pull.time?.value, "15:00-16:00", "시각: GCal 값을 노트에 쓴다");
+}
+
+// ── 여러 날 span 에는 시각을 받지 않는다 (0.9.0~) ──
+//
+// push 쪽은 `taskTime()`이 이미 ""로 막고 있었지만 **pull 쪽에 관문이 없었다.** 그래서
+// GCal에서 여러 날 이벤트에 시각을 주면 노트에 ⏰가 써지고 다음 push가 곧바로 종일로
+// 되돌렸다 — 사용자에게는 "GCal에서 준 시각이 그냥 사라진다"로 보인다.
+{
+  const base = {
+    rec: rec({ start: "2026-08-04" }),
+    remote: remote({
+      updated: "200",
+      time: "09:00-11:00",
+      stamp: { due: DAY, start: DAY, time: "", title: "샘플" },
+    }),
+  };
+  const multi = merge({
+    ...base,
+    task: {
+      kind: "ok",
+      local: local({ start: "2026-08-04", hasStart: true, multiDay: true }),
+    },
+  });
+  eq(multi.pull.time, undefined, "여러 날 span: 시각을 받지 않는다 ★");
+  eq(multi.timeIgnoredMultiDay, true, "여러 날 span: 이유를 로그에 남긴다");
+
+  // 하루짜리면 그대로 받는다 — 막는 것은 표현할 수 없는 경우뿐이다.
+  const single = merge({
+    ...base,
+    task: {
+      kind: "ok",
+      local: local({ start: "2026-08-04", hasStart: true, multiDay: false }),
+    },
+  });
+  eq(single.pull.time?.value, "09:00-11:00", "하루짜리: 시각을 받는다");
+  eq(single.timeIgnoredMultiDay, false, "하루짜리: 무시한 것이 없다");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
