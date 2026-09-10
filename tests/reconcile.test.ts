@@ -1274,6 +1274,48 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
   eq(h.state.records.A1.pulledLine, undefined, "관측했으면 기록을 지운다");
 }
 
+// ── ★ 수동 실행은 **생성만** 연다 (0.9.8) ──
+//
+// 사람이 노트를 고치는 동안 볼트는 계속 "따라잡는 중"이라 정착 30초가 잘 안 쌓인다
+// (2026-09-10 실측: 편집 중 run 의 약 60%가 보류). 새 task 가 캘린더에 안 뜨는 구간이
+// 길어지는데, 생성은 최악이 **일시적 중복**이고 전수 스캔이 하루 안에 정리한다.
+// **삭제·미일정화는 계속 막는다** — 되돌리기 어렵다.
+{
+  const unsettled = () => {
+    const h = harness({
+      // 픽스처 TODAY 는 과거라 창(inWindow) 밖이다 — 생성 경로를 타려면 미래 날짜여야 한다
+      tasks: [task("N1", false, "2099-01-01")], // record 없는 새 task → 생성 경로
+      events: [],
+      records: {},
+    });
+    (h.engine as any).settledSince = Date.now(); // 정착 시계를 방금 시작 = 30초 전
+    return h;
+  };
+
+  const auto = unsettled();
+  const r1 = await auto.engine.run();
+  eq(auto.calls.insert.length, 0, "자동 실행: 정착 전이면 생성 보류");
+  eq(
+    r1.entries.some((e) => (e.detail ?? "").includes("생성 보류")),
+    true,
+    "자동 실행: 이유를 남긴다"
+  );
+
+  const manual = unsettled();
+  await manual.engine.run({ force: true });
+  eq(manual.calls.insert.length, 1, "수동 실행: 정착 전이어도 생성한다 ★");
+
+  // 삭제는 수동으로도 안 열린다 — 위험의 크기가 다르다.
+  const del = harness({
+    tasks: [], // task 가 사라졌다 → 이벤트 삭제 경로
+    events: [doneEvent("A1", false, "100")],
+    records: { A1: rec() },
+  });
+  (del.engine as any).settledSince = Date.now();
+  await del.engine.run({ force: true });
+  eq(del.calls.del, [], "수동 실행이어도 삭제는 계속 보류 ★★");
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
   if (fail > 0) process.exit(1);
 })();
