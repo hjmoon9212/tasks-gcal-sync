@@ -1484,23 +1484,45 @@ export class SyncEngine {
     //    둘 다 반복(🔁)이다. Sync 가 블록을 통째로 복제한 경우는 두 줄의 완료 상태가
     //    같으므로 여기 걸리지 않는다 — 그때는 사람이 봐야 한다.
     //    노트 쓰기이므로 볼트가 정착한 뒤에만 한다.
-    const dupRepairs: { id: string; where: string }[] = [];
-    if (!vaultUnsettled && !coldHold) {
+    const dupRepairs: { id: string; where: string; why: string }[] = [];
+    // 노트 쓰기라 정착 뒤에만 한다. 다만 **수동 실행은 연다** — 이 볼트처럼 정착이 잘
+    // 안 잡히면 중복이 영영 안 풀리고, 그 사이 그 task 는 통째로 멈춘다(0.9.10).
+    if ((!vaultUnsettled && !coldHold) || opts.force) {
       for (const id of [...dupIds]) {
         const lines = tasks.filter((t) => t.id === id);
         if (lines.length !== 2) continue;
-        if (!lines.every((t) => t.recurrence)) continue;
+        const rec = this.state.records[id];
+
+        // (a) 반복(🔁) 완료가 만든 중복 — Tasks 가 새 회차 줄에 원본 id 를 복사한 경우.
+        //     기존 이벤트는 완료된 원래 회차의 것이므로 **새 회차 줄**에서 id 를 뗀다.
+        let victim: VaultTask | undefined;
+        let why = "";
         const open = lines.filter((t) => !t.checked);
         const done = lines.filter((t) => t.checked);
-        if (open.length !== 1 || done.length !== 1) continue;
+        if (lines.every((t) => t.recurrence) && open.length === 1 && done.length === 1) {
+          victim = open[0];
+          why = "반복(🔁) 완료가 만든 중복 → 새 회차 줄에서 🆔 제거";
+        }
+        // (b) **서로 다른 task 가 같은 🆔** — 줄을 복사하며 🆔까지 딸려온 경우.
+        //     record 가 마지막으로 동기화한 제목과 맞는 쪽이 원본이다. 정확히 한 쪽만
+        //     맞을 때만 손댄다 — 둘 다 맞거나 둘 다 아니면 사람이 봐야 한다.
+        else if (rec?.title) {
+          const mine = lines.filter((t) => this.titleBase(t) === rec.title);
+          if (mine.length === 1) {
+            victim = lines.find((t) => t !== mine[0]);
+            why = `서로 다른 task 가 같은 🆔 → 원본(제목 "${rec.title}")이 아닌 줄에서 🆔 제거`;
+          }
+        }
+        if (!victim) continue;
+
         try {
-          await this.writer.removeId(open[0]);
+          await this.writer.removeId(victim);
           dupIds.delete(id);
-          tasksById.set(id, done[0]);
-          dupRepairs.push({ id, where: `${open[0].path}:${open[0].line + 1}` });
-          console.warn(
-            `[tasks-gcal-sync] 🆔 ${id} 중복 자동 정리: 새 회차 줄에서 id 제거 ${open[0].path}:${open[0].line + 1}`
-          );
+          const keep = lines.find((t) => t !== victim)!;
+          tasksById.set(id, keep);
+          const where = `${victim.path}:${victim.line + 1}`;
+          dupRepairs.push({ id, where, why });
+          console.warn(`[tasks-gcal-sync] 🆔 ${id} 중복 자동 정리: ${why} ${where}`);
         } catch (e) {
           console.warn("[tasks-gcal-sync] 🆔 중복 자동 정리 실패:", id, e);
         }
@@ -1525,8 +1547,7 @@ export class SyncEngine {
         action: "REPAIR",
         id: r.id,
         where: r.where,
-        detail:
-          "반복(🔁) 완료가 만든 🆔 중복 → 새 회차 줄에서 🆔 제거(다음 run이 새 🆔·이벤트를 준다)",
+        detail: `${r.why}(다음 run이 새 🆔·이벤트를 준다)`,
       });
     }
 

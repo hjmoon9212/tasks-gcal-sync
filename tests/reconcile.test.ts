@@ -1358,6 +1358,64 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
   eq(h.calls.patch.length, 1, "완료 표시를 올린다");
 }
 
+// ── ★ 서로 다른 task 가 같은 🆔 일 때 (0.9.10) ──
+//
+// task 줄을 복사하면 🆔까지 딸려온다. 2026-09-10 실측:
+//   :41 명상/Night Stretching … 🆔 TMzvTR
+//   :42 집 알아보기          … 🆔 TMzvTR
+// 반복 완료 모양이 아니라 0.9.5 의 자동 정리가 안 걸렸고, 그 id 는 통째로 멈춰 있었다.
+// record 가 마지막으로 동기화한 **제목**이 어느 쪽이 원본인지 말해 준다.
+{
+  const h = harness({
+    tasks: [
+      { ...task("A1", false), title: "샘플" } as any, // record 의 제목과 같다 = 원본
+      { ...task("A1", false), line: 1, title: "복사된 다른 일" } as any,
+    ],
+    events: [doneEvent("A1", false, "100")],
+    records: { A1: rec({ title: "샘플" }) },
+  });
+  const r = await h.engine.run();
+  eq(h.calls.writes, ["removeId"], "원본이 아닌 줄에서 🆔를 뗀다 ★");
+  eq(
+    r.entries.some((e) => (e.detail ?? "").includes("서로 다른 task")),
+    true,
+    "왜 그렇게 판단했는지 남긴다"
+  );
+}
+{
+  // ⛔ 제목으로 원본을 못 가리면 손대지 않는다 — 같은 task 가 두 번 복제된 경우.
+  //    (2026-09-10 의 `2pkajX` 가 이 모양이었다: 두 줄 다 완료, 제목 동일, 한 줄은 깨짐)
+  const h = harness({
+    tasks: [
+      { ...task("A1", true), title: "샘플" } as any,
+      { ...task("A1", true), line: 1, title: "샘플" } as any,
+    ],
+    events: [doneEvent("A1", true, "100")],
+    records: { A1: rec({ title: "샘플", done: true }) },
+  });
+  const r = await h.engine.run();
+  eq(h.calls.writes, [], "둘 다 제목이 같으면 사람이 봐야 한다 ★★");
+  eq(
+    r.entries.some((e) => (e.detail ?? "").includes("정본 불명")),
+    true,
+    "대신 중복으로 건너뛰고 위치를 남긴다"
+  );
+}
+{
+  // 정착 전이어도 **수동 실행**이면 정리한다 — 안 그러면 이 볼트에선 영영 안 풀린다.
+  const h = harness({
+    tasks: [
+      { ...task("A1", false), title: "샘플" } as any,
+      { ...task("A1", false), line: 1, title: "복사된 다른 일" } as any,
+    ],
+    events: [doneEvent("A1", false, "100")],
+    records: { A1: rec({ title: "샘플" }) },
+  });
+  (h.engine as any).settledSince = Date.now(); // 정착 전
+  await h.engine.run({ force: true });
+  eq(h.calls.writes, ["removeId"], "수동 실행은 정착 전에도 중복을 푼다 ★");
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
   if (fail > 0) process.exit(1);
 })();
