@@ -1238,63 +1238,40 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
   eq(h.calls.writes, [], "반복이 아니면 자동 정리하지 않는다 ★");
 }
 
-// ── ★★ pull 로 쓴 줄이 되돌아가면 한 번 다시 쓴다 (0.9.6) ──
+// ── ★ pull 로 쓴 줄이 곧바로 달라지면 **관측만** 한다 (0.9.7) ──
 //
-// 2026-09-10 실측: 충돌에서 GCal 이 이겨 노트에 09-06 을 썼는데, **14초 뒤 같은 기기에서**
-// 그 줄이 09-10(옛 값)으로 되돌아가 있었고, 다음 run 이 그것을 "사용자 편집"으로 읽어
-// GCal 에 올렸다. 되돌림이 원격까지 전파된 것이다 — GCal 을 기준으로 삼는 한 그 기준이
-// 무너지는 유일한 경로다.
+// 2026-09-10 에 pull 이 쓴 줄이 14초 만에 옛 값으로 달라진 것을 두 번 봤다. 되돌림이라면
+// 다음 run 이 그 값을 GCal 에 올려 원격까지 오염시키는 경로다.
+//
+// ⛔ 그런데 **되돌림인지 사용자 편집인지 구분할 근거가 없다.** 두 사례 모두 사람이 리본을
+//    누르며 날짜를 돌려가며 테스트하던 중이었다. 0.9.6 은 여기서 줄을 다시 썼는데, 그러면
+//    충돌 해결 직후의 진짜 편집을 되돌려 버린다 — 근거 없이 사용자와 싸우는 쪽이 더 나쁘다.
+//    그래서 **막지 않고 기록만 남긴다.**
 {
   const h = harness({
-    tasks: [task("A1", false)],
+    // 노트 값이 기준선과 다르다 = 정상 판정이면 push 로 흘러간다
+    tasks: [task("A1", false, "2026-08-19")],
     events: [doneEvent("A1", false, "100")],
     records: {
       A1: rec({
-        // 방금 pull 로 이 줄을 썼다고 기록해 둔 상태
         pulledLine: "- [ ] #task 샘플 📅 2026-08-20 🆔 A1",
         pulledAt: Date.now(),
       }),
     },
   });
   const r = await h.engine.run();
-  eq(h.calls.writes, ["rewriteLine"], "되돌아간 줄을 다시 쓴다 ★★");
   eq(
-    h.calls.rewrote[0],
-    "- [ ] #task 샘플 📅 2026-08-20 🆔 A1",
-    "우리가 썼던 줄 그대로 ★★"
-  );
-  eq(h.calls.patch, [], "되돌아간 값을 GCal 에 올리지 않는다 ★★");
-  eq(
-    r.entries.some((e) => e.action === "REPAIR"),
+    r.entries.some((e) => (e.detail ?? "").includes("되돌림이다")),
     true,
-    "무엇을 왜 다시 썼는지 남긴다"
+    "달라졌다는 사실과 양쪽 줄을 기록한다 ★"
   );
-  eq(h.state.records.A1.pulledLine, undefined, "한 번 쓰고 기록을 지운다 ★");
-
-  // 두 번째 run — 기록이 없으니 이제는 사용자 편집으로 존중한다(무한 싸움 방지).
-  h.calls.writes.length = 0;
-  await h.engine.run();
-  eq(h.calls.writes, [], "두 번은 하지 않는다 ★★");
-}
-{
-  // GCal 이 그 사이 바뀌었으면 되돌림 방어가 아니라 **정상 판정**으로 보낸다.
-  const h = harness({
-    tasks: [task("A1", false)],
-    events: [doneEvent("A1", false, "999")], // updated 가 rec 와 다르다
-    records: {
-      A1: rec({
-        gcalUpdated: "100",
-        pulledLine: "- [ ] #task 샘플 📅 2026-08-20 🆔 A1",
-        pulledAt: Date.now(),
-      }),
-    },
-  });
-  await h.engine.run();
   eq(
     h.calls.writes.includes("rewriteLine"),
     false,
-    "GCal 이 바뀌었으면 되돌림으로 보지 않는다 ★"
+    "노트를 되돌리지 않는다 — 사용자 편집일 수 있다 ★★"
   );
+  eq(h.calls.patch.length, 1, "정상 판정으로 흘러가 노트 값이 올라간다 ★");
+  eq(h.state.records.A1.pulledLine, undefined, "관측했으면 기록을 지운다");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

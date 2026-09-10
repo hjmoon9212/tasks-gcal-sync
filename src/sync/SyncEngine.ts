@@ -1659,50 +1659,46 @@ export class SyncEngine {
         }
       }
 
-      // ── 되돌림 방어 ──
+      // ── 되돌림 의심 관측 ──
       //
-      // pull 이 노트에 써넣은 줄이 **곧바로 옛 값으로 되돌아가는** 일이 있다(2026-09-10
-      // 실측: 14초 뒤, 같은 기기에서). 원인이 무엇이든 — 열려 있던 에디터 버퍼, 다른
-      // 플러그인, Sync — 결과는 하나다: 되돌아간 값을 다음 run 이 "사용자 편집"으로 읽고
-      // **GCal 에 올려 되돌림을 원격까지 전파한다.** GCal 을 기준으로 삼는 한 이게 그
-      // 기준이 무너지는 유일한 경로다.
+      // pull 이 노트에 써넣은 줄이 **짧은 시간 안에 사라지는** 일을 2026-09-10 에 두 번
+      // 봤다(14초·4분). 되돌아간 값을 다음 run 이 "사용자 편집"으로 읽어 GCal 에 올리면
+      // 되돌림이 원격까지 전파되므로, 사실이라면 GCal 기준이 무너지는 경로다.
       //
-      // 우리가 쓴 줄이 짧은 시간 안에 사라졌고 **GCal 은 그 사이 바뀌지 않았다면**
-      // 되돌림으로 보고 그 줄을 한 번 다시 쓴다.
+      // ⛔ **그런데 그게 되돌림인지 사용자 편집인지 지금 데이터로는 구분되지 않는다.**
+      //    두 사례 모두 사람이 리본을 누르며 날짜를 돌려가며 테스트하던 중이었고, 버전
+      //    기록도 "같은 기기"라 본인 편집과 완전히 일치한다.
       //
-      // ⛔ **한 번만 한다.** 두 번 하면 진짜 사용자 편집과 무한히 싸운다. 다시 쓴 뒤
-      //    기록을 지우므로, 사용자가 또 고치면 그건 그대로 존중된다.
+      // 0.9.6 은 여기서 줄을 **다시 썼는데**, 그러면 충돌 해결 직후의 진짜 편집을 한 번
+      // 되돌려 버린다 — 근거가 없는 채로 사용자와 싸우는 쪽이 더 나쁘다. 0.9.7 부터는
+      // **관측만 한다.** 같은 줄이 반복해서 나오고 그때 사용자가 "나는 안 건드렸다"면
+      // 그때 되돌림으로 확정하고 다시 쓰면 된다.
       if (
         task &&
         rec.pulledLine !== undefined &&
         task.raw !== rec.pulledLine &&
         Date.now() - (rec.pulledAt ?? 0) < REVERT_WINDOW_MS &&
-        (!ev || ev.updated === rec.gcalUpdated) // GCal 이 바뀌었으면 정상 판정으로 보낸다
+        (!ev || ev.updated === rec.gcalUpdated)
       ) {
-        const restored = rec.pulledLine;
+        const sec = Math.round((Date.now() - (rec.pulledAt ?? 0)) / 1000);
+        result.entries.push({
+          action: "SKIP",
+          id,
+          title: rec.title,
+          calendar: this.calName(rec.calendarId),
+          eventId: rec.eventId,
+          where: `${task.path}:${task.line + 1}`,
+          detail:
+            `※ 관측: ${sec}초 전 pull 로 쓴 줄이 달라졌다(GCal 은 그대로). ` +
+            `사용자 편집이면 정상이고, 건드린 적이 없다면 되돌림이다 — ` +
+            `쓴 줄 \`${rec.pulledLine}\` → 지금 \`${task.raw}\``,
+        });
+        console.warn(
+          `[tasks-gcal-sync] pull 로 쓴 줄이 ${sec}초 만에 달라짐(되돌림 의심): ${id} ${task.path}:${task.line + 1}`
+        );
         delete rec.pulledLine;
         delete rec.pulledAt;
-        try {
-          await this.writer.rewriteLine(task, restored);
-          result.pulled++;
-          result.entries.push({
-            action: "REPAIR",
-            id,
-            title: rec.title,
-            calendar: this.calName(rec.calendarId),
-            eventId: rec.eventId,
-            where: `${task.path}:${task.line + 1}`,
-            detail:
-              `방금 pull 로 쓴 줄이 되돌아감(GCal 은 그대로) → 되돌림으로 보고 다시 씀. ` +
-              `다시 되돌아가면 그때는 사용자 편집으로 존중한다 — 되돌아간 줄: \`${task.raw}\``,
-          });
-          console.warn(
-            `[tasks-gcal-sync] pull 로 쓴 줄이 되돌아감 → 다시 씀: ${id} ${task.path}:${task.line + 1}`
-          );
-          continue;
-        } catch (e) {
-          console.warn("[tasks-gcal-sync] 되돌림 복구 실패:", id, e);
-        }
+        // **막지 않는다.** 아래 정상 판정으로 그대로 흘려보낸다.
       }
 
       // 줄이 보이는 동안 원문을 보관해 둔다. 지우는 시점에는 이미 노트에 없어서
