@@ -1067,17 +1067,17 @@ export class SyncEngine {
     }
     if (plan.conflicts.length) {
       console.warn(
-        `[tasks-gcal-sync] 충돌 → 노트 채택, GCal은 메아리 (${plan.conflicts.join(
-          ", "
-        )}):`,
+        `[tasks-gcal-sync] 충돌 → 노트 채택 (${plan.conflicts.join(", ")}):`,
         where
       );
     }
-    if (plan.gcalWins.length) {
+    // 폐기한 GCal 값이 **사람이 캘린더에서 직접 고친 것**이면 실제 유실이다. 메아리를
+    // 버리는 것과 같은 톤으로 흘리면 안 된다 — 로그 파일에도, 콘솔에도 따로 남긴다.
+    if (plan.humanDiscarded.length) {
       console.warn(
-        `[tasks-gcal-sync] 충돌 → GCal 채택, 사람이 캘린더에서 편집함 (${plan.gcalWins.join(
+        `[tasks-gcal-sync] ⚠ 사람이 GCal에서 고친 값을 폐기함 (${plan.humanDiscarded.join(
           ", "
-        )}):`,
+        )}) — 노트가 이긴다:`,
         where
       );
     }
@@ -1252,17 +1252,18 @@ export class SyncEngine {
         f
       )} / GCal ${this.fieldText(before, f)}→${this.fieldText(plan.remote, f)})`;
     if (plan.conflicts.length) {
+      // 폐기된 GCal 값이 **사람이 캘린더에서 고친 것**인지 **다른 기기가 밀어올린 메아리**
+      // 인지를 함께 적는다. 승자는 어느 쪽이든 노트지만, 앞의 경우는 실제로 잃는 것이
+      // 있으므로 나중에 이 줄만 보고 되살릴 수 있어야 한다 → reconcile.humanDiscarded
+      const human = plan.humanDiscarded.length
+        ? ` ⚠ 폐기된 GCal 값은 사람이 캘린더에서 고친 것이다(${plan.humanDiscarded.join(
+            ", "
+          )})`
+        : " (GCal 변경은 다른 기기가 밀어올린 메아리)";
       parts.push(
         `⚔️ 충돌 ${plan.conflicts
           .map(conflictText)
-          .join(", ")} → 노트 채택(GCal 변경은 메아리), GCal 변경 폐기`
-      );
-    }
-    if (plan.gcalWins.length) {
-      parts.push(
-        `⚔️ 충돌 ${plan.gcalWins
-          .map(conflictText)
-          .join(", ")} → GCal 채택(사람이 캘린더에서 편집), 노트 변경 폐기`
+          .join(", ")} → 노트 채택, GCal 변경 폐기${human}`
       );
     }
 

@@ -17,16 +17,19 @@
  * ✅를 쓰는 것(반복이면 다음 회차 줄 생성)이라 파괴적이었다. 그래서 완료는 노트 → 이벤트
  * 한 방향으로만 흐른다. 이벤트의 색·☑️는 표시일 뿐 판정에 쓰지 않는다.
  *
- * 충돌 판정(0.9.0~): 같은 필드가 양쪽에서 바뀌었을 때
- *  - **값이 같으면 충돌이 아니다** — 기준선만 뒤처진 것이라 기준선만 앞당긴다.
- *  - 값이 갈렸으면 **누가 원격을 바꿨는지**로 갈린다(RemoteView.stamp):
- *      · 사람이 GCal에서 편집 → **GCal이 이긴다.** GCal이 통합 관리 면이고 거기서 하는
- *        조작(날짜·시각·제목·삭제)은 1급 입력이다.
- *      · 어느 기기가 노트 값을 올린 **메아리** → 충돌이 아니다. 노트를 채택해 올린다.
- *    0.8.0은 이 둘을 구분하지 못해 **무조건 노트**였다. 구분 없이 GCal을 채택하면
- *    메아리가 노트의 최신 편집을 덮는다 — 2026-09-07 실측 "충돌" 127건 중 122건이 그것.
+ * 충돌 판정: 같은 필드가 양쪽에서 바뀌었을 때
+ *  - **값이 같으면 충돌이 아니다**(0.8.0~) — 기준선만 뒤처진 것이라 기준선만 앞당긴다.
+ *  - 값이 갈렸으면 **노트가 이긴다.** 되돌리기 힘든 쪽은 노트다 — 사용자가 방금 손으로
+ *    고친 줄을 원격 값으로 덮으면 그 편집은 어디에도 안 남는다. 반대로 GCal 값은 폐기돼도
+ *    로그에 통째로 남아 되살릴 수 있다.
  *  - 단 **볼트가 정착하기 전에는 그 판정을 미룬다**(conflictResolutionAllowed).
  *    이 셋이 하나라도 빠지면 한쪽 편집이 조용히 사라진다.
+ *
+ * ⚠️ 0.9.0 이 한 릴리스 동안 "사람이 GCal에서 고친 것이면 GCal이 이긴다"로 뒤집었다가
+ *    **실사용 테스트에서 되돌렸다**(0.9.1). 판별(RemoteView.stamp) 자체는 정확했지만,
+ *    이 볼트에서는 노트 쪽 편집을 잃는 비용이 항상 더 컸다. 판별은 **승자를 정하는 데서
+ *    빼고 로그로 옮겼다** — 사람이 고친 GCal 값을 버릴 때 그 사실이 보여야 복구할 수 있다
+ *    → MergePlan.humanDiscarded
  *
  * 날짜 둘(📅·🛫)은 **한 구간**이라 항상 함께 판정한다. 한쪽만 상대 값을 채택하면
  * 아무도 정한 적 없는 구간이 만들어진다(하루짜리 task가 여러 날 span이 되는 식).
@@ -138,8 +141,8 @@ export function destructiveAllowed(g: Guards): boolean {
 /**
  * 진짜 충돌(같은 필드가 양쪽에서 **다른 값으로** 바뀜)을 지금 해결해도 되는가.
  *
- * 충돌 해결은 한쪽 값을 버리는 일이고, 0.8.0부터 이기는 쪽이 노트다. 그래서 **노트가
- * 최신이라는 보장**이 없으면 해서는 안 된다 — 스테일한 노트가 원격을 덮는 바로 그 경로다.
+ * 충돌 해결은 한쪽 값을 버리는 일이고 이기는 쪽이 노트다. 그래서 **노트가 최신이라는
+ * 보장**이 없으면 해서는 안 된다 — 스테일한 노트가 원격을 덮는 바로 그 경로다.
  *
  * `holdWrites`가 아니라 `vaultUnsettled`를 보는 것이 핵심이다. fail-open 상한은
  * "충돌 아닌 변경까지 영영 막지는 말자"는 장치이지 충돌 판정을 열어주는 장치가 아니다.
@@ -171,16 +174,16 @@ export interface MergePlan {
   pull: PullOps;
   /** GCal이 이긴 필드. */
   pulledFields: Field[];
-  /**
-   * 양쪽에서 다른 값으로 바뀌었으나 원격 변경이 **메아리**여서 노트를 채택한 것
-   * (버려진 GCal 값은 `remote` 에 남는다).
-   */
+  /** 같은 필드가 양쪽에서 **다른 값으로** 바뀌어 노트를 채택한 것(GCal 값은 버려진다). */
   conflicts: Field[];
   /**
-   * 양쪽에서 다른 값으로 바뀌었고 원격이 **사람의 GCal 편집**이라 GCal을 채택한 것
-   * (버려진 노트 값은 `local` 에 남는다). 0.9.0~.
+   * `conflicts` 중 폐기된 GCal 값이 **사람이 캘린더에서 직접 고친 것**이었던 필드(0.9.1~).
+   *
+   * 메아리(다른 기기가 옛 노트 값을 밀어올린 것)를 버리는 건 아무것도 잃지 않지만,
+   * 이건 **실제 유실**이다. 승자는 바뀌지 않고 — 노트가 이긴다 — 로그에서 두 경우를
+   * 가르는 데만 쓴다. 막을 수 없으면 되살릴 수 있어야 한다.
    */
-  gcalWins: Field[];
+  humanDiscarded: Field[];
   /**
    * 양쪽 다 바뀌었지만 **값이 같아** 충돌이 아니었던 필드. 기준선만 앞당긴다.
    * 로그에는 남기지 않는다 — 실제로 달라진 게 없다.
@@ -338,9 +341,14 @@ function mergePlan(i: DecideInput, local: LocalView): ReconcilePlan {
   // 이벤트의 현재 값 vs 그 이벤트에 심긴 마지막 push 스냅샷(tgs*). 다르면 플러그인 밖에서
   // 바뀐 것 = 사람의 편집이고, 같으면 어느 기기가 올린 그대로 = 메아리다 → RemoteView.stamp
   //
-  // **충돌 판정에만 쓴다.** gc[f](일반 pull)는 손대지 않는다 — 메아리라도 이 기기의 노트가
-  // 아직 옛 값이면 받아 두는 게 맞고(Obsidian Sync보다 빠르다), 스탬프가 없는 옛 이벤트의
-  // 동기화를 조용히 멈춰서도 안 된다.
+  // ⛔ **승자를 정하는 데 쓰지 않는다.** 충돌이면 언제나 노트가 이긴다(§ 충돌 판정).
+  //    이 값은 **무엇이 폐기됐는지 말하기 위한 것**이다 — 메아리를 버리는 건 아무것도
+  //    잃지 않지만, 사람이 캘린더에서 고친 값을 버리는 건 실제 유실이라 눈에 띄어야 한다.
+  //    막을 수 없으면 되살릴 수 있게 한다 → MergePlan.humanDiscarded
+  //
+  // gc[f](일반 pull)도 손대지 않는다 — 메아리라도 이 기기의 노트가 아직 옛 값이면 받아
+  // 두는 게 맞고(Obsidian Sync보다 빠르다), 스탬프가 없는 옛 이벤트의 동기화를 조용히
+  // 멈춰서도 안 된다.
   const st = remote?.stamp;
   const byHuman = (f: "due" | "start" | "time" | "title"): boolean => {
     if (!st) return false; // 스탬프 없음 = 판정 불가 → 사람 편집으로 치지 않는다
@@ -348,10 +356,9 @@ function mergePlan(i: DecideInput, local: LocalView): ReconcilePlan {
     const now = remote![f];
     return was !== undefined && now !== undefined && now !== was;
   };
-  // 날짜 둘은 한 구간이라 **하나로 묶어 판정한다.** 한쪽만 사람이 옮겼어도 그 구간 전체가
-  // 사람의 것이다 — 나눠 판정하면 아무도 정한 적 없는 구간이 만들어진다.
+  // 날짜 둘은 한 구간이라 **하나로 묶어 본다** — 🛫만 옮겼어도 그 구간 전체를 사람이 만졌다.
   const humanDates = byHuman("due") || byHuman("start");
-  const humanEdited = {
+  const humanChange = {
     due: humanDates,
     start: humanDates,
     time: byHuman("time"),
@@ -388,7 +395,7 @@ function mergePlan(i: DecideInput, local: LocalView): ReconcilePlan {
   // 3) 단 **볼트가 정착하기 전에는 그 판정 자체를 미룬다.** 어느 쪽이 이기든 한쪽 값을
   //    버리는 일이라, 노트가 최신이라는 보장이 없으면 해서는 안 된다 → conflictResolutionAllowed
   const conflicts: Field[] = [];
-  const gcalWins: Field[] = [];
+  const humanDiscarded: Field[] = [];
   const agreed: Field[] = [];
   const heldConflicts: Field[] = [];
   for (const f of ["due", "start", "time", "title"] as const) {
@@ -403,29 +410,17 @@ function mergePlan(i: DecideInput, local: LocalView): ReconcilePlan {
       heldConflicts.push(f);
       continue;
     }
-    if (humanEdited[f]) {
-      // GCal 채택 → pull한다. obs[f]를 꺼서 노트 값이 push로 올라가지 않게 한다.
-      gcalWins.push(f);
-      obs[f] = false;
-    } else {
-      // 메아리 → 노트 채택. pull하지 않고, obs[f]는 그대로 남아 push로 올라간다.
-      conflicts.push(f);
-      gc[f] = false;
-    }
+    // **노트가 이긴다.** pull하지 않고, obs[f]는 그대로 남아 push로 올라간다.
+    conflicts.push(f);
+    if (humanChange[f]) humanDiscarded.push(f);
+    gc[f] = false;
   }
 
-  // 날짜 둘(📅 due·🛫 start)은 **하나의 구간**을 나타낸다. 한쪽만 상대 값을 채택하면
-  // 아무도 정한 적 없는 구간이 만들어진다 — 하루짜리 task가 "🛫가 붙은 여러 날 span"이
-  // 되는 식이다. 그래서 구간을 통째로 한쪽 것으로 맞춘다.
-  if (gcalWins.includes("due") || gcalWins.includes("start")) {
-    // 구간 전체를 GCal 것으로. 원격이 기준선과 같아 gc가 꺼져 있던 쪽도, 노트와 다르면
-    // 끌어와야 구간이 맞는다. 노트 쪽 날짜는 어느 것도 올리지 않는다.
-    gc.due = remoteSnap.due !== localSnap.due;
-    gc.start = remoteSnap.start !== localSnap.start;
-    obs.due = false;
-    obs.start = false;
-  } else if (conflicts.includes("due") || conflicts.includes("start")) {
-    // 구간 전체를 노트 것으로.
+  // 날짜 둘(📅 due·🛫 start)은 **하나의 구간**을 나타낸다. 한쪽이 충돌로 노트를 채택했는데
+  // 다른 쪽만 GCal에서 끌어오면 노트가 정한 적 없는 구간이 만들어진다 — 하루짜리 task를
+  // 노트에서 미뤘고 GCal에서 다른 날로 옮긴 흔한 경우가 곧바로 "🛫가 붙은 여러 날 span"이
+  // 된다. 날짜가 걸린 충돌에서는 두 값을 함께 노트 것으로 둔다.
+  if (conflicts.includes("due") || conflicts.includes("start")) {
     gc.due = false;
     gc.start = false;
   }
@@ -513,7 +508,7 @@ function mergePlan(i: DecideInput, local: LocalView): ReconcilePlan {
     pull,
     pulledFields,
     conflicts,
-    gcalWins,
+    humanDiscarded,
     agreed,
     remote: remoteSnap,
     pushNeeded,

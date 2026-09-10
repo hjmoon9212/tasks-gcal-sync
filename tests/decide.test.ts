@@ -456,13 +456,14 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
   );
 }
 
-// ── 원격 변경이 **사람의 GCal 편집**인가, **메아리**인가 (0.9.0~) ──
+// ── 폐기된 GCal 값이 **사람의 편집**이었나, **메아리**였나 (0.9.1~) ──
 //
-// 이벤트의 현재 값 vs 그 이벤트에 심긴 마지막 push 스냅샷(tgs*). 이 한 가지 대조가
-// "충돌 시 누가 이기는가"를 통째로 결정한다 → RemoteView.stamp
+// 이벤트의 현재 값 vs 그 이벤트에 심긴 마지막 push 스냅샷(tgs*) → RemoteView.stamp
 //
-// 이게 없던 0.8.0은 둘을 구분하지 못해 **무조건 노트**였다. 구분 없이 GCal을 채택하면
-// 기준선만 뒤처진 기기에서 메아리가 노트의 최신 편집을 덮는다.
+// ⛔ **승자는 이 판별과 무관하다 — 충돌이면 언제나 노트가 이긴다.** 0.9.0 이 한 릴리스
+//    동안 "사람이 고쳤으면 GCal이 이긴다"로 뒤집었다가 실사용 테스트에서 되돌렸다.
+//    판별은 **무엇을 잃었는지 말하기 위해** 남는다: 메아리를 버리는 건 아무것도 잃지
+//    않지만 사람이 고친 값을 버리는 건 실제 유실이라 로그에서 갈려야 복구할 수 있다.
 {
   const MOVED = "2026-08-20"; // GCal 쪽 값
   const NOTED = "2026-08-19"; // 노트 쪽 값
@@ -478,7 +479,7 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
     }),
   });
   eq(echo.conflicts, ["due", "start"], "메아리: 노트 채택");
-  eq(echo.gcalWins, [], "메아리: GCal은 이기지 않는다");
+  eq(echo.humanDiscarded, [], "메아리: 잃은 것이 없다 — 조용히 폐기해도 된다");
   eq(echo.pull.setDue, undefined, "메아리: 노트에 쓰지 않는다");
   eq(echo.pushNeeded, true, "메아리: 노트 값을 올린다");
 
@@ -492,11 +493,11 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
       stamp: { due: DAY, start: DAY, time: "", title: "샘플" },
     }),
   });
-  eq(human.gcalWins, ["due", "start"], "사람 편집: GCal 채택 ★");
-  eq(human.conflicts, [], "사람 편집: 노트는 이기지 않는다");
-  eq(human.pull.setDue, MOVED, "사람 편집: GCal 값을 노트에 쓴다 ★");
-  eq(human.pushNeeded, false, "사람 편집: 노트 값을 되올리지 않는다 ★");
-  eq(human.merged.due, MOVED, "사람 편집: 스냅샷도 GCal 값");
+  eq(human.conflicts, ["due", "start"], "사람 편집이어도 **노트가 이긴다** ★");
+  eq(human.humanDiscarded, ["due", "start"], "사람 편집: 무엇을 잃었는지 남긴다 ★");
+  eq(human.pull.setDue, undefined, "사람 편집: GCal 값을 노트에 쓰지 않는다");
+  eq(human.pushNeeded, true, "사람 편집: 노트 값이 올라간다");
+  eq(human.remote.due, MOVED, "사람 편집: 폐기된 GCal 값이 로그용으로 남는다 ★");
 
   // (3) ★ 스탬프가 **없는** 옛 이벤트 = 판정 불가. 사람 편집으로 치지 않는다.
   //     없는 키를 ""로 메우면 모든 메아리가 사람 편집으로 승격된다 → SyncEngine.eventStamp
@@ -504,8 +505,8 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
     task: { kind: "ok", local: local({ due: NOTED, start: NOTED }) },
     remote: remote({ updated: "200", due: MOVED, start: MOVED }),
   });
-  eq(unknown.gcalWins, [], "스탬프 없음: 사람 편집으로 치지 않는다 ★");
-  eq(unknown.conflicts, ["due", "start"], "스탬프 없음: 노트 채택(0.8.0 동작 유지)");
+  eq(unknown.humanDiscarded, [], "스탬프 없음: 사람 편집이라고 단정하지 않는다 ★");
+  eq(unknown.conflicts, ["due", "start"], "스탬프 없음: 노트 채택");
 
   // (4) ★★ 날짜 둘은 **한 구간**이다 — 🛫만 사람이 옮겨도 📅까지 GCal 것으로 맞춘다.
   //     한쪽만 채택하면 아무도 정한 적 없는 구간이 만들어진다.
@@ -518,10 +519,11 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
       stamp: { due: MOVED, start: DAY, time: "", title: "샘플" }, // 📅는 메아리, 🛫만 사람
     }),
   });
-  eq(spanPair.gcalWins.includes("due"), true, "구간: 📅도 GCal 것으로 ★");
-  eq(spanPair.pull.setDue, MOVED, "구간: 📅를 노트에 쓴다");
-  eq(spanPair.pull.start?.value, "2026-08-18", "구간: 🛫도 노트에 쓴다");
-  eq(spanPair.pushNeeded, false, "구간: 노트 날짜를 되올리지 않는다 ★");
+  eq(spanPair.pull.setDue, undefined, "구간: 📅를 GCal 값으로 덮지 않는다");
+  eq(spanPair.pull.start, undefined, "구간: 🛫도 함께 노트 것으로 둔다 ★");
+  eq(spanPair.pushNeeded, true, "구간: 노트 날짜 둘이 함께 올라간다");
+  // 🛫만 사람이 옮겼어도 **구간 전체**가 사람이 만진 것으로 보고한다.
+  eq(spanPair.humanDiscarded.includes("start"), true, "구간: 사람이 만진 것으로 보고 ★");
 
   // (5) 시각은 날짜와 **독립**으로 판정한다(GCal에서 시간만 드래그하는 게 가장 흔하다)
   const timeOnly = merge({
@@ -533,8 +535,9 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
       stamp: { due: DAY, start: DAY, time: "09:00-10:00", title: "샘플" },
     }),
   });
-  eq(timeOnly.gcalWins, ["time"], "시각: 사람이 GCal에서 옮겼다 → GCal 채택");
-  eq(timeOnly.pull.time?.value, "15:00-16:00", "시각: GCal 값을 노트에 쓴다");
+  eq(timeOnly.conflicts, ["time"], "시각: 충돌이면 노트가 이긴다");
+  eq(timeOnly.humanDiscarded, ["time"], "시각: 사람이 GCal에서 옮긴 값을 버렸다고 남긴다");
+  eq(timeOnly.pull.time, undefined, "시각: GCal 값을 노트에 쓰지 않는다");
 }
 
 // ── 여러 날 span 에는 시각을 받지 않는다 (0.9.0~) ──
