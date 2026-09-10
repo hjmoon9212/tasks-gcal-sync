@@ -1096,6 +1096,8 @@ export class SyncEngine {
     else if (plan.uncheckSeen === "clear") delete rec.uncheckSeenAt;
     // 충돌이 실제로 해결됐다(또는 애초에 없었다) → 보류 시계를 끈다.
     if (plan.conflictHeldClear) delete rec.conflictHeldAt;
+    // 이 record 를 실제로 판정했다 = 원격을 봤다. 재조회 표시를 끈다.
+    delete rec.recheckRemote;
     if (plan.holdDone) {
       console.log(`[tasks-gcal-sync] 완료 해제 → 다음 사이클에 재확인: ${id}`);
     }
@@ -1564,8 +1566,37 @@ export class SyncEngine {
 
       const task = tasksById.get(id);
       const calData = pullByCal.get(rec.calendarId);
-      const ev = calData?.byTaskId.get(id);
-      const evCancelled = calData?.cancelledEventIds.has(rec.eventId) ?? false;
+      let ev = calData?.byTaskId.get(id);
+      let evCancelled = calData?.cancelledEventIds.has(rec.eventId) ?? false;
+
+      // ★★ **보류한 원격 관측은 다음 run 에 되살려야 한다**(0.9.4).
+      //
+      // `pullCalendar` 는 syncToken 증분이다. 이벤트를 한 번 받으면 토큰이 그 다음으로
+      // 넘어가고, **다음 run 의 델타에는 그 이벤트가 없다.** 그래서 이번 run 이 보류하면
+      // (충돌 해결 보류·미일정화 보류) 다음 run 은 `remote = undefined` 로 들어와
+      // `gcalChanged = false` 가 되고 — "노트만 바뀜"으로 읽혀 **노트 값을 그냥 올린다.**
+      //
+      // 결과적으로 **보류한 충돌은 100% 노트 승으로 끝났다.** 2026-09-10 실측:
+      //   16:36:20  HOLD ⚔️⏸ 충돌 해결 보류 — due(노트 09-11 / GCal 09-10)
+      //   16:36:38  UPDATE ⬆ GCal 반영: 09-12→09-11        ← ⚔️ 가 사라졌다
+      // "GCal 우선"으로 규칙을 바꿔도 이 경로 때문에 한 번도 적용되지 않았다.
+      //
+      // 보류할 때 `recheckRemote` 를 세워 두고, 델타에 없으면 **이벤트를 직접 조회한다.**
+      // 보류 중인 record 만 해당하므로 호출 수는 자연히 몇 건으로 제한된다.
+      if (calData && !ev && !evCancelled && rec.recheckRemote) {
+        try {
+          const fetched = await this.client.getEvent(rec.calendarId, rec.eventId);
+          if (fetched?.status === "cancelled") evCancelled = true;
+          else if (fetched) ev = fetched;
+        } catch (e) {
+          // 404/410 = 이미 지워졌다. 그것도 관측이다(미일정화 경로가 받는다).
+          if (/\b(404|410)\b/.test(e instanceof Error ? e.message : String(e))) {
+            evCancelled = true;
+          } else {
+            console.warn("[tasks-gcal-sync] 보류 record 재조회 실패:", id, e);
+          }
+        }
+      }
 
       // 줄이 보이는 동안 원문을 보관해 둔다. 지우는 시점에는 이미 노트에 없어서
       // "무엇을 지웠는지"를 로그에 남길 방법이 이것뿐이다.
@@ -1635,6 +1666,11 @@ export class SyncEngine {
             }
             // 보류 시계는 **처음 미룬 시각**에 시작한다 → conflictResolutionAllowed 의 상한
             if (plan.conflictHeldSeen === "set") rec.conflictHeldAt = Date.now();
+            // 원격 관측에 기대는 보류는 다음 run 에 그 관측을 되살려야 한다 — 증분 pull 은
+            // 같은 이벤트를 두 번 주지 않는다. → 위 § 보류한 원격 관측
+            if (plan.reason === "hold-conflict" || plan.reason === "hold-unschedule") {
+              rec.recheckRemote = true;
+            }
             result.entries.push({
               // 되돌아올 보류와 영영 손대지 않는 스킵은 사후 추적에서 다르게 읽힌다.
               action: plan.reason === "hold-conflict" ? "HOLD" : "SKIP",

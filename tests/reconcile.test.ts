@@ -1100,6 +1100,76 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
   eq(r.failures.length, 0, "412 는 실패가 아니라 정보다 — ⚠ 로 세지 않는다 ★");
 }
 
+// ── ★★ 보류한 원격 관측은 다음 run 에 되살아나야 한다 (0.9.4) ──
+//
+// `pullCalendar` 는 syncToken 증분이라 **한 번 받은 이벤트는 다음 델타에 안 온다.**
+// 그래서 이번 run 이 충돌을 보류하면, 다음 run 은 `remote = undefined` 로 들어와
+// "원격은 안 바뀌었다"로 읽고 **노트 값을 그냥 올렸다.**
+//
+// 결과적으로 **보류한 충돌은 100% 노트 승으로 끝났다.** 2026-09-10 실측 로그:
+//   16:36:20  HOLD ⚔️⏸ 충돌 해결 보류 — due(노트 09-11 / GCal 09-10)
+//   16:36:38  UPDATE ⬆ GCal 반영: 09-12→09-11        ← ⚔️ 가 사라졌다
+// "충돌 시 GCal 우선"으로 규칙을 바꿔도 이 경로 때문에 한 번도 적용되지 않았다.
+{
+  const ev = doneEvent("A1", false, "200");
+  ev.start = { date: "2026-08-20" };
+  ev.end = { date: "2026-08-21" };
+  // tgs* 는 옛 값 그대로 = 사람이 캘린더에서 옮겼다.
+
+  let deliver = true; // 증분 델타가 이벤트를 주는가(첫 run 만 준다)
+  const h = harness({
+    tasks: [task("A1", false, "2026-08-19")],
+    events: [ev],
+    records: { A1: rec({ gcalUpdated: "100" }) },
+  });
+  const realList = h.client.listEvents;
+  h.client.listEvents = async (c: string, params: any) => {
+    const r = await realList(c, params);
+    if (!deliver) return { ...r, items: [] }; // 두 번째 run 부터는 델타가 비어 있다
+    return r;
+  };
+  let fetched = 0;
+  const realGet = h.client.getEvent;
+  h.client.getEvent = async (c: string, id: string) => {
+    fetched++;
+    return realGet(c, id);
+  };
+
+  // 1) 정착 전 → 충돌 보류
+  (h.engine as any).settledSince = Date.now(); // 정착 시계를 방금 시작 = 아직 30초 전
+  await h.engine.run();
+  eq(h.state.records.A1.recheckRemote, true, "보류하면 재조회 표시를 남긴다 ★★");
+  eq(h.calls.patch, [], "보류 중엔 아무것도 안 올린다");
+
+  // 2) 다음 run — **델타에는 이벤트가 없다.** 재조회로 관측을 되살려야 한다.
+  deliver = false;
+  (h.engine as any).settledSince = Date.now() - 60_000; // 이제 정착했다
+  await h.engine.run();
+  eq(fetched > 0, true, "델타에 없으면 직접 조회해 관측을 되살린다 ★★");
+  eq(
+    h.state.records.A1.due,
+    "2026-08-20",
+    "보류했던 충돌이 GCal 채택으로 해결된다 ★★ (여기가 0.9.0~0.9.3 회귀 지점)"
+  );
+  eq(h.state.records.A1.recheckRemote, undefined, "판정했으면 표시를 끈다");
+}
+{
+  // 보류가 없었으면 재조회하지 않는다 — 매 run 이벤트를 다시 긁으면 안 된다.
+  let fetched = 0;
+  const h = harness({
+    tasks: [task("A1", false)],
+    events: [doneEvent("A1", false, "100")],
+    records: { A1: rec() },
+  });
+  const realGet = h.client.getEvent;
+  h.client.getEvent = async (c: string, id: string) => {
+    fetched++;
+    return realGet(c, id);
+  };
+  await h.engine.run();
+  eq(fetched, 0, "보류 표시가 없으면 조회하지 않는다 ★");
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
   if (fail > 0) process.exit(1);
 })();

@@ -33,6 +33,14 @@ export interface SyncRecord {
    * reconcile.conflictResolutionAllowed
    */
   conflictHeldAt?: number;
+  /**
+   * 이번에 보류한 원격 관측을 **다음 run 에 직접 조회해 되살려야 하는가**(0.9.4).
+   *
+   * `pullCalendar` 는 syncToken 증분이라 한 번 받은 이벤트는 다음 델타에 안 온다.
+   * 보류하고 이 표시를 안 남기면 다음 run 은 "원격은 안 바뀌었다"로 읽고 노트 값을
+   * 그냥 올린다 → SyncEngine.run 의 재조회
+   */
+  recheckRemote?: boolean;
 
   /**
    * 마지막으로 본 task 줄의 **원문과 위치**.
