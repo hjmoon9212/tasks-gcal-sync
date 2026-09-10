@@ -812,12 +812,10 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     eq(h.calls.patch.length, 1, "메아리: 노트 값을 GCal로 올린다");
   }
   {
-    // (b-2) ★★ 같은 상황인데 **사람이 GCal에서 고쳤다**.
-    //       스탬프는 우리가 마지막에 올린 옛 값 그대로인데 이벤트만 옮겨져 있다 =
-    //       플러그인 밖에서 바뀐 것. (b)와 픽스처 차이가 tgs* 하나뿐이다.
-    //
-    //       **승자는 그래도 노트다.** 다만 이때 버리는 GCal 값은 사람이 직접 만든 것이라
-    //       실제 유실이므로, 로그가 두 경우를 갈라 말해야 되살릴 수 있다.
+    // (b-2) ★★ 같은 상황인데 **사람이 GCal에서 고쳤다**(0.9.0~).
+    //       스탬프는 우리가 마지막에 올린 옛 값 그대로인데 이벤트만 옮겨져 있다 →
+    //       플러그인 밖에서 바뀐 것 = 사람의 편집이므로 **GCal이 이긴다.**
+    //       (b)와 픽스처 차이가 tgs* 하나뿐이라는 점이 이 판별의 전부다.
     const ev = doneEvent("A1", false, "200");
     ev.start = { date: "2026-08-20" };
     ev.end = { date: "2026-08-21" };
@@ -829,37 +827,31 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
     });
     const r = await h.engine.run();
     const merged = r.entries.find((e) => e.action === "PULL" || e.action === "UPDATE")!;
-    eq(merged.detail!.includes("노트 채택"), true, "사람 편집이어도 노트가 이긴다 ★");
-    eq(
-      merged.detail!.includes("사람이 캘린더에서 고친 것이다"),
-      true,
-      "사람 편집: 무엇을 잃었는지 로그가 말한다 ★"
-    );
-    eq(merged.detail!.includes("2026-08-20"), true, "사람 편집: 폐기된 GCal 값을 남긴다");
-    eq(h.calls.writes, [], "사람 편집: GCal 값을 노트에 쓰지 않는다");
-    eq(h.state.records.A1.due, "2026-08-19", "사람 편집: 스냅샷은 노트 값");
+    eq(merged.detail!.includes("GCal 채택"), true, "사람 편집: 승자는 GCal ★");
+    eq(merged.detail!.includes("사람이 캘린더에서 편집"), true, "사람 편집: 사유");
+    eq(merged.detail!.includes("2026-08-19"), true, "사람 편집: 폐기된 노트 값도 남긴다");
+    eq(h.calls.writes.includes("setDue"), true, "사람 편집: GCal 값을 노트에 쓴다 ★");
+    eq(h.state.records.A1.due, "2026-08-20", "사람 편집: 스냅샷도 GCal 값");
   }
   {
-    // (b-3) ★ 메아리와 사람 편집의 로그 문구가 실제로 갈리는지.
-    //       (b)는 메아리라 "다른 기기가 밀어올린 메아리"로 적혀야 한다.
+    // (b-3) ★ 날짜 둘은 **한 구간**이라 함께 넘어간다.
+    //       🛫만 사람이 옮겼어도 📅까지 GCal 것으로 맞춰야 아무도 정한 적 없는 구간이
+    //       만들어지지 않는다.
     const ev = doneEvent("A1", false, "200");
-    ev.start = { date: "2026-08-20" };
+    ev.start = { date: "2026-08-18" }; // 사람이 🛫만 앞으로 당겼다
     ev.end = { date: "2026-08-21" };
-    ev.extendedProperties.private.tgsDue = "2026-08-20";
-    ev.extendedProperties.private.tgsStart = "2026-08-20";
     const h = harness({
       tasks: [task("A1", false, "2026-08-19")],
       events: [ev],
       records: { A1: rec({ gcalUpdated: "100" }) },
     });
-    const r = await h.engine.run();
-    const merged = r.entries.find((e) => e.action === "PULL" || e.action === "UPDATE")!;
-    eq(merged.detail!.includes("메아리"), true, "메아리: 그렇게 적힌다");
-    eq(
-      merged.detail!.includes("사람이 캘린더에서 고친 것이다"),
-      false,
-      "메아리: 유실 경고를 붙이지 않는다 ★"
-    );
+    await h.engine.run();
+    eq(h.state.records.A1.due, "2026-08-20", "구간 전체가 GCal 것 (📅)");
+    eq(h.state.records.A1.start, "2026-08-18", "구간 전체가 GCal 것 (🛫) ★");
+    // 표현 정규화(☐ 접두사 다시 찍기)는 돌지만 **날짜는 실리지 않는다** —
+    // GCal 이 방금 정한 일정을 되돌리면 안 된다.
+    eq(h.calls.patch.length, 1, "표현만 다시 찍는다");
+    eq(h.calls.patch[0].patch.start, undefined, "노트 날짜를 되올리지 않는다 ★");
   }
   {
     // (c) 양쪽 다 기준선과 다르지만 **값이 같다** → 충돌이 아니다.

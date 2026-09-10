@@ -115,6 +115,12 @@ export default class TasksGcalSyncPlugin extends Plugin {
   private statusBar!: HTMLElement;
 
   async onload(): Promise<void> {
+    // **어느 버전이 돌고 있는지 먼저 말한다.** BRAT 업데이트는 기기마다 따로라, 기기 간
+    // 버전 불일치가 곧 사고의 형태였다(2026-08-09). "고쳤는데 그대로다"의 첫 번째 원인은
+    // 늘 "그 기기가 아직 옛 버전"이므로 로그 맨 위에서 확인할 수 있어야 한다.
+    console.log(
+      `[tasks-gcal-sync] v${this.manifest.version} 로드 (${this.app.vault.getName()})`
+    );
     await this.loadAll();
     void this.noteLegacyLogFile();
 

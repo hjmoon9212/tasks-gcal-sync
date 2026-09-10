@@ -1067,17 +1067,17 @@ export class SyncEngine {
     }
     if (plan.conflicts.length) {
       console.warn(
-        `[tasks-gcal-sync] 충돌 → 노트 채택 (${plan.conflicts.join(", ")}):`,
+        `[tasks-gcal-sync] 충돌 → 노트 채택, GCal은 메아리 (${plan.conflicts.join(
+          ", "
+        )}):`,
         where
       );
     }
-    // 폐기한 GCal 값이 **사람이 캘린더에서 직접 고친 것**이면 실제 유실이다. 메아리를
-    // 버리는 것과 같은 톤으로 흘리면 안 된다 — 로그 파일에도, 콘솔에도 따로 남긴다.
-    if (plan.humanDiscarded.length) {
+    if (plan.gcalWins.length) {
       console.warn(
-        `[tasks-gcal-sync] ⚠ 사람이 GCal에서 고친 값을 폐기함 (${plan.humanDiscarded.join(
+        `[tasks-gcal-sync] 충돌 → GCal 채택, 사람이 캘린더에서 편집함 (${plan.gcalWins.join(
           ", "
-        )}) — 노트가 이긴다:`,
+        )}):`,
         where
       );
     }
@@ -1212,6 +1212,7 @@ export class SyncEngine {
       pushKind,
       blockedByCold: (plan.pushNeeded || normalizeNeeded) && !canWriteRemote,
       precondFailed,
+      ev: c.ev,
       result: c.result,
       where,
     });
@@ -1236,6 +1237,8 @@ export class SyncEngine {
     blockedByCold: boolean;
     /** If-Match 412 로 push 를 포기했는가(0.9.0~). */
     precondFailed: boolean;
+    /** 판정에 쓴 원본 이벤트 — 충돌 로그에 tgs* 스탬프 대조를 함께 싣는다. */
+    ev?: GCalEvent;
     result: SyncResult;
     where: string;
   }): void {
@@ -1251,19 +1254,33 @@ export class SyncEngine {
         plan.local,
         f
       )} / GCal ${this.fieldText(before, f)}→${this.fieldText(plan.remote, f)})`;
+    // ★ 승자를 **왜** 그렇게 정했는지까지 적는다. 판정 근거는 이벤트의 현재 값과 거기
+    //   심긴 tgs* 스탬프의 대조 하나뿐인데, 그 두 값이 로그에 없으면 "왜 노트가 이겼지"를
+    //   나중에 되짚을 방법이 없다 — 실제로 그것 때문에 한 번 헤맸다.
+    const stampText = () => {
+      const p = c.ev?.extendedProperties?.private;
+      if (!p) return " [스탬프 없음 — 판정 불가]";
+      const cur = plan.remote;
+      const bits = [
+        `tgsDue=${p.tgsDue ?? "-"}/현재 ${cur.due}`,
+        `tgsStart=${p.tgsStart ?? "-"}/현재 ${cur.start}`,
+      ];
+      return ` [대조: ${bits.join(" · ")}]`;
+    };
     if (plan.conflicts.length) {
-      // 폐기된 GCal 값이 **사람이 캘린더에서 고친 것**인지 **다른 기기가 밀어올린 메아리**
-      // 인지를 함께 적는다. 승자는 어느 쪽이든 노트지만, 앞의 경우는 실제로 잃는 것이
-      // 있으므로 나중에 이 줄만 보고 되살릴 수 있어야 한다 → reconcile.humanDiscarded
-      const human = plan.humanDiscarded.length
-        ? ` ⚠ 폐기된 GCal 값은 사람이 캘린더에서 고친 것이다(${plan.humanDiscarded.join(
-            ", "
-          )})`
-        : " (GCal 변경은 다른 기기가 밀어올린 메아리)";
       parts.push(
         `⚔️ 충돌 ${plan.conflicts
           .map(conflictText)
-          .join(", ")} → 노트 채택, GCal 변경 폐기${human}`
+          .join(
+            ", "
+          )} → 노트 채택(GCal 변경은 메아리 — 스탬프와 값이 같다), GCal 변경 폐기${stampText()}`
+      );
+    }
+    if (plan.gcalWins.length) {
+      parts.push(
+        `⚔️ 충돌 ${plan.gcalWins
+          .map(conflictText)
+          .join(", ")} → GCal 채택(사람이 캘린더에서 편집), 노트 변경 폐기${stampText()}`
       );
     }
 
