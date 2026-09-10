@@ -1316,6 +1316,48 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
   eq(del.calls.del, [], "수동 실행이어도 삭제는 계속 보류 ★★");
 }
 
+// ── ★★ 완료 회차 이벤트를 지우면 되살아나지 않는다 (0.9.9) ──
+//
+// `drop-record` 는 "완료된 줄의 📅 는 기록이므로 유지하고 매핑만 버린다" 인데, 그 전제가
+// *"완료 + 과거 due 는 생성 루프의 inWindow 에서 걸러진다"* 였다. 조건이 `t.due >= today`
+// 라 **오늘·미래 마감의 완료 task 는 안 걸렸고**, 지운 이벤트가 같은 run 에서 부활했다.
+// 2026-09-10 실측:
+//   DROP   `kctfFJ` … 완료된 줄 → 매핑만 폐기(📅는 기록이므로 유지)
+//   CREATE `kctfFJ` … due=2026-09-10 (종일) done=완료      ← 바로 다음 줄
+{
+  const FUTURE = "2099-01-01";
+  const h = harness({
+    tasks: [task("A1", true, FUTURE)], // 완료됐고 마감은 미래 = 옛 조건이면 창 안
+    events: [], // GCal 에서 사람이 지웠다
+    records: {}, // DROP 으로 매핑이 이미 폐기된 상태
+  });
+  const r = await h.engine.run();
+  eq(h.calls.insert, [], "완료된 task 에는 이벤트를 새로 만들지 않는다 ★★");
+  eq(r.created, 0, "생성 카운트도 0");
+}
+{
+  // 미완료면 예전대로 만든다 — 막는 것은 완료된 것뿐이다.
+  const h = harness({
+    tasks: [task("A1", false, "2099-01-01")],
+    events: [],
+    records: {},
+  });
+  await h.engine.run();
+  eq(h.calls.insert.length, 1, "미완료는 그대로 생성한다 ★");
+}
+{
+  // 이미 이벤트가 있는 완료 task 는 조정 경로가 맡는다 — 회색+☑️ 로 유지된다.
+  // (생성 루프를 막았다고 기존 완료 이벤트가 사라지면 안 된다)
+  const h = harness({
+    tasks: [task("A1", true, "2099-01-01")],
+    events: [doneEvent("A1", false, "100")],
+    records: { A1: rec({ due: "2099-01-01", start: "2099-01-01", done: false }) },
+  });
+  await h.engine.run();
+  eq(h.calls.del, [], "기존 완료 이벤트를 지우지 않는다 ★");
+  eq(h.calls.patch.length, 1, "완료 표시를 올린다");
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
   if (fail > 0) process.exit(1);
 })();

@@ -1862,8 +1862,18 @@ export class SyncEngine {
 
       const target = resolveCalendar(t.tags, this.settings);
       if (!target) continue;
+      // **완료된 task 에는 이벤트를 새로 만들지 않는다**(0.9.9).
+      //
+      // `drop-record`(GCal 에서 완료 회차 이벤트를 지웠을 때 매핑만 버리는 경로)의 전제가
+      // *"완료 + 과거 due 는 여기서 걸러지므로 record 만 지워도 되살아나지 않는다"* 였는데,
+      // 조건이 `t.due >= today` 라 **오늘·미래 마감의 완료 task 는 안 걸렸다.** 그래서
+      // 오늘 완료한 일의 이벤트를 캘린더에서 지우면 같은 run 에서 곧바로 부활했다
+      // (2026-09-10 실측: DROP 바로 다음 줄에 CREATE).
+      //
+      // 완료된 task 의 이벤트는 **기록**이다. 이미 있으면 회색+☑️ 로 유지하지만(조정 경로),
+      // 없는 것을 새로 만들 이유는 없다 — 사람이 지웠으면 지운 것이다.
       const inWindow =
-        t.due >= today || (this.settings.includeOverdue && !t.checked);
+        !t.checked && (t.due >= today || this.settings.includeOverdue);
       if (!inWindow) continue;
 
       // task에 이미 🆔가 있는데 로컬 record가 없음 → 다른 기기가 이미 만든 이벤트일 수 있음.
