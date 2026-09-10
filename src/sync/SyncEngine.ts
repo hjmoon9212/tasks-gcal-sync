@@ -1447,12 +1447,52 @@ export class SyncEngine {
       tasksById.set(t.id, t);
       existingIds.add(t.id);
     }
+    /** 중복 🆔의 위치 — 로그 파일에도 실어야 재시작 뒤에 찾을 수 있다. */
+    const dupWhere = new Map<string, string>();
     for (const id of dupIds) {
       const where = tasks
         .filter((t) => t.id === id)
         .map((t) => `${t.path}:${t.line + 1}`)
         .join(", ");
+      dupWhere.set(id, where);
       console.warn(`[tasks-gcal-sync] 🆔 ${id} 중복 → 건너뜀: ${where}`);
+    }
+
+    // ── 반복(🔁) 완료가 만든 🆔 중복은 **스스로 푼다**(0.9.5) ──
+    //
+    // Tasks 는 반복 task 를 완료하면 다음 회차 줄을 만들면서 **원본 🆔를 그대로 복사한다.**
+    // 그러면 같은 id 가 두 줄이 되어 정본을 특정할 수 없고, 그 id 는 손으로 고칠 때까지
+    // **영영 동기화가 멈춘다.** `TaskLine.removeId` 의 주석이 처음부터 이 경우를 위한
+    // 것이라고 적고 있었지만 호출부가 없었다.
+    //
+    // 새 회차 줄에서 id 를 뗀다 — 기존 이벤트는 완료된 원래 회차의 것이고, 새 회차는
+    // 다음 run 이 새 🆔 와 새 이벤트를 준다.
+    //
+    // ⛔ **모양이 정확히 이것일 때만 손댄다**: 두 줄뿐이고, 그중 **하나만 완료**이며,
+    //    둘 다 반복(🔁)이다. Sync 가 블록을 통째로 복제한 경우는 두 줄의 완료 상태가
+    //    같으므로 여기 걸리지 않는다 — 그때는 사람이 봐야 한다.
+    //    노트 쓰기이므로 볼트가 정착한 뒤에만 한다.
+    const dupRepairs: { id: string; where: string }[] = [];
+    if (!vaultUnsettled && !coldHold) {
+      for (const id of [...dupIds]) {
+        const lines = tasks.filter((t) => t.id === id);
+        if (lines.length !== 2) continue;
+        if (!lines.every((t) => t.recurrence)) continue;
+        const open = lines.filter((t) => !t.checked);
+        const done = lines.filter((t) => t.checked);
+        if (open.length !== 1 || done.length !== 1) continue;
+        try {
+          await this.writer.removeId(open[0]);
+          dupIds.delete(id);
+          tasksById.set(id, done[0]);
+          dupRepairs.push({ id, where: `${open[0].path}:${open[0].line + 1}` });
+          console.warn(
+            `[tasks-gcal-sync] 🆔 ${id} 중복 자동 정리: 새 회차 줄에서 id 제거 ${open[0].path}:${open[0].line + 1}`
+          );
+        } catch (e) {
+          console.warn("[tasks-gcal-sync] 🆔 중복 자동 정리 실패:", id, e);
+        }
+      }
     }
 
     const records = this.state.records;
@@ -1468,6 +1508,15 @@ export class SyncEngine {
       failures: [],
       entries: [],
     };
+    for (const r of dupRepairs) {
+      result.entries.push({
+        action: "REPAIR",
+        id: r.id,
+        where: r.where,
+        detail:
+          "반복(🔁) 완료가 만든 🆔 중복 → 새 회차 줄에서 🆔 제거(다음 run이 새 🆔·이벤트를 준다)",
+      });
+    }
 
     // ---- 0) records 재구성(캐시 복구) ----
     // 캐시가 비었으면 무조건, 그 외엔 시작 시 1회. 이걸 해야 record를 잃은 이벤트가
@@ -1645,6 +1694,10 @@ export class SyncEngine {
               );
             }
             let detail = SKIP_TEXT[plan.reason];
+            // 중복은 **어디에 있는지**가 곧 조치 방법이다. 콘솔에만 두면 재시작하면 사라진다.
+            if (plan.reason === "duplicate-id" && dupWhere.has(id)) {
+              detail = `${detail} — ${dupWhere.get(id)}`;
+            }
             if (plan.reason === "hold-conflict" && plan.local && plan.remote) {
               const sec = Math.round((plan.retryAfterMs ?? 0) / 1000);
               const each = (plan.fields ?? [])

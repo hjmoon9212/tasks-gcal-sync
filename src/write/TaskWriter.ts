@@ -87,6 +87,14 @@ export class TaskWriter {
     return this.apply(task, (raw) => TaskLine.removeId(TaskLine.removeDue(raw)));
   }
 
+  /**
+   * 🆔만 뗀다. 반복(🔁) 완료가 만든 중복 id 를 푸는 용도 — Tasks 가 새 회차 줄에 원본
+   * id 를 복사하면 정본을 특정할 수 없어 그 id 가 영영 멈춘다 → SyncEngine 의 자동 정리
+   */
+  removeId(task: VaultTask): Promise<string> {
+    return this.apply(task, (raw) => TaskLine.removeId(raw));
+  }
+
   setStart(task: VaultTask, date: string): Promise<string> {
     return this.apply(task, (raw) => TaskLine.setStart(raw, date));
   }

@@ -24,6 +24,7 @@ export type LogAction =
   | "ADOPT" // GCal에 이미 있던 이벤트를 record로 회수
   | "HOLD" // 판단은 섰지만 이번 run엔 미룸
   | "SKIP" // 건드리지 않음(사유 있음)
+  | "REPAIR" // 노트를 고쳐 막힌 상태를 푼다(반복 완료의 🆔 중복 등)
   | "FAIL"; // 실패
 
 export interface SyncLogEntry {

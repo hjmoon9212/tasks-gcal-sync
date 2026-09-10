@@ -146,6 +146,10 @@ function harness(opts: {
       calls.unschedule.push(t.id);
       calls.writes.push("unschedule");
     },
+    removeId: async (t: any) => {
+      calls.writes.push("removeId");
+      t.id = undefined;
+    },
     // ⚠️ 실제 TaskWriter 는 쓰기 뒤 `refresh()` 로 **인메모리 task 의 파싱 필드를 갱신한다**
     //    (같은 run 안에서 이어지는 push 가 낡은 값을 올리지 않도록). 스텁도 그렇게 해야
     //    "pull 로 노트를 고친 뒤 스냅샷에 무엇이 남는가"를 제대로 검증할 수 있다.
@@ -1168,6 +1172,63 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
   };
   await h.engine.run();
   eq(fetched, 0, "보류 표시가 없으면 조회하지 않는다 ★");
+}
+
+// ── ★ 반복(🔁) 완료가 만든 🆔 중복은 스스로 푼다 (0.9.5) ──
+//
+// Tasks 는 반복 task 를 완료하면 다음 회차 줄을 만들면서 **원본 🆔를 그대로 복사한다.**
+// 그러면 정본을 특정할 수 없어 그 id 는 손으로 고칠 때까지 영영 멈춘다.
+// `TaskLine.removeId` 의 주석이 처음부터 이 경우를 위한 것이라고 적고 있었지만
+// 호출부가 없었다(2026-09-10 실사용에서 걸림).
+{
+  const h = harness({
+    tasks: [
+      { ...task("A1", true), recurrence: "every day" } as any, // 완료된 원래 회차
+      {
+        ...task("A1", false, "2026-08-07"),
+        line: 1,
+        recurrence: "every day",
+      } as any, // Tasks 가 만든 새 회차 — 같은 🆔가 복사돼 있다
+    ],
+    events: [doneEvent("A1", true, "100")],
+    records: { A1: rec({ done: true }) },
+  });
+  const r = await h.engine.run();
+  eq(h.calls.writes, ["removeId"], "새 회차 줄에서 🆔만 뗀다 ★");
+  eq(
+    r.entries.some((e) => e.action === "REPAIR"),
+    true,
+    "무엇을 고쳤는지 로그에 남긴다 ★"
+  );
+}
+{
+  // ⛔ 모양이 다르면 손대지 않는다 — Sync 가 블록을 복제한 경우는 완료 상태가 같다.
+  //    그때는 사람이 봐야 한다.
+  const h = harness({
+    tasks: [
+      { ...task("A1", false), recurrence: "every day" } as any,
+      { ...task("A1", false), line: 1, recurrence: "every day" } as any,
+    ],
+    events: [doneEvent("A1", false, "100")],
+    records: { A1: rec() },
+  });
+  const r = await h.engine.run();
+  eq(h.calls.writes, [], "둘 다 미완료면 건드리지 않는다 ★");
+  eq(
+    r.entries.some((e) => (e.detail ?? "").includes("정본 불명")),
+    true,
+    "대신 중복으로 건너뛴다"
+  );
+}
+{
+  // 반복이 아니면(🔁 없음) 이 경로가 아니다 — 그냥 중복이다.
+  const h = harness({
+    tasks: [task("A1", true), { ...task("A1", false), line: 1 } as any],
+    events: [doneEvent("A1", true, "100")],
+    records: { A1: rec({ done: true }) },
+  });
+  await h.engine.run();
+  eq(h.calls.writes, [], "반복이 아니면 자동 정리하지 않는다 ★");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
