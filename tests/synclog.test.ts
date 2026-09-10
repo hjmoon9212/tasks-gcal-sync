@@ -178,8 +178,17 @@ function fakeVault(seed: Record<string, string> = {}) {
   ok(once.startsWith("# Tasks ⇄ GCal 동기화 로그"), "첫 기록에 헤더를 만든다");
   eq((once.match(/^## /gm) ?? []).length, 1, "블록 1개");
 
+  // ★★ 반복은 **파일을 건드리지 않는다.** 로그 파일은 볼트 안에 있어서, 쓰면 Obsidian
+  //    Sync 가 그것을 업로드하고 그 동안 vaultBehind() 가 참이 된다 → 보류 → 또 로그
+  //    쓰기. 2026-09-10 에 이 되먹임으로 볼트가 15~30초마다 "따라잡는 중"으로 깜빡여
+  //    vaultUnsettled 가 안 풀렸고, 🆔 재발급이 3분을 기다렸다.
   await w.append("+0 ~0 (skip 1)", skip, "편집 자동");
+  eq(files["Logs/log.md"], once, "같은 내용이 이어지면 파일을 안 건드린다 ★★");
   await w.append("+0 ~0 (skip 1)", skip, "주기(5분)");
+  eq(files["Logs/log.md"], once, "몇 번을 반복해도 마찬가지 ★★");
+
+  // 접힌 내용은 사라지지 않는다 — flush 하면 그대로 반영된다.
+  await w.flush();
   const thrice = files["Logs/log.md"];
   eq((thrice.match(/^## /gm) ?? []).length, 1, "같은 내용은 블록을 늘리지 않는다");
   eq((thrice.match(/- SKIP/g) ?? []).length, 1, "항목 줄도 한 벌만 남는다");
@@ -193,6 +202,7 @@ function fakeVault(seed: Record<string, string> = {}) {
 
   // 같은 SKIP 이 다시 와도 이전 접힌 블록에 합치지 않는다(사이에 다른 일이 있었다)
   await w.append("+0 ~0 (skip 1)", skip, "편집 자동");
+  await w.flush(); // 보류 전용 블록은 쌓였다가 나간다
   eq(
     (files["Logs/log.md"].match(/^## /gm) ?? []).length,
     3,
@@ -213,6 +223,7 @@ function fakeVault(seed: Record<string, string> = {}) {
   await w.append("+0 ~0", skip, "편집 자동");
   files["Logs/log.md"] += "\n사용자가 직접 적은 메모\n";
   await w.append("+0 ~0", skip, "편집 자동");
+  await w.flush(); // 반복은 메모리에 접히므로, 파일 반영은 flush 가 한다
   ok(
     files["Logs/log.md"].includes("사용자가 직접 적은 메모"),
     "남의 텍스트를 덮어쓰지 않는다"
@@ -279,10 +290,11 @@ function fakeVault(seed: Record<string, string> = {}) {
     maxKB: LIMIT_KB,
     logSkips: true,
   }));
-  // 내용을 매번 다르게 해야 접기(× N회)가 아니라 새 블록이 쌓인다 — 트림은 append 뒤에만 돈다.
+  // 내용을 매번 다르게 해야 접기(× N회)가 아니라 새 블록이 쌓인다. 트림은 flush 안에서 돈다.
   for (let n = 0; n < 40; n++) {
     await w.append("+0 ~0", [{ action: "SKIP", detail: `볼트 동기화 중 ${n}번째 보류` }], "주기(5분)");
   }
+  await w.flush(); // 보류 전용은 쌓이므로, 파일에 반영해야 트림이 돈다
   const text = files["Logs/log.md"];
   const bytes = new TextEncoder().encode(text).length;
   ok(bytes <= LIMIT_KB * 1024, `상한(바이트) 이하로 잘린다 — 실제 ${bytes}B ★`);

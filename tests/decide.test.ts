@@ -33,6 +33,7 @@ function eq(actual: unknown, expected: unknown, msg: string) {
 const DAY = "2026-08-06";
 const NOW = 1_800_000_000_000;
 const HOLD = 60_000;
+const CONFLICT_MAX = 15 * 60_000;
 const CRETRY = 15_000;
 
 const rec = (o: Partial<SyncRecord> = {}): SyncRecord => ({
@@ -86,6 +87,8 @@ function decide(o: Partial<DecideInput> = {}): ReconcilePlan {
     now: NOW,
     uncheckHoldMs: HOLD,
     conflictRetryMs: CRETRY,
+    force: false,
+    conflictHoldMaxMs: CONFLICT_MAX,
     ...o,
   } as DecideInput);
 }
@@ -571,6 +574,101 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
   });
   eq(single.pull.time?.value, "09:00-11:00", "하루짜리: 시각을 받는다");
   eq(single.timeIgnoredMultiDay, false, "하루짜리: 무시한 것이 없다");
+}
+
+// ── 충돌 보류는 **영영 이어질 수 없다** (0.9.3) ──
+//
+// 0.8.0~0.9.2 는 `vaultUnsettled` 면 수동 실행조차 충돌을 해결하지 못하게 했다. 볼트가
+// 만성적으로 따라잡는 중인 환경에서는 그 값이 **한 번도 안 풀려** 충돌이 하나도 해결되지
+// 않았고, 보류 중에는 어느 쪽에도 안 쓰므로 노트 값이 그대로 남아 사용자에게는
+// "언제나 Obsidian 이 이긴다"로 보였다(2026-09-10 실측: ⚔️ 기록이 전부 ⏸ 보류).
+//
+// *가드는 기능을 끄는 쪽으로 실패하면 안 된다*(0.3.9→0.3.10).
+{
+  const clash = {
+    rec: rec({ due: DAY }),
+    task: { kind: "ok" as const, local: local({ due: "2026-08-19" }) },
+    remote: remote({
+      updated: "200",
+      due: "2026-08-20",
+      start: "2026-08-20",
+      stamp: { due: DAY, start: DAY, time: "", title: "샘플" },
+    }),
+  };
+
+  // (1) 정착 전 + 자동 실행 + 이제 막 미룸 → 보류
+  const held = decide({ ...clash, guards: guards({ vaultUnsettled: true }) });
+  eq(held.kind, "skip", "정착 전에는 미룬다");
+  eq((held as any).reason, "hold-conflict", "사유는 충돌 보류");
+  eq((held as any).conflictHeldSeen, "set", "처음 미룰 때 시계를 시작한다 ★");
+
+  // (2) ★★ 같은 상황에서 **사람이 리본을 눌렀다** → 해결한다
+  const forced = merge({
+    ...clash,
+    guards: guards({ vaultUnsettled: true }),
+    force: true,
+  });
+  eq(forced.kind, "merge", "수동 실행은 충돌을 해결한다 ★★");
+  // 이 픽스처는 노트가 📅만 바꿨으므로 충돌 필드는 due 하나다. 그래도 날짜는 한 구간이라
+  // 🛫까지 GCal 값으로 함께 끌어온다.
+  eq(forced.gcalWins, ["due"], "수동 실행: GCal 채택까지 간다 ★★");
+  eq(forced.pull.setDue, "2026-08-20", "수동 실행: GCal 값을 노트에 쓴다 ★★");
+  eq(forced.pull.start?.value, "2026-08-20", "수동 실행: 구간 전체가 GCal 것");
+
+  // (3) ★★ 자동 실행이어도 **상한을 넘겼으면** 해결한다
+  const aged = merge({
+    ...clash,
+    rec: rec({ due: DAY, conflictHeldAt: NOW - CONFLICT_MAX - 1 }),
+    guards: guards({ vaultUnsettled: true }),
+  });
+  eq(aged.kind, "merge", "상한 초과면 정착 전이라도 해결한다 ★★");
+
+  // 아직 상한 전이면 계속 미룬다 — 상한은 탈출구이지 기본 경로가 아니다.
+  const young = decide({
+    ...clash,
+    rec: rec({ due: DAY, conflictHeldAt: NOW - 1000 }),
+    guards: guards({ vaultUnsettled: true }),
+  });
+  eq(young.kind, "skip", "상한 전에는 그대로 미룬다");
+  eq((young as any).conflictHeldSeen, undefined, "시계는 다시 시작하지 않는다");
+
+  // (4) 콜드 스타트는 **수동으로도 못 연다.** 시간이 지나면 반드시 풀리고, 그 구간의
+  //     노트는 아직 아무것도 안 읽은 상태다.
+  const cold = decide({
+    ...clash,
+    guards: guards({ coldHold: true, vaultUnsettled: true }),
+    force: true,
+  });
+  eq(cold.kind, "skip", "콜드 스타트는 수동으로도 안 연다 ★");
+
+  // (5) 해결된 run 은 시계를 끈다 — 안 끄면 다음 충돌이 남의 시계를 물려받는다.
+  const resolved = merge({
+    ...clash,
+    rec: rec({ due: DAY, conflictHeldAt: NOW - 5000 }),
+  });
+  eq(resolved.conflictHeldClear, true, "해결되면 보류 시계를 끈다 ★");
+}
+
+// ── 허용 조건표 (0.9.3 갱신) ──
+{
+  const un = guards({ vaultUnsettled: true });
+  eq(conflictResolutionAllowed(un), false, "정착 전 + 자동 → 보류");
+  eq(conflictResolutionAllowed(un, { force: true }), true, "정착 전 + 수동 → 해결 ★");
+  eq(
+    conflictResolutionAllowed(un, { heldForMs: CONFLICT_MAX + 1, holdMaxMs: CONFLICT_MAX }),
+    true,
+    "상한 초과 → 해결 ★"
+  );
+  eq(
+    conflictResolutionAllowed(un, { heldForMs: 1000, holdMaxMs: CONFLICT_MAX }),
+    false,
+    "상한 전 → 보류"
+  );
+  eq(
+    conflictResolutionAllowed(guards({ coldHold: true }), { force: true }),
+    false,
+    "콜드 스타트는 수동으로도 안 열린다 ★"
+  );
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

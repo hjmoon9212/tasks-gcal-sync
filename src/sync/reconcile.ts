@@ -138,15 +138,39 @@ export function destructiveAllowed(g: Guards): boolean {
 /**
  * 진짜 충돌(같은 필드가 양쪽에서 **다른 값으로** 바뀜)을 지금 해결해도 되는가.
  *
- * 충돌 해결은 한쪽 값을 버리는 일이고, 0.8.0부터 이기는 쪽이 노트다. 그래서 **노트가
- * 최신이라는 보장**이 없으면 해서는 안 된다 — 스테일한 노트가 원격을 덮는 바로 그 경로다.
+ * 충돌 해결은 한쪽 값을 버리는 일이라, **노트가 최신이라는 보장**이 없으면 미룬다 —
+ * 스테일한 노트를 근거로 판정하면 한쪽 편집이 조용히 사라진다.
  *
  * `holdWrites`가 아니라 `vaultUnsettled`를 보는 것이 핵심이다. fail-open 상한은
  * "충돌 아닌 변경까지 영영 막지는 말자"는 장치이지 충돌 판정을 열어주는 장치가 아니다.
- * 수동 실행(force)도 이 보류는 우회하지 않는다 — 완료 해제 보류와 같은 이유다.
+ *
+ * ⚠️ **다만 영영 미루면 그건 판정이 아니라 고장이다**(0.9.3). 0.8.0~0.9.2 는 수동 실행도
+ * 이 보류를 우회하지 못하게 했는데, 볼트가 만성적으로 따라잡는 중인 환경에서는
+ * `vaultUnsettled`(30초 연속 정착)가 **한 번도 안 풀려 충돌이 하나도 해결되지 않았다.**
+ * 2026-09-10 실측: 그 볼트의 `⚔️` 기록이 전부 `⏸ 보류`였고, 어느 쪽도 안 쓰니 노트 값이
+ * 그대로 남아 사용자에게는 "언제나 Obsidian 이 이긴다"로 보였다. 리본을 눌러도 같았다.
+ *
+ * *가드는 기능을 끄는 쪽으로 실패하면 안 된다*(0.3.9→0.3.10). 그래서 두 개의 문을 연다:
+ *  1. **수동 실행(`force`)** — 사람이 "지금 맞춰라"를 누른 것이다. 그 순간의 노트를
+ *     근거로 판정해도 된다고 사람이 말한 셈이다.
+ *  2. **보류가 `holdMaxMs` 를 넘김** — 자동 실행만으로도 언젠가는 풀려야 한다.
+ *     `vaultBehind` 의 fail-open 상한과 같은 성격이고, 상한이 더 길 뿐이다.
+ *
+ * 콜드 스타트(로드 후 60초)는 그대로 막는다 — 그건 시간이 지나면 반드시 풀리고,
+ * 그 구간의 노트는 아직 아무것도 안 읽은 상태다.
  */
-export function conflictResolutionAllowed(g: Guards): boolean {
-  return !g.coldHold && !g.vaultUnsettled;
+export function conflictResolutionAllowed(
+  g: Guards,
+  o: { force?: boolean; heldForMs?: number; holdMaxMs?: number } = {}
+): boolean {
+  if (g.coldHold) return false;
+  if (!g.vaultUnsettled) return true;
+  if (o.force) return true;
+  return (
+    o.holdMaxMs !== undefined &&
+    o.heldForMs !== undefined &&
+    o.heldForMs > o.holdMaxMs
+  );
 }
 
 export type SkipReason =
@@ -204,6 +228,8 @@ export interface MergePlan {
   retryAfterMs?: number;
   /** 회귀 관측 시각 기록 지시. */
   uncheckSeen: "set" | "clear" | undefined;
+  /** 충돌 보류 시계를 지우라는 지시(0.9.3) — 더는 미루고 있지 않다. */
+  conflictHeldClear: boolean;
   /** 우리 push가 아닌 외부 수정이 감지됐는가. */
   gcalChanged: boolean;
   /**
@@ -231,6 +257,8 @@ export type ReconcilePlan =
       remote?: Snapshot;
       /** 보류가 풀릴 만한 시점(ms 뒤). 호출부가 후속 run을 예약한다. */
       retryAfterMs?: number;
+      /** 충돌 보류 시계를 시작하라는 지시(0.9.3). 상한 판정의 기준점이 된다. */
+      conflictHeldSeen?: "set";
     }
   | { kind: "delete-event"; reason: "task-gone" | "due-invalid" }
   /** 이벤트만 정리하고 📅는 남긴다(완료 회차의 due는 기록이다 — 0.3.15). */
@@ -250,6 +278,10 @@ export interface DecideInput {
   uncheckHoldMs: number;
   /** 충돌 해결을 미뤘을 때 다시 확인하기까지의 간격(ms). */
   conflictRetryMs: number;
+  /** 사람이 직접 누른 실행인가 — 충돌 보류를 우회한다(0.9.3). */
+  force: boolean;
+  /** 충돌 보류를 이 시간(ms) 넘게 끌면 그냥 해결한다(fail-open, 0.9.3). */
+  conflictHoldMaxMs: number;
 }
 
 export function decideReconcile(i: DecideInput): ReconcilePlan {
@@ -387,6 +419,16 @@ function mergePlan(i: DecideInput, local: LocalView): ReconcilePlan {
   //      기준선이 뒤처져 충돌처럼 보이는 것뿐이고, GCal을 채택하면 구조적으로 낡은 값을 고른다.
   // 3) 단 **볼트가 정착하기 전에는 그 판정 자체를 미룬다.** 어느 쪽이 이기든 한쪽 값을
   //    버리는 일이라, 노트가 최신이라는 보장이 없으면 해서는 안 된다 → conflictResolutionAllowed
+  // 이 record 의 충돌이 얼마나 오래 보류돼 왔는가. 처음 보는 충돌이면 0 이고, 이 run 이
+  // 또 미루면 아래에서 `conflictHeldSeen: "set"` 으로 시계를 시작한다.
+  const heldForMs =
+    rec.conflictHeldAt === undefined ? 0 : i.now - rec.conflictHeldAt;
+  const allowResolve = conflictResolutionAllowed(i.guards, {
+    force: i.force,
+    heldForMs,
+    holdMaxMs: i.conflictHoldMaxMs,
+  });
+
   const conflicts: Field[] = [];
   const gcalWins: Field[] = [];
   const agreed: Field[] = [];
@@ -399,7 +441,7 @@ function mergePlan(i: DecideInput, local: LocalView): ReconcilePlan {
       obs[f] = false;
       continue;
     }
-    if (!conflictResolutionAllowed(i.guards)) {
+    if (!allowResolve) {
       heldConflicts.push(f);
       continue;
     }
@@ -442,6 +484,8 @@ function mergePlan(i: DecideInput, local: LocalView): ReconcilePlan {
       local: localSnap,
       remote: remoteSnap,
       retryAfterMs: i.conflictRetryMs,
+      // 처음 미룬 순간부터 시계를 센다 — 상한이 있어야 영영 안 풀리는 일이 없다.
+      conflictHeldSeen: rec.conflictHeldAt === undefined ? "set" : undefined,
     };
   }
 
@@ -524,6 +568,8 @@ function mergePlan(i: DecideInput, local: LocalView): ReconcilePlan {
     holdDone,
     retryAfterMs,
     uncheckSeen,
+    // 충돌이 실제로 해결됐거나 애초에 없었다 → 보류 시계를 끈다.
+    conflictHeldClear: rec.conflictHeldAt !== undefined,
     gcalChanged,
     timeIgnoredMultiDay:
       gcalChanged &&

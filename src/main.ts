@@ -263,6 +263,8 @@ export default class TasksGcalSyncPlugin extends Plugin {
     if (this.feedIntervalId !== null) window.clearInterval(this.feedIntervalId);
     // 캐시는 메모리에만 있다 — 언로드하면 남의 회의 제목이 아무데도 안 남는다
     this.feed?.unload();
+    // 쌓아 둔 로그 블록을 흘려보낸다(await 할 수 없으므로 best-effort).
+    void this.log?.flush();
   }
 
   /**
@@ -315,6 +317,8 @@ export default class TasksGcalSyncPlugin extends Plugin {
   private registerQuitFlush(): void {
     this.registerEvent(
       this.app.workspace.on("quit", (tasks) => {
+        // 쌓아 둔 보류 기록은 밀린 편집이 없어도 내보낸다 → SyncLogWriter.append
+        tasks.add(() => this.log.flush());
         if (this.autoPushTimer === null) return; // 밀린 편집 없음
         window.clearTimeout(this.autoPushTimer);
         this.autoPushTimer = null;

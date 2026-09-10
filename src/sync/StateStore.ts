@@ -25,6 +25,14 @@ export interface SyncRecord {
    * 한 사이클 늦춰 재확인한다(2단계 삭제 가드와 같은 패턴). 회귀가 아니게 되면 지운다.
    */
   uncheckSeenAt?: number;
+  /**
+   * 이 record 의 충돌 해결을 **처음 미룬 시각**(ms). 해결되면 지운다.
+   *
+   * 상한(fail-open)의 기준점이다 — 볼트가 만성적으로 따라잡는 중인 환경에서는
+   * `vaultUnsettled` 가 한 번도 안 풀려 충돌이 영영 보류됐다(2026-09-10) →
+   * reconcile.conflictResolutionAllowed
+   */
+  conflictHeldAt?: number;
 
   /**
    * 마지막으로 본 task 줄의 **원문과 위치**.

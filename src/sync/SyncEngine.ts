@@ -148,6 +148,15 @@ const BEHIND_MAX_MS = 10 * 60_000;
  */
 const BEHIND_RECHECK_MS = 15_000;
 /**
+ * 충돌 해결 보류의 **상한**(fail-open). 이보다 오래 끌면 정착 전이라도 해결한다.
+ *
+ * `vaultBehind` 의 10분 상한과 같은 성격이고 더 길다 — 충돌 해결은 한쪽 값을 버리는
+ * 일이라 더 참아야 하지만, **영영 미루면 그건 판정이 아니라 고장이다.** 2026-09-10 에
+ * 만성적으로 따라잡는 볼트에서 `⚔️` 기록이 전부 보류로만 남았고, 어느 쪽도 안 쓰니
+ * 사용자에게는 "언제나 Obsidian 이 이긴다"로 보였다 → reconcile.conflictResolutionAllowed
+ */
+const CONFLICT_HOLD_MAX_MS = 15 * 60_000;
+/**
  * 뒤처짐이 풀린 뒤 "정착했다"로 인정하기까지 이어져야 하는 시간.
  *
  * **한 번의 표본은 정착이 아니다.** 2026-09-07 에 40분짜리 보류 구간 두 개 사이의 2초
@@ -1085,6 +1094,8 @@ export class SyncEngine {
 
     if (plan.uncheckSeen === "set") rec.uncheckSeenAt = Date.now();
     else if (plan.uncheckSeen === "clear") delete rec.uncheckSeenAt;
+    // 충돌이 실제로 해결됐다(또는 애초에 없었다) → 보류 시계를 끈다.
+    if (plan.conflictHeldClear) delete rec.conflictHeldAt;
     if (plan.holdDone) {
       console.log(`[tasks-gcal-sync] 완료 해제 → 다음 사이클에 재확인: ${id}`);
     }
@@ -1573,6 +1584,9 @@ export class SyncEngine {
           now: Date.now(),
           uncheckHoldMs: UNCHECK_HOLD_MS,
           conflictRetryMs: BEHIND_RECHECK_MS,
+          // 사람이 누른 실행이면 충돌 보류를 우회한다 — "지금 맞춰라"가 곧 그 뜻이다.
+          force: !!opts.force,
+          conflictHoldMaxMs: CONFLICT_HOLD_MAX_MS,
         });
 
         if (plan.kind === "merge") {
@@ -1611,8 +1625,16 @@ export class SyncEngine {
                     )})`
                 )
                 .join(", ");
-              detail = `⚔️⏸ ${detail} — ${each}, ${sec}초 뒤 재확인`;
+              const held =
+                rec.conflictHeldAt === undefined
+                  ? ""
+                  : ` · ${Math.round(
+                      (Date.now() - rec.conflictHeldAt) / 1000
+                    )}초째 보류(상한 ${CONFLICT_HOLD_MAX_MS / 60_000}분 · 리본으로 즉시 해결)`;
+              detail = `⚔️⏸ ${detail} — ${each}, ${sec}초 뒤 재확인${held}`;
             }
+            // 보류 시계는 **처음 미룬 시각**에 시작한다 → conflictResolutionAllowed 의 상한
+            if (plan.conflictHeldSeen === "set") rec.conflictHeldAt = Date.now();
             result.entries.push({
               // 되돌아올 보류와 영영 손대지 않는 스킵은 사후 추적에서 다르게 읽힌다.
               action: plan.reason === "hold-conflict" ? "HOLD" : "SKIP",

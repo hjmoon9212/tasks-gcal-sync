@@ -187,12 +187,27 @@ export function selectEntries(
   return entries.filter((e) => !noisy.includes(e.action));
 }
 
+/**
+ * 보류만 있는 블록을 쌓아 두었다가 **강제로 내보내는 상한**(ms).
+ *
+ * 조용해질 때까지 무한정 미루면 "지금 왜 멈춰 있나"를 실시간으로 볼 수 없다.
+ * 이 간격 안에는 한 번은 내보낸다 — 한 번의 쓰기는 짧고, 그 뒤 다시 조용해진다.
+ */
+const HOLD_FLUSH_MS = 60_000;
+
 export class SyncLogWriter {
   /**
-   * 파일 끝에 적혀 있는 블록. 다음 run이 같은 내용이면 새로 붙이는 대신 이걸 고쳐 쓴다.
-   * 로드마다 초기화된다 — 그때는 접기가 한 번 끊길 뿐, 기록이 틀어지지는 않는다.
+   * **파일에 실제로 적혀 있는** 끝 블록. `rewriteTail` 의 비교 기준이라 반드시 디스크
+   * 상태여야 한다. 로드마다 초기화된다 — 그때는 접기가 한 번 끊길 뿐이다.
    */
   private tail: LogBlock | null = null;
+  /**
+   * 아직 파일에 안 쓴 블록들. `replacesTail` 은 첫 항목에만 붙을 수 있고, 디스크 끝
+   * 블록을 고쳐 써서 반영해야 한다는 뜻이다(접기).
+   */
+  private queue: { block: LogBlock; replacesTail: boolean }[] = [];
+  /** 마지막으로 파일을 실제로 건드린 시각. */
+  private lastWriteAt = 0;
 
   constructor(private app: App, private config: () => SyncLogConfig) {}
 
@@ -206,9 +221,25 @@ export class SyncLogWriter {
    * 남길 항목이 없으면 아무것도 쓰지 않는다 — 5분 주기 동기화가 "변화 없음"으로
    * 파일을 채우면 정작 찾아야 할 삭제 한 줄이 묻힌다.
    *
-   * **같은 내용이 이어지면 블록을 새로 만들지 않고 `× N회` 로 접는다.** 볼트가 Sync 중일
-   * 때의 run 보류는 편집이 잦으면 십수 초마다 같은 줄을 남겨 파일을 채웠다(2026-08-16).
-   * 접어도 정보는 안 잃는다 — 첫 시각·끝 시각·횟수·계기가 헤더에 남는다.
+   * **같은 내용이 이어지면 블록을 새로 만들지 않고 `× N회` 로 접는다.** 접어도 정보는
+   * 안 잃는다 — 첫 시각·끝 시각·횟수·계기가 헤더에 남는다.
+   *
+   * ⛔ **보류·건너뜀만 있는 run 은 파일에 바로 쓰지 않고 쌓아 둔다.**
+   *
+   * 이 파일은 볼트 안에 있고, 볼트에 쓰면 Obsidian Sync 가 그것을 업로드한다. 업로드가
+   * 도는 동안 `vaultBehind()` 는 참이고, 참이면 run 이 보류되고, 보류도 로그 항목이라
+   * 또 쓴다 — **자기 쓰기가 자기 관측을 오염시킨다:**
+   *
+   *     run 보류 → 로그 쓰기 → Sync 업로드(syncing=true) → 15초 뒤 재확인도 보류
+   *       → 또 로그 쓰기 → …
+   *
+   * 2026-09-10 에 볼트가 15~30초마다 "따라잡는 중"으로 깜빡여 `vaultUnsettled`(30초 연속
+   * 정착)가 안 풀렸고, 그래서 삭제·충돌 해결·새 🆔 발급이 3분 넘게 멈췄다. 보류 블록이
+   * 두 종류라 번갈아 나오면 접기로도 못 막는다 — 서로 "다른 내용"이라 매번 쓴다.
+   *
+   * 그래서 기준을 **내용의 동일성이 아니라 종류**로 잡는다: 실제로 무언가 일어난 블록
+   * (CREATE·UPDATE·DELETE·PULL…)은 지금처럼 즉시 쓰고, **보류·건너뜀뿐이면 쌓아 둔다.**
+   * 볼트가 조용해져 일이 실제로 일어나는 순간 쌓인 것이 함께 나간다.
    */
   async append(
     summary: string,
@@ -220,31 +251,74 @@ export class SyncLogWriter {
     const shown = selectEntries(entries, cfg.logSkips);
     if (shown.length === 0) return;
 
-    const path = this.path();
-    const fresh = newBlock(summary, trigger, shown);
-    try {
-      const adapter = this.app.vault.adapter;
-      if (!(await adapter.exists(path))) {
-        await this.ensureParent(path);
-        await adapter.write(path, HEADER + this.legend() + renderBlock(fresh));
-        this.tail = fresh;
+    this.enqueue(newBlock(summary, trigger, shown), trigger);
+
+    const quietOnly = shown.every(
+      (e) => e.action === "HOLD" || e.action === "SKIP"
+    );
+    if (!quietOnly || Date.now() - this.lastWriteAt >= HOLD_FLUSH_MS) {
+      await this.flush();
+    }
+  }
+
+  /** 새 블록을 대기열에 넣는다. 직전과 같은 내용이면 새로 만들지 않고 접는다. */
+  private enqueue(fresh: LogBlock, trigger: string): void {
+    const last = this.queue[this.queue.length - 1];
+    if (last) {
+      if (last.block.signature === fresh.signature) {
+        last.block = extendBlock(last.block, trigger);
         return;
       }
-      if (this.tail && this.tail.signature === fresh.signature) {
-        const merged = extendBlock(this.tail, trigger);
-        if (await this.rewriteTail(path, renderBlock(this.tail), renderBlock(merged))) {
-          this.tail = merged;
-          return;
-        }
-        // 파일 끝이 우리가 아는 모양이 아니다(트림·사용자 편집·다른 기기) → 그냥 새로 붙인다.
+    } else if (this.tail && this.tail.signature === fresh.signature) {
+      // 디스크 끝 블록의 연장 → 새로 붙이지 않고 그 블록을 고쳐 쓴다.
+      this.queue.push({ block: extendBlock(this.tail, trigger), replacesTail: true });
+      return;
+    }
+    this.queue.push({ block: fresh, replacesTail: false });
+  }
+
+  /**
+   * 쌓인 블록을 파일에 반영한다. 쓸 게 없으면 아무것도 하지 않는다.
+   * 호출부: 실제 사건이 있는 run · 상한 초과 · 종료 직전(main).
+   */
+  async flush(): Promise<void> {
+    if (!this.queue.length) return;
+    const path = this.path();
+    const adapter = this.app.vault.adapter;
+    try {
+      if (!(await adapter.exists(path))) {
+        await this.ensureParent(path);
+        const body = this.queue.map((q) => renderBlock(q.block)).join("");
+        await adapter.write(path, HEADER + this.legend() + body);
+        this.tail = this.queue[this.queue.length - 1].block;
+        this.queue = [];
+        this.lastWriteAt = Date.now();
+        return;
       }
-      await adapter.append(path, renderBlock(fresh));
-      this.tail = fresh;
-      await this.trim(path, cfg.maxKB);
+      let text = "";
+      for (const item of this.queue) {
+        if (item.replacesTail && this.tail && !text) {
+          if (
+            await this.rewriteTail(path, renderBlock(this.tail), renderBlock(item.block))
+          ) {
+            this.tail = item.block;
+            continue;
+          }
+          // 파일 끝이 우리가 아는 모양이 아니다(트림·사용자 편집·다른 기기)
+          // → 남의 기록을 덮어쓰느니 새 블록으로 붙인다.
+        }
+        text += renderBlock(item.block);
+        this.tail = item.block;
+      }
+      if (text) await adapter.append(path, text);
+      this.queue = [];
+      this.lastWriteAt = Date.now();
+      await this.trim(path, this.config().maxKB);
     } catch (e) {
       // 로그를 못 쓰는 것이 동기화를 막아선 안 된다.
       console.error("[tasks-gcal-sync] 동기화 로그 기록 실패:", path, e);
       this.tail = null; // 실패했으면 파일 끝 상태를 더는 알 수 없다
+      this.queue = [];
     }
   }
 
@@ -301,7 +375,15 @@ export class SyncLogWriter {
     // stat.size(바이트)로 판정하고 text.length(문자)로 잘라 **상한을 넘겨도 아무것도
     // 잘리지 않은 채 "잘라냈다" 안내만 찍혔다**(2026-09-07: 512KB 상한에 563KB 파일).
     // 파일 전체의 실측 비율로 목표 문자 수를 환산한다.
-    const keepBytes = Math.floor(limit * 0.8);
+    // 남길 예산에서 **머리말 몫을 먼저 뺀다.** 헤더+범례+안내가 수백 바이트라, 이걸
+    // 빼지 않으면 "상한의 80%만큼 블록을 남겼는데 파일은 상한을 넘는" 상태가 된다.
+    const head =
+      HEADER +
+      `\n*(${maxKB}KB 상한 — ${stamp()} 에 이 지점 앞의 오래된 기록을 잘라냈다)*\n` +
+      this.legend() +
+      "\n";
+    const headBytes = new TextEncoder().encode(head).length;
+    const keepBytes = Math.max(0, Math.floor(limit * 0.8) - headBytes);
     const bytesPerChar = stat.size / text.length;
     const keepChars = Math.floor(keepBytes / bytesPerChar);
     let cut = Math.max(0, text.length - keepChars);
@@ -310,13 +392,6 @@ export class SyncLogWriter {
     // 실제로 잘라낸 게 없으면 안내도 쓰지 않는다. 안 자르고 "잘라냈다"고 적으면
     // 로그 자체를 못 믿게 된다 — 이 파일의 존재 이유가 사후 추적이다.
     if (cut <= 0) return;
-    await adapter.write(
-      path,
-      HEADER +
-        `\n*(${maxKB}KB 상한 — ${stamp()} 에 이 지점 앞의 오래된 기록을 잘라냈다)*\n` +
-        this.legend() +
-        "\n" +
-        text.slice(cut)
-    );
+    await adapter.write(path, head + text.slice(cut));
   }
 }
