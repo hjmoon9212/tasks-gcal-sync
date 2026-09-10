@@ -157,6 +157,12 @@ const BEHIND_RECHECK_MS = 15_000;
  */
 const CONFLICT_HOLD_MAX_MS = 15 * 60_000;
 /**
+ * pull 로 쓴 줄이 되돌아간 것으로 볼 수 있는 시간 창(ms).
+ *
+ * 이보다 늦게 달라졌으면 사용자 편집으로 본다 — 우리가 쓴 직후가 아니면 근거가 약하다.
+ */
+const REVERT_WINDOW_MS = 3 * 60_000;
+/**
  * 뒤처짐이 풀린 뒤 "정착했다"로 인정하기까지 이어져야 하는 시간.
  *
  * **한 번의 표본은 정착이 아니다.** 2026-09-07 에 40분짜리 보류 구간 두 개 사이의 2초
@@ -1090,7 +1096,13 @@ export class SyncEngine {
         where
       );
     }
-    if (applied.length) c.result.pulled++;
+    if (applied.length) {
+      c.result.pulled++;
+      // 방금 노트에 써넣은 줄을 기억해 둔다. 이게 곧바로 옛 값으로 되돌아가면 그건
+      // 사용자 편집이 아니라 되돌림이다 → run 의 되돌림 방어
+      rec.pulledLine = task.raw;
+      rec.pulledAt = Date.now();
+    }
 
     if (plan.uncheckSeen === "set") rec.uncheckSeenAt = Date.now();
     else if (plan.uncheckSeen === "clear") delete rec.uncheckSeenAt;
@@ -1644,6 +1656,52 @@ export class SyncEngine {
           } else {
             console.warn("[tasks-gcal-sync] 보류 record 재조회 실패:", id, e);
           }
+        }
+      }
+
+      // ── 되돌림 방어 ──
+      //
+      // pull 이 노트에 써넣은 줄이 **곧바로 옛 값으로 되돌아가는** 일이 있다(2026-09-10
+      // 실측: 14초 뒤, 같은 기기에서). 원인이 무엇이든 — 열려 있던 에디터 버퍼, 다른
+      // 플러그인, Sync — 결과는 하나다: 되돌아간 값을 다음 run 이 "사용자 편집"으로 읽고
+      // **GCal 에 올려 되돌림을 원격까지 전파한다.** GCal 을 기준으로 삼는 한 이게 그
+      // 기준이 무너지는 유일한 경로다.
+      //
+      // 우리가 쓴 줄이 짧은 시간 안에 사라졌고 **GCal 은 그 사이 바뀌지 않았다면**
+      // 되돌림으로 보고 그 줄을 한 번 다시 쓴다.
+      //
+      // ⛔ **한 번만 한다.** 두 번 하면 진짜 사용자 편집과 무한히 싸운다. 다시 쓴 뒤
+      //    기록을 지우므로, 사용자가 또 고치면 그건 그대로 존중된다.
+      if (
+        task &&
+        rec.pulledLine !== undefined &&
+        task.raw !== rec.pulledLine &&
+        Date.now() - (rec.pulledAt ?? 0) < REVERT_WINDOW_MS &&
+        (!ev || ev.updated === rec.gcalUpdated) // GCal 이 바뀌었으면 정상 판정으로 보낸다
+      ) {
+        const restored = rec.pulledLine;
+        delete rec.pulledLine;
+        delete rec.pulledAt;
+        try {
+          await this.writer.rewriteLine(task, restored);
+          result.pulled++;
+          result.entries.push({
+            action: "REPAIR",
+            id,
+            title: rec.title,
+            calendar: this.calName(rec.calendarId),
+            eventId: rec.eventId,
+            where: `${task.path}:${task.line + 1}`,
+            detail:
+              `방금 pull 로 쓴 줄이 되돌아감(GCal 은 그대로) → 되돌림으로 보고 다시 씀. ` +
+              `다시 되돌아가면 그때는 사용자 편집으로 존중한다 — 되돌아간 줄: \`${task.raw}\``,
+          });
+          console.warn(
+            `[tasks-gcal-sync] pull 로 쓴 줄이 되돌아감 → 다시 씀: ${id} ${task.path}:${task.line + 1}`
+          );
+          continue;
+        } catch (e) {
+          console.warn("[tasks-gcal-sync] 되돌림 복구 실패:", id, e);
         }
       }
 

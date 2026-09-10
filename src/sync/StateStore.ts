@@ -41,6 +41,15 @@ export interface SyncRecord {
    * 그냥 올린다 → SyncEngine.run 의 재조회
    */
   recheckRemote?: boolean;
+  /**
+   * pull 이 노트에 **마지막으로 써넣은 줄 원문**과 그 시각. 되돌림 방어의 근거다.
+   *
+   * 이 줄이 곧바로 옛 값으로 되돌아가는 일이 있다(2026-09-10 실측: 14초). 되돌아간 값을
+   * "사용자 편집"으로 읽으면 GCal 까지 옛 값으로 덮여 **되돌림이 원격에 전파된다.**
+   * 한 번만 다시 눌러 준다 — 두 번 하면 진짜 사용자 편집과 싸운다.
+   */
+  pulledLine?: string;
+  pulledAt?: number;
 
   /**
    * 마지막으로 본 task 줄의 **원문과 위치**.

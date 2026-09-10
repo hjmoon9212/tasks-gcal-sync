@@ -95,6 +95,17 @@ export class TaskWriter {
     return this.apply(task, (raw) => TaskLine.removeId(raw));
   }
 
+  /**
+   * 줄을 통째로 우리가 쓴 원문으로 되돌린다.
+   *
+   * pull 로 쓴 줄이 그 직후 옛 값으로 되돌아가는 일이 있다(2026-09-10 실측). 그때
+   * 되돌아간 값을 "사용자 편집"으로 읽어 GCal 에 올리면 **되돌림이 원격까지 전파된다.**
+   * 그 한 번을 다시 눌러 준다 → SyncEngine 의 되돌림 방어
+   */
+  rewriteLine(task: VaultTask, line: string): Promise<string> {
+    return this.apply(task, () => line);
+  }
+
   setStart(task: VaultTask, date: string): Promise<string> {
     return this.apply(task, (raw) => TaskLine.setStart(raw, date));
   }

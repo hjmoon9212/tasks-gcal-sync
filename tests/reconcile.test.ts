@@ -105,6 +105,8 @@ function harness(opts: {
     del: [] as string[],
     /** 미일정화(📅+🆔 동시 제거) 호출 — 0.9.0~ 엔진이 부르는 것은 이쪽이다. */
     unschedule: [] as string[],
+    /** 되돌림 방어로 다시 쓴 줄. */
+    rewrote: [] as string[],
     /** 전수 스캔(rebuildRecords) 호출 — timeMax 를 넘기는 건 이쪽뿐이다. */
     fullScan: 0,
     /** 노트에 실제로 쓴 것 — "가짜 충돌은 노트를 다시 쓰지 않는다"를 보려면 필요하다. */
@@ -149,6 +151,11 @@ function harness(opts: {
     removeId: async (t: any) => {
       calls.writes.push("removeId");
       t.id = undefined;
+    },
+    rewriteLine: async (t: any, line: string) => {
+      calls.writes.push("rewriteLine");
+      calls.rewrote.push(line);
+      t.raw = line;
     },
     // ⚠️ 실제 TaskWriter 는 쓰기 뒤 `refresh()` 로 **인메모리 task 의 파싱 필드를 갱신한다**
     //    (같은 run 안에서 이어지는 push 가 낡은 값을 올리지 않도록). 스텁도 그렇게 해야
@@ -1229,6 +1236,65 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
   });
   await h.engine.run();
   eq(h.calls.writes, [], "반복이 아니면 자동 정리하지 않는다 ★");
+}
+
+// ── ★★ pull 로 쓴 줄이 되돌아가면 한 번 다시 쓴다 (0.9.6) ──
+//
+// 2026-09-10 실측: 충돌에서 GCal 이 이겨 노트에 09-06 을 썼는데, **14초 뒤 같은 기기에서**
+// 그 줄이 09-10(옛 값)으로 되돌아가 있었고, 다음 run 이 그것을 "사용자 편집"으로 읽어
+// GCal 에 올렸다. 되돌림이 원격까지 전파된 것이다 — GCal 을 기준으로 삼는 한 그 기준이
+// 무너지는 유일한 경로다.
+{
+  const h = harness({
+    tasks: [task("A1", false)],
+    events: [doneEvent("A1", false, "100")],
+    records: {
+      A1: rec({
+        // 방금 pull 로 이 줄을 썼다고 기록해 둔 상태
+        pulledLine: "- [ ] #task 샘플 📅 2026-08-20 🆔 A1",
+        pulledAt: Date.now(),
+      }),
+    },
+  });
+  const r = await h.engine.run();
+  eq(h.calls.writes, ["rewriteLine"], "되돌아간 줄을 다시 쓴다 ★★");
+  eq(
+    h.calls.rewrote[0],
+    "- [ ] #task 샘플 📅 2026-08-20 🆔 A1",
+    "우리가 썼던 줄 그대로 ★★"
+  );
+  eq(h.calls.patch, [], "되돌아간 값을 GCal 에 올리지 않는다 ★★");
+  eq(
+    r.entries.some((e) => e.action === "REPAIR"),
+    true,
+    "무엇을 왜 다시 썼는지 남긴다"
+  );
+  eq(h.state.records.A1.pulledLine, undefined, "한 번 쓰고 기록을 지운다 ★");
+
+  // 두 번째 run — 기록이 없으니 이제는 사용자 편집으로 존중한다(무한 싸움 방지).
+  h.calls.writes.length = 0;
+  await h.engine.run();
+  eq(h.calls.writes, [], "두 번은 하지 않는다 ★★");
+}
+{
+  // GCal 이 그 사이 바뀌었으면 되돌림 방어가 아니라 **정상 판정**으로 보낸다.
+  const h = harness({
+    tasks: [task("A1", false)],
+    events: [doneEvent("A1", false, "999")], // updated 가 rec 와 다르다
+    records: {
+      A1: rec({
+        gcalUpdated: "100",
+        pulledLine: "- [ ] #task 샘플 📅 2026-08-20 🆔 A1",
+        pulledAt: Date.now(),
+      }),
+    },
+  });
+  await h.engine.run();
+  eq(
+    h.calls.writes.includes("rewriteLine"),
+    false,
+    "GCal 이 바뀌었으면 되돌림으로 보지 않는다 ★"
+  );
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
