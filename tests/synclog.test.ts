@@ -7,6 +7,7 @@
  *  - 개행이 섞여도 목록 한 줄이 유지된다.
  *  - 조용한 run(남길 항목 없음)은 빈 블록을 만들지 않는다.
  */
+import { TFile } from "obsidian";
 import {
   SyncLogEntry,
   SyncLogWriter,
@@ -140,26 +141,56 @@ ok(block.endsWith("\n"), "블록은 개행으로 끝난다(다음 append와 안 
 }
 
 // --- 파일에 실제로 쓰이는 모양 ---
+/**
+ * 볼트 스텁 — **Vault API** 를 흉내낸다(`adapter` 가 아니라).
+ *
+ * ⛔ 로그 파일은 볼트 안 파일이라 볼트 API 로 다뤄야 한다. 어댑터로 직접 쓰면 Obsidian 이
+ *    파일을 제대로 등록하지 못해 Dataview 가 *"Cannot index file, since it has no Obsidian
+ *    file metadata"* 로 터진다(2026-09-10 실측) → SyncLogWriter.file
+ */
 function fakeVault(seed: Record<string, string> = {}) {
   const files: Record<string, string> = { ...seed };
-  const adapter = {
-    exists: async (p: string) => p in files,
-    read: async (p: string) => files[p],
-    write: async (p: string, d: string) => {
-      files[p] = d;
-    },
-    append: async (p: string, d: string) => {
-      files[p] = (files[p] ?? "") + d;
-    },
-    mkdir: async () => {},
-    // ⚠️ **바이트**를 돌려준다. Obsidian의 adapter.stat도 바이트이고, 문자 수를 돌려주면
-    // 한국어(UTF-8 3바이트)에서 트림이 안 도는 버그가 테스트에 잡히지 않는다 — 실제로
-    // 2026-09-07까지 그랬다.
-    stat: async (p: string) => ({
-      size: new TextEncoder().encode(files[p] ?? "").length,
-    }),
+  const folders = new Set<string>();
+  /** TFile 흉내 — `stat.size` 는 **바이트**다. 문자 수를 돌려주면 한국어(UTF-8 3바이트)에서
+   *  트림이 안 도는 버그가 테스트에 안 잡힌다(2026-09-07 까지 실제로 그랬다). */
+  // ⚠️ **진짜 TFile 인스턴스여야 한다** — SyncLogWriter.file 이 `instanceof TFile` 로 거른다.
+  //    평범한 객체를 주면 "파일 없음"으로 읽혀 매번 새로 만들어 버린다.
+  const handles: Record<string, TFile> = {};
+  const tfile = (p: string): TFile | undefined => {
+    if (!(p in files)) return undefined;
+    if (!handles[p]) {
+      const f = new TFile();
+      f.path = p;
+      Object.defineProperty(f, "stat", {
+        get: () => ({ size: new TextEncoder().encode(files[p] ?? "").length }),
+      });
+      handles[p] = f;
+    }
+    return handles[p];
   };
-  return { app: { vault: { adapter } } as any, files };
+  const vault = {
+    getAbstractFileByPath: (p: string) =>
+      tfile(p) ?? (folders.has(p) ? { path: p } : null),
+    createFolder: async (p: string) => {
+      folders.add(p);
+    },
+    create: async (p: string, d: string) => {
+      files[p] = d;
+      return tfile(p);
+    },
+    read: async (f: any) => files[f.path],
+    modify: async (f: any, d: string) => {
+      files[f.path] = d;
+    },
+    append: async (f: any, d: string) => {
+      files[f.path] = (files[f.path] ?? "") + d;
+    },
+    process: async (f: any, fn: (t: string) => string) => {
+      files[f.path] = fn(files[f.path] ?? "");
+      return files[f.path];
+    },
+  };
+  return { app: { vault } as any, files };
 }
 
 (async () => {

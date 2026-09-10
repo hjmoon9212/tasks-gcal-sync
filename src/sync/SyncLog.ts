@@ -11,7 +11,7 @@
  * 여기는 포맷과 파일 I/O만 한다. 무엇을 기록할지는 SyncEngine이 정하고(SyncLogEntry),
  * 언제 쓸지는 main이 정한다 — 판단/실행/기록을 섞지 않는 이 레포의 구조를 따른다.
  */
-import { App, normalizePath } from "obsidian";
+import { App, TFile, normalizePath } from "obsidian";
 
 export type LogAction =
   | "CREATE" // 새 이벤트 생성
@@ -285,12 +285,12 @@ export class SyncLogWriter {
   async flush(): Promise<void> {
     if (!this.queue.length) return;
     const path = this.path();
-    const adapter = this.app.vault.adapter;
     try {
-      if (!(await adapter.exists(path))) {
+      const file = this.file(path);
+      if (!file) {
         await this.ensureParent(path);
         const body = this.queue.map((q) => renderBlock(q.block)).join("");
-        await adapter.write(path, HEADER + this.legend() + body);
+        await this.app.vault.create(path, HEADER + this.legend() + body);
         this.tail = this.queue[this.queue.length - 1].block;
         this.queue = [];
         this.lastWriteAt = Date.now();
@@ -300,7 +300,7 @@ export class SyncLogWriter {
       for (const item of this.queue) {
         if (item.replacesTail && this.tail && !text) {
           if (
-            await this.rewriteTail(path, renderBlock(this.tail), renderBlock(item.block))
+            await this.rewriteTail(file, renderBlock(this.tail), renderBlock(item.block))
           ) {
             this.tail = item.block;
             continue;
@@ -311,10 +311,10 @@ export class SyncLogWriter {
         text += renderBlock(item.block);
         this.tail = item.block;
       }
-      if (text) await adapter.append(path, text);
+      if (text) await this.app.vault.append(file, text);
       this.queue = [];
       this.lastWriteAt = Date.now();
-      await this.trim(path, this.config().maxKB);
+      await this.trim(file, this.config().maxKB);
     } catch (e) {
       // 로그를 못 쓰는 것이 동기화를 막아선 안 된다.
       console.error("[tasks-gcal-sync] 동기화 로그 기록 실패:", path, e);
@@ -329,15 +329,29 @@ export class SyncLogWriter {
    * 줄이 하나 늘어나는 편이 낫다.
    */
   private async rewriteTail(
-    path: string,
+    file: TFile,
     prev: string,
     next: string
   ): Promise<boolean> {
-    const adapter = this.app.vault.adapter;
-    const text = await adapter.read(path);
-    if (!text.endsWith(prev)) return false;
-    await adapter.write(path, text.slice(0, text.length - prev.length) + next);
-    return true;
+    let ok = false;
+    await this.app.vault.process(file, (text) => {
+      ok = text.endsWith(prev);
+      return ok ? text.slice(0, text.length - prev.length) + next : text;
+    });
+    return ok;
+  }
+
+  /**
+   * 로그 파일의 `TFile`. 없으면 undefined.
+   *
+   * ⛔ **`vault.adapter` 로 직접 읽고 쓰지 않는다**(0.9.11). 어댑터는 Vault 레이어를
+   * 건너뛰어 디스크를 바로 만지므로 Obsidian 이 그 파일을 제대로 등록하지 못하고,
+   * Dataview 같은 인덱서가 *"Cannot index file, since it has no Obsidian file metadata"*
+   * 로 터진다. 볼트 안 파일은 볼트 API 로 다뤄야 한다.
+   */
+  private file(path: string): TFile | undefined {
+    const f = this.app.vault.getAbstractFileByPath(path);
+    return f instanceof TFile ? f : undefined;
   }
 
   private legend(): string {
@@ -351,8 +365,9 @@ export class SyncLogWriter {
     const i = path.lastIndexOf("/");
     if (i < 0) return;
     const dir = path.slice(0, i);
-    const adapter = this.app.vault.adapter;
-    if (dir && !(await adapter.exists(dir))) await adapter.mkdir(dir);
+    if (!dir) return;
+    if (this.app.vault.getAbstractFileByPath(dir)) return;
+    await this.app.vault.createFolder(dir);
   }
 
   /**
@@ -360,15 +375,15 @@ export class SyncLogWriter {
    * 자를 위치는 run 블록 경계(`\n## `)로 맞춘다 — 항목 중간에서 끊으면 그 run의 기록이
    * 반쪽만 남아 오히려 오해를 만든다.
    */
-  private async trim(path: string, maxKB: number): Promise<void> {
+  private async trim(file: TFile, maxKB: number): Promise<void> {
     if (maxKB <= 0) return;
-    const adapter = this.app.vault.adapter;
-    const stat = await adapter.stat(path);
     const limit = maxKB * 1024;
-    if (!stat || stat.size <= limit) return;
+    // TFile.stat.size 는 **바이트**다(문자 수가 아니다) — 아래 환산이 그걸 전제로 한다.
+    if (file.stat.size <= limit) return;
 
-    const text = await adapter.read(path);
+    const text = await this.app.vault.read(file);
     if (!text.length) return;
+    const size = file.stat.size;
     // 상한의 80%만 남긴다. 딱 상한에 맞추면 다음 run마다 다시 자르게 된다.
     //
     // ⚠️ **상한은 바이트인데 자르는 위치는 문자 인덱스다.** 둘을 섞으면 안 된다 —
@@ -385,7 +400,7 @@ export class SyncLogWriter {
       "\n";
     const headBytes = new TextEncoder().encode(head).length;
     const keepBytes = Math.max(0, Math.floor(limit * 0.8) - headBytes);
-    const bytesPerChar = stat.size / text.length;
+    const bytesPerChar = size / text.length;
     const keepChars = Math.floor(keepBytes / bytesPerChar);
     let cut = Math.max(0, text.length - keepChars);
     const boundary = text.indexOf("\n## ", cut);
@@ -393,6 +408,6 @@ export class SyncLogWriter {
     // 실제로 잘라낸 게 없으면 안내도 쓰지 않는다. 안 자르고 "잘라냈다"고 적으면
     // 로그 자체를 못 믿게 된다 — 이 파일의 존재 이유가 사후 추적이다.
     if (cut <= 0) return;
-    await adapter.write(path, head + text.slice(cut));
+    await this.app.vault.modify(file, head + text.slice(cut));
   }
 }
