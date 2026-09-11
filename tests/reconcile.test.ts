@@ -1444,6 +1444,14 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
       true,
       "무엇을 왜 건너뛰었는지 남긴다"
     );
+    // ★★★ 이 설계의 **linchpin**. 못 올린 로컬 변경을 스냅샷에 적으면 "이미 반영됨" 이
+    //     되어 **그 편집이 영영 사라진다.** 폰은 push 를 못 하므로 여기가 늘 그 상황이다 —
+    //     기준선이 안 움직여야 데스크탑이 나중에 "로컬만 바뀜 → push" 로 집어 올린다.
+    eq(
+      h.state.records.A1.due,
+      TODAY,
+      "모바일: 못 올린 노트 변경을 스냅샷에 적지 않는다 ★★★"
+    );
   } finally {
     Platform.isMobile = false;
   }
