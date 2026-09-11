@@ -94,6 +94,18 @@ export interface PluginSettings {
    */
   minSyncIntervalSeconds: number;
 
+  /**
+   * **모바일에서는 GCal 에 쓰지 않는다**(기본 true, 0.10.0~).
+   *
+   * 모바일이 얻는 것(📆 일정 표시 · GCal 편집이 노트에 바로 반영)은 전부 **pull 쪽**이고,
+   * 위험한 것은 전부 **push 쪽**이다 — 콜드 스타트 60초·정착 30초를 폰 세션이 못 채우고,
+   * `workspace.on("quit")` 플러시가 폰에서는 안 돌며(백그라운드는 종료가 아니다),
+   * 좁은 화면의 체크박스 오탭이 곧바로 GCal 완료 해제가 된다.
+   *
+   * 갈라 놓으면 이득만 가져온다. GCal 반영은 지금처럼 데스크탑이 맡는다.
+   */
+  mobileReadOnly: boolean;
+
   // 상세 로그 — Notice·상태바·console이 모두 휘발성이라, 사후 추적은 이 파일로만 가능하다
   syncLogEnabled: boolean;
   syncLogPath: string; // 볼트 루트 기준. 볼트 안이면 Obsidian에서 바로 열람 가능
@@ -131,6 +143,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   // 연속 편집을 합치는 데는 3초면 충분하다.
   autoPushDebounceSeconds: 3,
   minSyncIntervalSeconds: 60,
+  mobileReadOnly: true,
   syncLogEnabled: true,
   syncLogPath: "Logs/GCal 동기화 로그.md",
   syncLogMaxKB: 512,

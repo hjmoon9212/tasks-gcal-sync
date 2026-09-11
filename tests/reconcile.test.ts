@@ -1416,6 +1416,56 @@ const rec = (over: Partial<SyncRecord> = {}): SyncRecord => ({
   eq(h.calls.writes, ["removeId"], "수동 실행은 정착 전에도 중복을 푼다 ★");
 }
 
+// ── ★★ 모바일 읽기 전용 — pull 은 돌고 push 는 안 한다 (0.10.0~) ──
+{
+  const { Platform } = require("obsidian");
+  const ev = doneEvent("A1", false, "200");
+  ev.start = { date: "2026-08-20" };
+  ev.end = { date: "2026-08-21" };
+  const h = harness({
+    tasks: [task("A1", false), { ...task("N1", false, "2099-01-01") } as any],
+    events: [ev],
+    records: { A1: rec({ gcalUpdated: "100" }) },
+    settings: { mobileReadOnly: true },
+  });
+  Platform.isMobile = true;
+  try {
+    const r = await h.engine.run({ force: true }); // 수동으로도 열리지 않아야 한다
+    eq(h.calls.patch, [], "모바일: GCal 에 push 하지 않는다 ★★");
+    eq(h.calls.insert, [], "모바일: 이벤트를 만들지 않는다 ★★");
+    eq(h.calls.del, [], "모바일: 이벤트를 지우지 않는다 ★★");
+    eq(
+      h.calls.writes.includes("setDue"),
+      true,
+      "모바일: pull 은 그대로 돈다(GCal → 노트) ★★"
+    );
+    eq(
+      r.entries.some((e) => (e.detail ?? "").includes("모바일 읽기 전용")),
+      true,
+      "무엇을 왜 건너뛰었는지 남긴다"
+    );
+  } finally {
+    Platform.isMobile = false;
+  }
+}
+{
+  // 설정을 끄면 모바일에서도 예전처럼 쓴다 — 기본값이 안전 쪽일 뿐이다.
+  const { Platform } = require("obsidian");
+  const h = harness({
+    tasks: [task("A1", false, "2026-08-19")],
+    events: [doneEvent("A1", false, "100")],
+    records: { A1: rec() },
+    settings: { mobileReadOnly: false },
+  });
+  Platform.isMobile = true;
+  try {
+    await h.engine.run();
+    eq(h.calls.patch.length, 1, "설정을 끄면 모바일도 push 한다 ★");
+  } finally {
+    Platform.isMobile = false;
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
   if (fail > 0) process.exit(1);
 })();

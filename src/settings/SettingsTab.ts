@@ -1,4 +1,4 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, Platform, PluginSettingTab, Setting } from "obsidian";
 import type TasksGcalSyncPlugin from "../main";
 
 /** Google Calendar 이벤트 색(colorId 1~11). */
@@ -66,9 +66,33 @@ export class SettingsTab extends PluginSettingTab {
     containerEl.createEl("h2", { text: "Tasks ⇄ Google Calendar Sync" });
 
     // ---- 1. Google 인증 ----
+    // ---- 0. 모바일 ----
+    // 폰에서도 로드되지만 **기본은 읽기 전용**이다. 그 이유는 Settings.mobileReadOnly 에.
+    if (Platform.isMobile) {
+      containerEl.createEl("h3", { text: "0. 이 기기(모바일)" });
+      new Setting(containerEl)
+        .setName("모바일에서는 GCal에 쓰지 않기")
+        .setDesc(
+          "켜 두면 이 기기는 **pull 만** 합니다 — GCal에서 고친 것이 노트에 들어오고, 📆 일정도 보입니다. " +
+            "노트 편집의 GCal 반영은 데스크탑이 맡습니다. " +
+            "끄면 폰에서도 GCal에 씁니다 ⚠️ 폰 세션은 콜드 스타트 60초·정착 30초를 못 채우는 일이 잦고, " +
+            "종료 직전 플러시도 폰에서는 돌지 않으며, 체크박스 오탭이 곧바로 GCal 완료 해제가 됩니다."
+        )
+        .addToggle((t) =>
+          t.setValue(s.mobileReadOnly).onChange(async (v) => {
+            s.mobileReadOnly = v;
+            await this.plugin.saveAll();
+          })
+        );
+    }
+
     containerEl.createEl("h3", { text: "1. Google 인증" });
     containerEl.createEl("p", {
-      text: "Google Cloud Console에서 OAuth 클라이언트(Desktop app)를 만들고 Client ID/Secret을 입력하세요. 인증은 데스크탑에서 실행합니다. 자격증명은 이 기기의 localStorage에만 저장되어 Obsidian Sync를 타지 않습니다 — 기기마다 개별 설정이 필요합니다.",
+      text:
+        "Google Cloud Console에서 OAuth 클라이언트(Desktop app)를 만들고 Client ID/Secret을 입력하세요. " +
+        "**대화형 인증은 데스크탑에서만** 실행됩니다(루프백 서버를 씁니다). " +
+        "자격증명은 이 기기의 localStorage에만 저장되어 Obsidian Sync를 타지 않습니다 — 기기마다 개별 설정이 필요합니다. " +
+        "모바일에서는 아래 「Refresh Token」에 데스크탑에서 받은 값을 붙여넣으세요.",
       cls: "setting-item-description",
     });
 
@@ -90,13 +114,36 @@ export class SettingsTab extends PluginSettingTab {
       t.inputEl.type = "password";
     });
 
+    // 모바일에는 대화형 인증 경로가 없다(루프백 서버 = Node http = 데스크탑 전용).
+    // refresh token 은 **기기에 묶이지 않으므로** 데스크탑에서 받은 값을 그대로 쓸 수 있다.
+    // 이 칸이 없던 동안은 그것이 모바일 지원을 통째로 막는 관문이었다.
+    new Setting(containerEl)
+      .setName("Refresh Token")
+      .setDesc(
+        "데스크탑에서 「Google 인증」을 마치면 채워집니다. 모바일에는 인증 경로가 없으므로 " +
+          "여기에 붙여넣으세요. ⚠️ 이 값이 곧 계정 접근 권한입니다 — 볼트 노트에 적어 두지 마세요."
+      )
+      .addText((t) => {
+        t.setPlaceholder("1//0e...").setValue(s.refreshToken ?? "");
+        t.onChange(async (v) => {
+          const next = v.trim();
+          s.refreshToken = next === "" ? null : next;
+          await this.plugin.saveAll();
+        });
+        t.inputEl.type = "password";
+        t.inputEl.style.width = "100%";
+      });
+
     new Setting(containerEl)
       .setName("인증 상태")
       .setDesc(this.plugin.auth.isAuthenticated() ? "✅ 인증됨" : "❌ 미인증")
       .addButton((b) =>
         b
-          .setButtonText("Google 인증")
+          .setButtonText(
+            Platform.isDesktopApp ? "Google 인증" : "인증은 데스크탑에서"
+          )
           .setCta()
+          .setDisabled(!Platform.isDesktopApp)
           .onClick(async () => {
             try {
               await this.plugin.auth.authenticateInteractive();

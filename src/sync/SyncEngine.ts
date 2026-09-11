@@ -1,4 +1,4 @@
-import { App, Notice } from "obsidian";
+import { App, Notice, Platform } from "obsidian";
 import { PluginSettings, resolveCalendar } from "../settings/Settings";
 import { PersistedState, SyncRecord } from "./StateStore";
 import { TaskRepository, VaultTask } from "../data/TaskRepository";
@@ -52,6 +52,7 @@ export type SkipKind =
   | "ensure-id-failed" // 🆔 쓰기 실패(줄이 그 사이 바뀜 등)
   | "create-failed" // 이벤트 생성 실패
   | "pull-failed" // 그 캘린더를 읽지 못함 → 읽지 못한 곳에는 쓰지 않는다
+  | "mobile-readonly" // 이 기기는 GCal 에 쓰지 않는다(모바일)
   | "push-precondition" // If-Match 412 — pull 이후 원격이 또 바뀌었다
   | "reconcile-error"; // 조정 중 예외
 
@@ -76,6 +77,8 @@ const SKIP_TEXT: Record<SkipKind, string> = {
   "create-failed": "이벤트 생성 실패",
   "pull-failed":
     "캘린더를 읽지 못함 → 그 캘린더의 record는 손대지 않음(읽지 못할 때는 쓰지도 않는다)",
+  "mobile-readonly":
+    "모바일 읽기 전용 → GCal에 쓰지 않음(pull은 정상. 반영은 데스크탑이 맡는다)",
   "push-precondition":
     "pull 이후 GCal이 또 바뀜 → push 포기(다음 run이 새 상태로 다시 판정한다)",
   "reconcile-error": "조정 중 예외",
@@ -1040,6 +1043,8 @@ export class SyncEngine {
     ev?: GCalEvent;
     result: SyncResult;
     coldHold: boolean;
+    /** 이 기기는 GCal 에 쓰지 않는다(모바일 읽기 전용). */
+    remoteReadOnly: boolean;
   }): Promise<void> {
     const { plan, id, rec, task } = c;
     const where = `${task.path}:${task.line + 1}`;
@@ -1122,7 +1127,7 @@ export class SyncEngine {
 
     // ── 2) push: GCal이 가져가지 않은 Obsidian 변경, 또는 표현 정규화 ──
     const normalizeNeeded = plan.normalizeIfPulled && applied.length > 0;
-    const canWriteRemote = !c.coldHold;
+    const canWriteRemote = !c.coldHold && !c.remoteReadOnly;
 
     const m: Snapshot = { ...plan.merged };
     // pull이 실패한 필드는 노트가 안 바뀌었으므로 스냅샷도 노트 현재값이다.
@@ -1437,6 +1442,17 @@ export class SyncEngine {
     }
     // 콜드 스타트 잠금: 로드 직후에는 원격에 아무것도 쓰지 않는다(pushArmed 주석 참고).
     const coldHold = !opts.force && !this.pushArmed();
+    /**
+     * 이 기기에서는 GCal 에 쓰지 않는다(모바일 읽기 전용).
+     *
+     * `coldHold` 와 달리 **시간이 지나도 안 풀리고 수동 실행도 우회하지 못한다.**
+     * pull 은 그대로 돈다 — 모바일이 얻는 것(📆 일정 표시 · GCal 편집이 노트에 바로
+     * 반영)은 전부 그쪽이고, 위험한 것은 전부 push 쪽이다 → Settings.mobileReadOnly
+     */
+    const remoteReadOnly = Platform.isMobile && this.settings.mobileReadOnly;
+    if (remoteReadOnly) {
+      console.log("[tasks-gcal-sync] 모바일 읽기 전용 → GCal 쓰기 없음(pull 만)");
+    }
     if (coldHold) {
       console.log("[tasks-gcal-sync] 콜드 스타트 → 이번 run은 pull 전용");
     }
@@ -1620,6 +1636,7 @@ export class SyncEngine {
       holdWrites,
       vaultUnsettled,
       coldHold,
+      remoteReadOnly,
     });
 
     for (const id of Object.keys(records)) {
@@ -1753,6 +1770,7 @@ export class SyncEngine {
             ev,
             result,
             coldHold,
+            remoteReadOnly,
           });
           continue;
         }
@@ -1982,6 +2000,18 @@ export class SyncEngine {
       // 안에 정리한다. 게다가 드리프트 가드가 "바뀐 줄에는 안 쓴다"를 이미 보장하고,
       // 실패하면 다음 run 이 재시도한다. **삭제·미일정화는 계속 막는다** — 그건 다른 기기가
       // 방금 만든 일정을 지우는 일이라 되돌리기 어렵다(destructiveAllowed 는 손대지 않았다).
+      if (remoteReadOnly) {
+        this.skip(result, "mobile-readonly");
+        result.entries.push({
+          action: "SKIP",
+          id: t.id,
+          title: this.titleBase(t),
+          calendar: target.name || target.id,
+          where: `${t.path}:${t.line + 1}`,
+          detail: SKIP_TEXT["mobile-readonly"],
+        });
+        continue;
+      }
       if (vaultUnsettled && !opts.force) {
         this.skip(result, "unsettled-create");
         result.entries.push({

@@ -40,6 +40,7 @@ const SKIP_LABEL: Record<SkipKind, string> = {
   "ensure-id-failed": "🆔 쓰기 실패",
   "create-failed": "이벤트 생성 실패",
   "pull-failed": "캘린더를 읽지 못함(쓰기 보류)",
+  "mobile-readonly": "모바일 읽기 전용(GCal 쓰기 없음)",
   "push-precondition": "GCal이 그 사이 또 바뀜(push 포기)",
   "reconcile-error": "조정 실패",
 };

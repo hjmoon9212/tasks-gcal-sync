@@ -74,6 +74,7 @@ const guards = (o: Partial<Guards> = {}): Guards => ({
   holdWrites: false,
   vaultUnsettled: false,
   coldHold: false,
+  remoteReadOnly: false,
   ...o,
 });
 
@@ -668,6 +669,27 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
     conflictResolutionAllowed(guards({ coldHold: true }), { force: true }),
     false,
     "콜드 스타트는 수동으로도 안 열린다 ★"
+  );
+}
+
+// ── ★ 모바일 읽기 전용 (0.10.0~) ──
+//
+// 모바일이 얻는 것(📆 일정 표시 · GCal 편집이 노트에 바로 반영)은 전부 **pull 쪽**이고,
+// 위험한 것은 전부 **push 쪽**이다 — 콜드 스타트 60초·정착 30초를 폰 세션이 못 채우고,
+// `workspace.on("quit")` 플러시가 폰에서는 안 돌며, 체크박스 오탭이 곧 완료 해제가 된다.
+{
+  const ro = guards({ remoteReadOnly: true });
+  eq(destructiveAllowed(ro), false, "읽기 전용이면 삭제하지 않는다 ★");
+  eq(
+    conflictResolutionAllowed(ro),
+    true,
+    "충돌 판정 자체는 막지 않는다 — GCal 이 이기면 그건 **노트 쓰기**라 모바일이 해도 된다 ★"
+  );
+  // 다른 가드와 독립이다 — 시간이 지나도 안 풀리고 수동 실행도 우회하지 못한다.
+  eq(
+    destructiveAllowed(guards({ remoteReadOnly: true, vaultUnsettled: false })),
+    false,
+    "정착해도 열리지 않는다 ★"
   );
 }
 

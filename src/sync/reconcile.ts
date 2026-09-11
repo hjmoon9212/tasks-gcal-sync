@@ -119,6 +119,13 @@ export interface Guards {
   vaultUnsettled: boolean;
   /** 플러그인이 막 로드됨 — 원격에 쓰지 않는다. */
   coldHold: boolean;
+  /**
+   * 이 기기에서는 **GCal 에 쓰지 않는다**(모바일 읽기 전용, 0.10.0~).
+   *
+   * `coldHold` 와 달리 **시간이 지나도 안 풀리고 수동 실행도 우회하지 못한다** — 그게
+   * 이 값의 뜻이다. pull(GCal → 노트)은 그대로 돈다 → Settings.mobileReadOnly
+   */
+  remoteReadOnly: boolean;
 }
 
 /**
@@ -132,7 +139,13 @@ export interface Guards {
  * 사이의 2초 틈**과 **fail-open 상한 초과** 둘 다 삭제를 열어줬다 → Guards.vaultUnsettled.
  */
 export function destructiveAllowed(g: Guards): boolean {
-  return !g.holdWrites && !g.coldHold && !g.adopted && !g.vaultUnsettled;
+  return (
+    !g.holdWrites &&
+    !g.coldHold &&
+    !g.adopted &&
+    !g.vaultUnsettled &&
+    !g.remoteReadOnly
+  );
 }
 
 /**
@@ -587,9 +600,10 @@ export class RunGuards {
     private readonly ctx: {
       dupIds: Set<string>;
       adopted: Set<string>;
-      holdWrites: boolean;
+        holdWrites: boolean;
       vaultUnsettled: boolean;
       coldHold: boolean;
+      remoteReadOnly: boolean;
     }
   ) {}
 
@@ -600,6 +614,7 @@ export class RunGuards {
       holdWrites: this.ctx.holdWrites,
       vaultUnsettled: this.ctx.vaultUnsettled,
       coldHold: this.ctx.coldHold,
+      remoteReadOnly: this.ctx.remoteReadOnly,
     };
   }
 }
