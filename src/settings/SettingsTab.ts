@@ -577,7 +577,8 @@ export class SettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("보류·건너뜀·실패도 기록")
       .setDesc(
-        "콜드 스타트 보류, 🆔 중복, API 실패처럼 '아무 일도 안 일어난' 이유. 지금은 콘솔에만 남고 재시작하면 사라집니다."
+        "콜드 스타트 보류, 🆔 중복, API 실패처럼 '아무 일도 안 일어난' 이유. 끄면 콘솔에만 남고 재시작하면 사라집니다. " +
+          "켜도 목차(Outline)는 어지럽지 않습니다 — 보류·건너뜀만 있던 run 은 제목 없이 `- ⏸` 묶음으로 접혀 들어갑니다."
       )
       .addToggle((t) =>
         t.setValue(s.syncLogSkips).onChange(async (v) => {

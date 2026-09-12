@@ -108,10 +108,122 @@ export function formatEntry(e: SyncLogEntry): string {
   return e.detail ? `${line} — ${flat(e.detail)}` : line;
 }
 
-/** 시:분:초만 (접힌 블록의 끝 시각처럼 날짜가 뻔한 자리에 쓴다). */
+/** 시:분:초만 (날짜가 절 제목에 적혀 있으므로 run 제목은 이걸 쓴다). */
 function hms(d: Date): string {
   const p = (n: number) => String(n).padStart(2, "0");
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+const DOW = ["일", "월", "화", "수", "목", "금", "토"];
+
+/** 날짜 절 제목(`## 2026-09-12 (토)`). **Outline 의 1단은 이것뿐이어야 한다.** */
+const DAY_LINE = /^(\d{4}-\d{2}-\d{2}) \([일월화수목금토]\)$/;
+
+/**
+ * 보류·건너뜀뿐인 run 묶음의 머리 표식.
+ * 제목이 아니라 목록 항목이라 Outline 에 뜨지 않는다 — `renderBlock` · `trim` ·
+ * `scripts/check-sync-log.mjs` 가 같은 문자열을 본다.
+ */
+const QUIET_MARK = "- ⏸";
+
+function dayKeyOf(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/**
+ * 동작 → 요약 기호.
+ *
+ * ⛔ **HOLD·SKIP 을 뺀 모든 동작이 여기 있어야 한다.** 빠진 동작은 `changeGist` 가 빈
+ * 문자열을 돌려 그 run 이 "조용한 run"으로 분류되고, 그러면 실제로 일어난 변경이 제목
+ * 없이 묶음 속에 묻혀 **Outline 에서 영원히 안 보인다.** 표의 완전성을 테스트가 고정한다.
+ */
+const GIST: Partial<Record<LogAction, string>> = {
+  CREATE: "+",
+  UPDATE: "~",
+  MOVE: "↔",
+  DELETE: "-",
+  DROP: "-",
+  PULL: "⬇",
+  UNSCHEDULE: "⬇",
+  ADOPT: "↩",
+  REPAIR: "🔧",
+  FAIL: "⚠",
+};
+const GIST_ORDER = ["+", "~", "↔", "-", "⬇", "↩", "🔧", "⚠"];
+
+/**
+ * 제목에 쓸 변경 요지. **0 인 계수기는 아예 안 적는다.**
+ *
+ * 예전 제목은 `+0 ~0 ↔0 -0 ⬇0 (skip 1)` 처럼 0 을 다 적었고, 실측 파일의 97%가 정확히
+ * 그 모양이었다(360블록 중 350). 그러면 Outline 이 똑같은 줄의 벽이 되어 정작 찾아야 할
+ * 변경 10~69건이 묻힌다.
+ */
+export function changeGist(entries: SyncLogEntry[]): string {
+  const n = new Map<string, number>();
+  for (const e of entries) {
+    const s = GIST[e.action];
+    if (s) n.set(s, (n.get(s) ?? 0) + 1);
+  }
+  return GIST_ORDER.filter((s) => n.has(s))
+    .map((s) => `${s}${n.get(s)}`)
+    .join(" ");
+}
+
+/** 보류·건너뜀뿐인 run 인가 — 제목을 만들지 않는 기준이 곧 이것이다. */
+export function isQuiet(entries: SyncLogEntry[]): boolean {
+  return changeGist(entries) === "";
+}
+
+/** 제목 한 줄이 화면을 넘기면 훑기가 안 된다 → 40자에서 끊는다. */
+function clip(s: string): string {
+  return s.length > 40 ? `${s.slice(0, 40)}…` : s;
+}
+
+/**
+ * 제목에 쓸 대상 이름. 제목 → 🆔 순으로 떨어지고, 둘 다 없으면 ""(호출부가 summary 로 메운다).
+ *
+ * **실제로 일어난 동작만 본다.** 같은 run 에 섞여 든 HOLD 의 제목이 끼면 "그 task 가
+ * 바뀐 것"으로 읽힌다.
+ */
+export function targetLabel(entries: SyncLogEntry[]): string {
+  const names: string[] = [];
+  for (const e of entries) {
+    if (!GIST[e.action]) continue;
+    const t = e.title ? `"${clip(flat(e.title))}"` : e.id ? `\`${e.id}\`` : "";
+    if (t && !names.includes(t)) names.push(t);
+  }
+  if (!names.length) return "";
+  return names.length > 1 ? `${names[0]} 외 ${names.length - 1}` : names[0];
+}
+
+/**
+ * 텍스트의 **마지막 최상위 제목**이 날짜 절이면 그 날짜, 아니면 null.
+ *
+ * 왜 "마지막 `## ` 줄"만 보나: 0.11 이전 포맷(`## 2026-08-16 09:05:03 · …`)이 파일 끝이면
+ * 그 아래에 `### ` run 을 넣어선 안 된다 — 그 시각 블록에 딸린 하위 항목처럼 읽힌다.
+ * 그때는 null 을 돌려 새 날짜 절을 열게 한다. 옛 블록은 마이그레이션하지 않으므로
+ * **두 포맷이 한 파일에 공존하는 것이 정상이다**(트림으로 늙어 나간다).
+ */
+export function lastDaySection(text: string): string | null {
+  let found: string | null = null;
+  const re = /^## (.*)$/gm;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    const d = DAY_LINE.exec(m[1].trimEnd());
+    found = d ? d[1] : null;
+  }
+  return found;
+}
+
+/**
+ * 잘라낸 앞부분에서 **마지막 날짜 절 제목 줄**을 찾는다(없으면 "").
+ * 트림이 하루 안에서 자를 때 그 제목을 되살리는 데 쓴다.
+ */
+function enclosingDayLine(prefix: string): string {
+  const re = /^## \d{4}-\d{2}-\d{2} \([일월화수목금토]\)$/gm;
+  let line = "";
+  for (let m = re.exec(prefix); m; m = re.exec(prefix)) line = m[0];
+  return line;
 }
 
 /**
@@ -128,6 +240,17 @@ export interface LogBlock {
   last: Date;
   count: number;
   lines: string[];
+  /** 이 블록이 속한 날짜 절(YYYY-MM-DD)과 요일. **접기는 이 경계를 넘지 않는다.** */
+  day: string;
+  dow: string;
+  /** 보류·건너뜀뿐인가 → 제목을 만들지 않는다(Outline 에 안 뜬다). */
+  quiet: boolean;
+  /**
+   * 제목용 파생값. **블록에 굳혀 둔다** — 렌더할 때마다 다시 계산해서 한 글자라도
+   * 달라지면 `rewriteTail` 의 `endsWith` 열쇠가 어긋나 접기가 중복 블록으로 폴백한다.
+   */
+  gist: string;
+  label: string;
 }
 
 export function newBlock(
@@ -137,7 +260,9 @@ export function newBlock(
   now = new Date()
 ): LogBlock {
   const lines = entries.map(formatEntry);
+  const gist = changeGist(entries);
   return {
+    // 접기 기준은 **항목 줄뿐**이다(요약·계기 제외, 들여쓰기 전 원문).
     signature: lines.join("\n"),
     summary,
     triggers: [trigger],
@@ -145,6 +270,11 @@ export function newBlock(
     last: now,
     count: 1,
     lines,
+    day: dayKeyOf(now),
+    dow: DOW[now.getDay()],
+    quiet: gist === "",
+    gist,
+    label: targetLabel(entries) || flat(summary),
   };
 }
 
@@ -158,14 +288,32 @@ export function extendBlock(b: LogBlock, trigger: string, now = new Date()): Log
   };
 }
 
-/** 블록을 파일에 적을 문자열로. 접힌 블록은 헤더에 기간과 횟수를 단다. */
+/**
+ * 블록을 파일에 적을 문자열로. 접힌 블록은 머리 줄에 기간과 횟수를 단다.
+ *
+ * ⛔ **날짜 절 제목(`## `)을 여기서 적지 않는다.** 이 문자열은 `rewriteTail` 의
+ * `endsWith` 열쇠다 — 절 제목까지 품으면 (a) 하루의 첫 블록만 렌더가 달라져 같은
+ * `signature` 가 서로 다른 렌더를 갖고, (b) 트림이 그 줄을 다시 쓰는 순간 열쇠가 어긋나
+ * 접기가 "중복 블록 append" 로 폴백한다 — 0.8.0 이 없앤 바로 그 손상이다.
+ * 절 제목은 `SyncLogWriter.daySection` 이 블록 밖에서 하루에 한 번 적는다.
+ */
 export function renderBlock(b: LogBlock): string {
-  const when =
-    b.count > 1 ? `${stamp(b.first)} ~ ${hms(b.last)}` : stamp(b.first);
+  const when = b.count > 1 ? `${hms(b.first)} ~ ${hms(b.last)}` : hms(b.first);
   const trig =
     b.triggers.length > 1 ? `${b.triggers[0]} 외 ${b.triggers.length - 1}종` : b.triggers[0];
   const times = b.count > 1 ? ` · ×${b.count}회` : "";
-  return `\n## ${when} · ${b.summary} · ${trig}${times}\n` + b.lines.join("\n") + "\n";
+  if (b.quiet) {
+    // 보류·건너뜀뿐 → **제목을 만들지 않는다.** 실측 파일의 97%가 이것이었고, 제목으로
+    // 두면 Outline 이 똑같은 줄의 벽이 된다. 대신 접히는 목록 항목으로 남기고 항목 줄은
+    // 자식으로 들여쓴다 — 진단 정보(어느 🆔가 왜 막혔나)는 그대로 남는다.
+    return (
+      `\n${QUIET_MARK} ${when}${times} · ${trig} — ${b.summary}\n` +
+      b.lines.map((l) => `  ${l}`).join("\n") +
+      "\n"
+    );
+  }
+  const label = b.label ? ` ${b.label}` : "";
+  return `\n### ${when} · ${b.gist}${label} · ${trig}${times}\n` + b.lines.join("\n") + "\n";
 }
 
 /** 이번 run 블록 전체(헤더 1줄 + 항목들). 파일에 붙일 문자열을 만든다. */
@@ -209,8 +357,21 @@ export class SyncLogWriter {
   private queue: { block: LogBlock; replacesTail: boolean }[] = [];
   /** 마지막으로 파일을 실제로 건드린 시각. */
   private lastWriteAt = 0;
+  /** 파일에 적혀 있는 **마지막 날짜 절**(YYYY-MM-DD). 없으면 null. */
+  private dayOnDisk: string | null = null;
+  /** 위 값을 실제로 파일에서 확인했는가. 로드 직후·쓰기 실패 후엔 false 다. */
+  private dayKnown = false;
 
-  constructor(private app: App, private config: () => SyncLogConfig) {}
+  /**
+   * @param now 시계 주입구 — 날짜 절·자정 접기 끊기·이틀에 걸친 트림은 시각을 밖에서
+   *   줘야 테스트로 고정할 수 있다. 기본값이 곧 실시간이라 호출부(main)는 안 바뀐다.
+   *   **클래스 안의 모든 시각은 이것 하나를 지나간다.**
+   */
+  constructor(
+    private app: App,
+    private config: () => SyncLogConfig,
+    private now: () => Date = () => new Date()
+  ) {}
 
   path(): string {
     return normalizePath(this.config().path);
@@ -252,30 +413,51 @@ export class SyncLogWriter {
     const shown = selectEntries(entries, cfg.logSkips);
     if (shown.length === 0) return;
 
-    this.enqueue(newBlock(summary, trigger, shown), trigger);
+    const block = newBlock(summary, trigger, shown, this.now());
+    this.enqueue(block, trigger);
 
-    const quietOnly = shown.every(
-      (e) => e.action === "HOLD" || e.action === "SKIP"
-    );
-    if (!quietOnly || Date.now() - this.lastWriteAt >= HOLD_FLUSH_MS) {
+    if (!block.quiet || this.now().getTime() - this.lastWriteAt >= HOLD_FLUSH_MS) {
       await this.flush();
     }
   }
 
-  /** 새 블록을 대기열에 넣는다. 직전과 같은 내용이면 새로 만들지 않고 접는다. */
+  /**
+   * 새 블록을 대기열에 넣는다. 직전과 같은 내용이면 새로 만들지 않고 접는다.
+   *
+   * ⛔ **날짜가 다르면 접지 않는다.** 접힌 블록은 날짜 절 하나 안에 사는데, 예전에는
+   * `19:36:10 ~ 02:41:57 ×356회`(실측) 같은 블록이 나왔다 — 어느 절에 넣어도 거짓이 된다.
+   */
   private enqueue(fresh: LogBlock, trigger: string): void {
     const last = this.queue[this.queue.length - 1];
     if (last) {
-      if (last.block.signature === fresh.signature) {
-        last.block = extendBlock(last.block, trigger);
+      if (last.block.signature === fresh.signature && last.block.day === fresh.day) {
+        last.block = extendBlock(last.block, trigger, fresh.first);
         return;
       }
-    } else if (this.tail && this.tail.signature === fresh.signature) {
+    } else if (
+      this.tail &&
+      this.tail.signature === fresh.signature &&
+      this.tail.day === fresh.day
+    ) {
       // 디스크 끝 블록의 연장 → 새로 붙이지 않고 그 블록을 고쳐 쓴다.
-      this.queue.push({ block: extendBlock(this.tail, trigger), replacesTail: true });
+      // 끝 시각은 **날짜를 판정한 그 순간**으로 넘긴다(23:59:59 판정 → 00:00:00 기록 방지).
+      this.queue.push({
+        block: extendBlock(this.tail, trigger, fresh.first),
+        replacesTail: true,
+      });
       return;
     }
     this.queue.push({ block: fresh, replacesTail: false });
+  }
+
+  /**
+   * 이 블록 앞에 날짜 절 제목이 필요하면 그 줄을 돌려주고 상태를 넘긴다.
+   * 하루에 한 번만 나간다 — Outline 의 1단이 이것뿐이어야 날짜로 접을 수 있다.
+   */
+  private daySection(b: LogBlock): string {
+    if (b.day === this.dayOnDisk) return "";
+    this.dayOnDisk = b.day;
+    return `\n## ${b.day} (${b.dow})\n`;
   }
 
   /**
@@ -289,36 +471,51 @@ export class SyncLogWriter {
       const file = this.file(path);
       if (!file) {
         await this.ensureParent(path);
-        const body = this.queue.map((q) => renderBlock(q.block)).join("");
+        // 새로 만드는 파일이다 — 절 제목이 하나도 없다(확인할 것도 없다).
+        this.dayOnDisk = null;
+        this.dayKnown = true;
+        const body = this.queue
+          .map((q) => this.daySection(q.block) + renderBlock(q.block))
+          .join("");
         await this.app.vault.create(path, HEADER + this.legend() + body);
         this.tail = this.queue[this.queue.length - 1].block;
         this.queue = [];
-        this.lastWriteAt = Date.now();
+        this.lastWriteAt = this.now().getTime();
         return;
+      }
+      // 로드 직후엔 "오늘 절 제목을 이미 적었는지"를 모른다 → 세션당 한 번 파일이 답한다.
+      // 기기-로컬 상태로 기억하지 않는다 — 답이 파일 안에 있는데 두 번째 진실원천을 두면
+      // 트림·사용자 편집·Sync 복원 때 어긋난다. 꼬리만 읽지도 않는다(조용한 묶음이 길면
+      // 창 안에 `## ` 이 없어 "절이 없다"로 잘못 판단해 제목이 중복된다).
+      if (!this.dayKnown) {
+        this.dayOnDisk = lastDaySection(await this.app.vault.read(file));
+        this.dayKnown = true;
       }
       let text = "";
       for (const item of this.queue) {
         if (item.replacesTail && this.tail && !text) {
+          // 접기 연장은 절 제목을 다시 적지 않는다(같은 날짜임이 enqueue 에서 보장된다).
           if (
             await this.rewriteTail(file, renderBlock(this.tail), renderBlock(item.block))
           ) {
             this.tail = item.block;
             continue;
           }
-          // 파일 끝이 우리가 아는 모양이 아니다(트림·사용자 편집·다른 기기)
+          // 파일 끝이 우리가 아는 모양이 아니다(트림·사용자 편집·0.11 이전 포맷)
           // → 남의 기록을 덮어쓰느니 새 블록으로 붙인다.
         }
-        text += renderBlock(item.block);
+        text += this.daySection(item.block) + renderBlock(item.block);
         this.tail = item.block;
       }
       if (text) await this.app.vault.append(file, text);
       this.queue = [];
-      this.lastWriteAt = Date.now();
+      this.lastWriteAt = this.now().getTime();
       await this.trim(file, this.config().maxKB);
     } catch (e) {
       // 로그를 못 쓰는 것이 동기화를 막아선 안 된다.
       console.error("[tasks-gcal-sync] 동기화 로그 기록 실패:", path, e);
       this.tail = null; // 실패했으면 파일 끝 상태를 더는 알 수 없다
+      this.dayKnown = false; // 절 제목도 모른다(안 나간 제목을 나갔다고 믿으면 고아가 된다)
       this.queue = [];
     }
   }
@@ -356,7 +553,9 @@ export class SyncLogWriter {
 
   private legend(): string {
     return (
-      "\n요약 기호: `+`생성 `~`수정 `↔`캘린더이동 `-`삭제 `⬇`노트반영\n" +
+      "\n구조: `## 날짜` 절 · `### 시각` 실제로 바뀐 run · " +
+      "`- ⏸` 보류·건너뜀만 있던 run(제목 없음 → Outline 에 안 뜬다)\n" +
+      "요약 기호: `+`생성 `~`수정 `↔`캘린더이동 `-`삭제 `⬇`노트반영 `↩`회수 `🔧`수리 `⚠`실패\n" +
       "상세 기호: `⬇`GCal→노트 `⬆`노트→GCal `⚔️`충돌(같은 필드를 양쪽에서 수정) `⏸`보류\n"
     );
   }
@@ -371,9 +570,20 @@ export class SyncLogWriter {
   }
 
   /**
-   * maxKB를 넘으면 오래된 앞부분을 잘라낸다.
-   * 자를 위치는 run 블록 경계(`\n## `)로 맞춘다 — 항목 중간에서 끊으면 그 run의 기록이
-   * 반쪽만 남아 오히려 오해를 만든다.
+   * maxKB를 넘으면 오래된 앞부분을 잘라낸다. 항목 중간에서 끊으면 그 run의 기록이
+   * 반쪽만 남아 오히려 오해를 만들므로 경계를 맞춘다.
+   *
+   * 자를 위치는 **날짜 절 경계(`\n## `)를 우선**한다. 자른 뒤 첫 구조 줄이 날짜 제목이면
+   * 살아남은 run 이 전부 제 날짜 밑에 있다. `\n### ` 에서 자르면 그 run 들은 날짜 없는
+   * 고아가 되고 "언제 것인지 알 수 없는 변경"이 된다 — 이 포맷의 존재 이유가 사라진다.
+   *
+   * 다만 **하루가 예산보다 클 수 있다**(조용한 묶음이 수백 회 쌓인 날). 그때는 남은 구간에
+   * 날짜 경계가 없으므로 run(또는 조용한 묶음) 경계에서 자르고 **그 run 을 품고 있던 날짜
+   * 제목을 다시 적는다.**
+   *
+   * 여기서 보장되는 것(`dayOnDisk` 가 이것에 의지한다): 트림은 **파일의 마지막 날짜 절을
+   * 바꾸지 않는다.** 1순위는 마지막 제목 뒤에 `\n## ` 가 없어 그 제목을 못 자르고,
+   * 2·3순위는 잘린 제목과 **같은 날짜**를 다시 적는다.
    */
   private async trim(file: TFile, maxKB: number): Promise<void> {
     if (maxKB <= 0) return;
@@ -395,19 +605,31 @@ export class SyncLogWriter {
     // 빼지 않으면 "상한의 80%만큼 블록을 남겼는데 파일은 상한을 넘는" 상태가 된다.
     const head =
       HEADER +
-      `\n*(${maxKB}KB 상한 — ${stamp()} 에 이 지점 앞의 오래된 기록을 잘라냈다)*\n` +
+      `\n*(${maxKB}KB 상한 — ${stamp(this.now())} 에 이 지점 앞의 오래된 기록을 잘라냈다)*\n` +
       this.legend() +
       "\n";
     const headBytes = new TextEncoder().encode(head).length;
     const keepBytes = Math.max(0, Math.floor(limit * 0.8) - headBytes);
     const bytesPerChar = size / text.length;
     const keepChars = Math.floor(keepBytes / bytesPerChar);
-    let cut = Math.max(0, text.length - keepChars);
-    const boundary = text.indexOf("\n## ", cut);
-    cut = boundary >= 0 ? boundary + 1 : cut;
+    const want = Math.max(0, text.length - keepChars);
+
+    let cut = text.indexOf("\n## ", want); // 1순위: 날짜 절(0.11 이전 블록도 같은 토큰)
+    let carry = "";
+    if (cut >= 0) {
+      cut += 1;
+    } else {
+      cut = text.indexOf("\n### ", want); // 2순위: run 경계
+      if (cut < 0) cut = text.indexOf(`\n${QUIET_MARK} `, want); // 3순위: 조용한 묶음 경계
+      if (cut < 0) cut = want; // 경계가 아예 없다(옛 포맷 단일 블록 등) → 예산 지점에서
+      else cut += 1;
+      const day = enclosingDayLine(text.slice(0, cut));
+      // 잘려 나간 절 제목을 되살린다 → 고아 run 방지. 빈 줄까지 붙여 평소 렌더와 같은 모양으로.
+      if (day) carry = `${day}\n\n`;
+    }
     // 실제로 잘라낸 게 없으면 안내도 쓰지 않는다. 안 자르고 "잘라냈다"고 적으면
     // 로그 자체를 못 믿게 된다 — 이 파일의 존재 이유가 사후 추적이다.
     if (cut <= 0) return;
-    await this.app.vault.modify(file, head + text.slice(cut));
+    await this.app.vault.modify(file, head + carry + text.slice(cut));
   }
 }
