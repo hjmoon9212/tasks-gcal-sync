@@ -1,26 +1,28 @@
+/*
+ * TaskLine 공유 테스트 — tasks-gcal-sync 와 gcal-calendar-view 가 **같은 파일을 그대로** 돌린다.
+ *
+ * 두 플러그인이 같은 노트 쓰기 규칙(⏰ 삽입 위치 · 📅/🛫 치환 · 제목 정리)을 쓰는지 여기서 판정한다.
+ * 그래서 이 파일은 공유 모듈(TaskLine · timeRange) 말고는 아무것도 import 하지 않고,
+ * 단언 헬퍼도 인라인으로 둔다(tests/helpers 는 저장소마다 다르다).
+ */
 import {
-  parseTaskLine,
-  setDue,
-  removeDue,
-  setId,
-  removeId,
-  setStatusChar,
-  setDoneDate,
-  removeDone,
   cleanTitle,
-  setTime,
+  isTaskLine,
+  parseTaskLine,
+  removeDone,
+  removeDue,
+  removeId,
+  removeStart,
   removeTime,
+  replaceTitle,
+  setDoneDate,
+  setDue,
+  setId,
+  setStart,
+  setStatusChar,
+  setTime,
 } from "../src/data/TaskLine";
-import { resolveCalendar } from "../src/settings/Settings";
-import {
-  addDays,
-  daysBetween,
-  isValidTimeRange,
-  normalizeTimeRange,
-  shiftDateTime,
-  timeOfDateTime,
-  toDateTime,
-} from "../src/sync/dates";
+import { isValidTimeRange, normalizeTimeRange } from "../src/sync/dates";
 
 let pass = 0;
 let fail = 0;
@@ -131,48 +133,6 @@ eq(parseTaskLine(L2, F)!.tags, ["#task/sheet", "#865"], "L2 tags");
 const Lg = "- [ ] #task #gcal/Growth 운동하기 📅 2026-07-01 🆔 Gg1234";
 eq(parseTaskLine(Lg, F)!.tags, ["#task", "#gcal/Growth"], "gcal tag parsed");
 
-// --- resolveCalendar 라우팅 (#gcal/캘린더명) ---
-const settings: any = {
-  routingTagPrefix: "#gcal/",
-  rules: [
-    // 보정 규칙: 태그명(개인)과 실제 캘린더명(개인 일정)이 다른 경우
-    { tag: "개인", calendarId: "personal@cal", calendarName: "개인 일정" },
-  ],
-  calendars: [
-    { id: "growth@cal", name: "Growth" },
-    { id: "works@cal", name: "Works" },
-  ],
-  defaultCalendarId: "default@cal",
-  defaultCalendarName: "Default",
-};
-eq(resolveCalendar(["#task", "#gcal/Growth"], settings)?.id, "growth@cal", "auto-match by name");
-eq(resolveCalendar(["#task", "#gcal/works"], settings)?.id, "works@cal", "auto-match case-insensitive");
-eq(resolveCalendar(["#task", "#gcal/개인"], settings)?.id, "personal@cal", "rule override by name");
-eq(resolveCalendar(["#task"], settings)?.id, "default@cal", "no gcal tag → default");
-eq(resolveCalendar(["#task", "#gcal/Unknown"], settings)?.id, "default@cal", "unknown name → default");
-eq(
-  resolveCalendar(["#task", "#gcal/Growth"], {
-    routingTagPrefix: "#gcal/",
-    rules: [],
-    calendars: [],
-    defaultCalendarId: "",
-    defaultCalendarName: "",
-  } as any),
-  null,
-  "no match, no default → null"
-);
-
-// --- 날짜 헬퍼 (타임블록 보존) ---
-eq(addDays("2026-07-05", 5), "2026-07-10", "addDays +5");
-eq(addDays("2026-07-31", 1), "2026-08-01", "addDays 월넘김");
-eq(daysBetween("2026-07-05", "2026-07-10"), 5, "daysBetween");
-eq(daysBetween("2026-07-10", "2026-07-05"), -5, "daysBetween 음수");
-eq(
-  shiftDateTime("2026-07-05T14:00:00+09:00", 5),
-  "2026-07-10T14:00:00+09:00",
-  "shiftDateTime 시각·오프셋 유지하며 날짜만 이동"
-);
-
 // --- 하드닝: 손상된 날짜 자가 치유 (날짜 뒤 잉여 숫자/하이픈 소거) ---
 eq(
   setDue("- [ ] #task 데모 📅 2026-08-038-03 🆔 pgDvAD", "2026-08-03"),
@@ -280,9 +240,84 @@ eq(isValidTimeRange("14:00"), false, "isValidTimeRange 범위 아님 거부");
 eq(isValidTimeRange("24:00-25:00"), false, "isValidTimeRange 24시 거부");
 eq(isValidTimeRange(undefined), false, "isValidTimeRange undefined");
 eq(normalizeTimeRange("9:05"), "09:05-10:05", "normalizeTimeRange 기본 1시간");
-eq(timeOfDateTime("2026-08-20T14:00:00+09:00"), "14:00", "timeOfDateTime");
-eq(timeOfDateTime("2026-08-20"), undefined, "timeOfDateTime 날짜만이면 undefined");
-eq(toDateTime("2026-08-20", "9:05"), "2026-08-20T09:05:00", "toDateTime 패딩");
+// --- isTaskLine: 체크박스 줄 모양만 본다(필터 태그와 무관) ---
+eq(isTaskLine("- [ ] 아무 일"), true, "isTaskLine: 기본");
+eq(isTaskLine("    * [x] 들여쓴 완료"), true, "isTaskLine: 들여쓰기 · * 불릿");
+eq(isTaskLine("+ [/] 진행 중"), true, "isTaskLine: + 불릿 · 임의 상태 문자");
+eq(isTaskLine("- [] 빈 괄호"), false, "isTaskLine: 상태 문자 없음 거부");
+eq(isTaskLine("-[ ] 공백 없음"), false, "isTaskLine: 불릿 뒤 공백 필수");
+eq(isTaskLine("그냥 문장"), false, "isTaskLine: 체크박스 아님");
+
+// --- 🛫 start 재작성 ---
+eq(
+  setStart("- [ ] #task 준비 📅 2026-08-20 🆔 ab12cd", "2026-08-18"),
+  "- [ ] #task 준비 📅 2026-08-20 🆔 ab12cd 🛫 2026-08-18",
+  "setStart: 없으면 줄 끝에 추가"
+);
+eq(
+  setStart("- [ ] #task 준비 🛫 2026-08-01 📅 2026-08-20", "2026-08-18"),
+  "- [ ] #task 준비 🛫 2026-08-18 📅 2026-08-20",
+  "setStart: 있으면 제자리 교체"
+);
+eq(
+  setStart("- [ ] #task 준비 🛫 2026-08-018-01 📅 2026-08-20", "2026-08-18"),
+  "- [ ] #task 준비 🛫 2026-08-18 📅 2026-08-20",
+  "setStart: 손상 날짜 잉여까지 정리"
+);
+eq(
+  removeStart("- [ ] #task 준비 🛫 2026-08-01 📅 2026-08-20"),
+  "- [ ] #task 준비 📅 2026-08-20",
+  "removeStart: 🛫 만 제거"
+);
+eq(removeStart("- [ ] #task 준비 📅 2026-08-20"), "- [ ] #task 준비 📅 2026-08-20", "removeStart: 없으면 무변화");
+
+// --- replaceTitle: 정확히 1회 매칭될 때만 ---
+eq(
+  replaceTitle("- [ ] #task 보고서 작성 📅 2026-08-20", "보고서 작성", "  주간 보고  "),
+  "- [ ] #task 주간 보고 📅 2026-08-20",
+  "replaceTitle: 1회 매칭 교체 · 새 제목 trim"
+);
+eq(replaceTitle("- [ ] #task 보고서 📅 2026-08-20", "회의", "x"), null, "replaceTitle: 0회 → null");
+eq(replaceTitle("- [ ] #task 보고 보고 📅 2026-08-20", "보고", "x"), null, "replaceTitle: 2회 이상 → null");
+eq(replaceTitle("- [ ] #task 보고 📅 2026-08-20", "   ", "x"), null, "replaceTitle: 빈 제목 → null");
+
+// --- cleanTitle: ⛔ 의존 · 우선순위 · ⏳ ---
+eq(
+  cleanTitle("#task 배포 ⛔ abc123,def456 🔺 ⏳ 2026-08-19 📅 2026-08-20", F),
+  "배포",
+  "cleanTitle: ⛔ 목록 · 우선순위 · ⏳ 제거"
+);
+eq(cleanTitle("#task/sheet 시트 정리 ⏬", F), "시트 정리", "cleanTitle: 필터 하위태그 · 낮은 우선순위 제거");
+eq(cleanTitle("#task 필터 없음 모드", ""), "#task 필터 없음 모드", "cleanTitle: 필터가 비면 태그를 남긴다");
+
+// --- ★ 정본 규칙: 📆 🗓 ⌛ 는 필드 이모지가 아니다 ---
+// gcal-calendar-view 의 옛 쓰기 경로는 셋을 필드로 봐서 ⏰ 삽입 위치가 달랐다.
+// 정본을 바꾸는 것은 공유 버전 major 이고 리팩토링 릴리스가 할 일이 아니다 — 지금 규칙을 못 박는다.
+eq(
+  setTime("- [ ] #task 회의 📆 2026-08-20", "09:00-10:00"),
+  "- [ ] #task 회의 📆 2026-08-20 ⏰ 09:00-10:00",
+  "📆 는 필드가 아니다 → ⏰ 를 줄 끝에"
+);
+eq(
+  setTime("- [ ] #task 회의 🗓 2026-08-20 📅 2026-08-21", "09:00-10:00"),
+  "- [ ] #task 회의 🗓 2026-08-20 ⏰ 09:00-10:00 📅 2026-08-21",
+  "🗓 는 건너뛰고 📅 앞에"
+);
+eq(
+  setTime("- [ ] #task 회의 ⌛ 2026-08-20", "09:00-10:00"),
+  "- [ ] #task 회의 ⌛ 2026-08-20 ⏰ 09:00-10:00",
+  "⌛ 는 필드가 아니다 → ⏰ 를 줄 끝에"
+);
+eq(parseTaskLine("- [ ] #task 회의 📆 2026-08-20", F)!.due, undefined, "📆 는 due 로 읽지 않는다");
+
+// --- 완료 필드 헬퍼: 들여쓰기·이미 있는 값 ---
+eq(setStatusChar("    - [ ] 하위 일", "x"), "    - [x] 하위 일", "setStatusChar: 들여쓰기 보존");
+eq(
+  setDoneDate("- [x] #task 끝 ✅ 2026-08-01", "2026-08-20"),
+  "- [x] #task 끝 ✅ 2026-08-01",
+  "setDoneDate: 이미 있으면 무변화"
+);
+eq(removeDone("- [x] #task 끝"), "- [x] #task 끝", "removeDone: 없으면 무변화");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
