@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "typecheck:test": "tsc -p tsconfig.test.json",
     "test": "node esbuild.test.mjs",
+    "test:one": "node scripts/test-one.mjs",
     "version-bump": "node version-bump.mjs"
   },
   "keywords": [

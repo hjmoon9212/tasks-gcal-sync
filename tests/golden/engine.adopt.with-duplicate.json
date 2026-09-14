@@ -1,0 +1,93 @@
+{
+  "trace": [
+    [
+      "run",
+      {
+        "force": false,
+        "fullScan": false
+      }
+    ],
+    [
+      "client.listEvents",
+      "cal-1",
+      {
+        "singleEvents": "true",
+        "showDeleted": "false",
+        "maxResults": "2500",
+        "timeMin": "2024-08-06T12:00:00~local",
+        "timeMax": "2028-08-05T12:00:00~local"
+      }
+    ],
+    [
+      "client.findByTaskId",
+      "cal-1",
+      "A1"
+    ],
+    [
+      "client.deleteEvent",
+      "cal-1",
+      "ev-A1-dup"
+    ]
+  ],
+  "results": [
+    {
+      "created": 0,
+      "updated": 0,
+      "moved": 0,
+      "deleted": 1,
+      "pulled": 0,
+      "skipped": 0,
+      "skips": {},
+      "failures": [],
+      "entries": [
+        {
+          "action": "ADOPT",
+          "id": "A1",
+          "title": "샘플",
+          "calendar": "Test",
+          "eventId": "ev-A1",
+          "where": "note.md:1",
+          "detail": "GCal에 이미 있던 이벤트를 매핑으로 회수(다른 기기가 만든 것) — 새로 만들지 않음"
+        },
+        {
+          "action": "DELETE",
+          "id": "A1",
+          "title": "샘플",
+          "calendar": "Test",
+          "eventId": "ev-A1-dup",
+          "where": "note.md:1",
+          "detail": "같은 🆔의 중복 이벤트 정리 (정본 ev-A1 유지)"
+        }
+      ]
+    }
+  ],
+  "records": {
+    "A1": {
+      "eventId": "ev-A1",
+      "calendarId": "cal-1",
+      "due": "2026-08-06",
+      "start": "2026-08-06",
+      "time": "",
+      "done": false,
+      "title": "샘플",
+      "gcalUpdated": "300"
+    }
+  },
+  "syncTokens": {},
+  "lastFullScanAt": "<now+0>",
+  "tasks": [
+    {
+      "id": "A1",
+      "due": "2026-08-09",
+      "start": null,
+      "time": null,
+      "text": null,
+      "raw": "- [ ] #task 샘플 📅 2026-08-09 🆔 A1"
+    }
+  ],
+  "engine": {
+    "pullCycleDone": true,
+    "behindSince": null,
+    "settledSince": "<now-600000>"
+  }
+}

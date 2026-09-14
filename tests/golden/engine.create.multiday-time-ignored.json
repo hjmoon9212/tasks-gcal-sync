@@ -1,0 +1,106 @@
+{
+  "trace": [
+    [
+      "run",
+      {
+        "force": false,
+        "fullScan": false
+      }
+    ],
+    [
+      "client.listEvents",
+      "cal-1",
+      {
+        "singleEvents": "true",
+        "showDeleted": "false",
+        "maxResults": "2500",
+        "timeMin": "2024-08-06T12:00:00~local",
+        "timeMax": "2028-08-05T12:00:00~local"
+      }
+    ],
+    [
+      "client.findByTaskId",
+      "cal-1",
+      "N1"
+    ],
+    [
+      "client.insertEvent",
+      "cal-1",
+      {
+        "summary": "☐ 샘플",
+        "description": "— tasks-gcal-sync —\n📁 vault\n🆔 N1\n🔗 obsidian://open?vault=vault&file=note.md",
+        "start": {
+          "date": "2026-08-07"
+        },
+        "end": {
+          "date": "2026-08-10"
+        },
+        "extendedProperties": {
+          "private": {
+            "tgsTaskId": "N1",
+            "tgsSource": "tasks-gcal-sync",
+            "tgsVault": "vault",
+            "tgsDue": "2026-08-09",
+            "tgsStart": "2026-08-07",
+            "tgsTime": "",
+            "tgsDone": "0",
+            "tgsTitle": "샘플"
+          }
+        },
+        "colorId": null
+      }
+    ]
+  ],
+  "results": [
+    {
+      "created": 1,
+      "updated": 0,
+      "moved": 0,
+      "deleted": 0,
+      "pulled": 0,
+      "skipped": 0,
+      "skips": {},
+      "failures": [],
+      "entries": [
+        {
+          "action": "CREATE",
+          "id": "N1",
+          "title": "샘플",
+          "calendar": "Test",
+          "eventId": "new",
+          "where": "note.md:1",
+          "detail": "due=2026-08-09 start=2026-08-07 (종일)"
+        }
+      ]
+    }
+  ],
+  "records": {
+    "N1": {
+      "eventId": "new",
+      "calendarId": "cal-1",
+      "due": "2026-08-09",
+      "start": "2026-08-07",
+      "time": "",
+      "done": false,
+      "title": "샘플",
+      "gcalUpdated": "9999"
+    }
+  },
+  "syncTokens": {},
+  "lastFullScanAt": "<now+0>",
+  "tasks": [
+    {
+      "id": "N1",
+      "due": "2026-08-09",
+      "start": "2026-08-07",
+      "time": "09:00-10:30",
+      "text": null,
+      "raw": "- [ ] #task 샘플 📅 2026-08-09 🆔 N1"
+    }
+  ],
+  "engine": {
+    "pullCycleDone": true,
+    "behindSince": null,
+    "settledSince": "<now-600000>"
+  }
+}

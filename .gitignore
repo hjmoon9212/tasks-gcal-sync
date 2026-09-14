@@ -4,3 +4,5 @@ main.js
 data.json
 state.json
 .test-build/
+tests/golden/*.actual
+.test-build-one/

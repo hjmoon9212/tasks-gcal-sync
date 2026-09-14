@@ -1,0 +1,154 @@
+{
+  "trace": [
+    [
+      "run",
+      {
+        "force": false,
+        "fullScan": false
+      }
+    ],
+    [
+      "writer.removeId",
+      {
+        "task": "A1",
+        "line": 1
+      }
+    ],
+    [
+      "client.listEvents",
+      "cal-1",
+      {
+        "singleEvents": "true",
+        "showDeleted": "false",
+        "maxResults": "2500",
+        "timeMin": "2024-08-06T12:00:00~local",
+        "timeMax": "2028-08-05T12:00:00~local"
+      }
+    ],
+    [
+      "client.listEvents",
+      "cal-1",
+      {
+        "singleEvents": "true",
+        "showDeleted": "true",
+        "maxResults": "2500",
+        "timeMin": "2026-07-07T12:00:00~local"
+      }
+    ],
+    [
+      "writer.ensureId",
+      {
+        "task": null,
+        "line": 1
+      },
+      "AAAAAC"
+    ],
+    [
+      "client.insertEvent",
+      "cal-1",
+      {
+        "summary": "☐ 🔁 샘플",
+        "description": "— tasks-gcal-sync —\n📁 vault\n🆔 AAAAAC\n🔗 obsidian://open?vault=vault&file=note.md",
+        "start": {
+          "date": "2026-08-07"
+        },
+        "end": {
+          "date": "2026-08-08"
+        },
+        "extendedProperties": {
+          "private": {
+            "tgsTaskId": "AAAAAC",
+            "tgsSource": "tasks-gcal-sync",
+            "tgsVault": "vault",
+            "tgsDue": "2026-08-07",
+            "tgsStart": "2026-08-07",
+            "tgsTime": "",
+            "tgsDone": "0",
+            "tgsTitle": "샘플"
+          }
+        },
+        "colorId": null
+      }
+    ]
+  ],
+  "results": [
+    {
+      "created": 1,
+      "updated": 0,
+      "moved": 0,
+      "deleted": 0,
+      "pulled": 0,
+      "skipped": 0,
+      "skips": {},
+      "failures": [],
+      "entries": [
+        {
+          "action": "REPAIR",
+          "id": "A1",
+          "where": "note.md:2",
+          "detail": "반복(🔁) 완료가 만든 중복 → 새 회차 줄에서 🆔 제거(다음 run이 새 🆔·이벤트를 준다)"
+        },
+        {
+          "action": "CREATE",
+          "id": "AAAAAC",
+          "title": "샘플",
+          "calendar": "Test",
+          "eventId": "new",
+          "where": "note.md:2",
+          "detail": "due=2026-08-07 (종일) · 🆔를 새로 부여해 노트에 기록"
+        }
+      ]
+    }
+  ],
+  "records": {
+    "A1": {
+      "eventId": "ev-A1",
+      "calendarId": "cal-1",
+      "due": "2026-08-06",
+      "start": "2026-08-06",
+      "done": true,
+      "title": "샘플",
+      "gcalUpdated": "100",
+      "lastLine": "- [x] #task 샘플 📅 2026-08-06 🆔 A1",
+      "lastWhere": "note.md:1",
+      "time": ""
+    },
+    "AAAAAC": {
+      "eventId": "new",
+      "calendarId": "cal-1",
+      "due": "2026-08-07",
+      "start": "2026-08-07",
+      "time": "",
+      "done": false,
+      "title": "샘플",
+      "gcalUpdated": "9999"
+    }
+  },
+  "syncTokens": {
+    "cal-1": "tok"
+  },
+  "lastFullScanAt": "<now+0>",
+  "tasks": [
+    {
+      "id": "A1",
+      "due": "2026-08-06",
+      "start": null,
+      "time": null,
+      "text": null,
+      "raw": "- [x] #task 샘플 📅 2026-08-06 🆔 A1"
+    },
+    {
+      "id": "AAAAAC",
+      "due": "2026-08-07",
+      "start": null,
+      "time": null,
+      "text": null,
+      "raw": "- [ ] #task 샘플 📅 2026-08-07 🆔 A1"
+    }
+  ],
+  "engine": {
+    "pullCycleDone": true,
+    "behindSince": null,
+    "settledSince": "<now-600000>"
+  }
+}

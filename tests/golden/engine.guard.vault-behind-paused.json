@@ -1,0 +1,60 @@
+{
+  "trace": [
+    [
+      "run",
+      {
+        "force": false,
+        "fullScan": false
+      }
+    ]
+  ],
+  "results": [
+    {
+      "created": 0,
+      "updated": 0,
+      "moved": 0,
+      "deleted": 0,
+      "pulled": 0,
+      "skipped": 1,
+      "skips": {
+        "vault-behind": 1
+      },
+      "failures": [],
+      "entries": [
+        {
+          "action": "SKIP",
+          "detail": "볼트가 Obsidian Sync로 아직 따라잡는 중 → run 전체 보류(15초 뒤 재확인)"
+        }
+      ],
+      "retryAfterMs": 15000
+    }
+  ],
+  "records": {
+    "A1": {
+      "eventId": "ev-A1",
+      "calendarId": "cal-1",
+      "due": "2026-08-06",
+      "start": "2026-08-06",
+      "done": false,
+      "title": "샘플",
+      "gcalUpdated": "200"
+    }
+  },
+  "syncTokens": {},
+  "lastFullScanAt": null,
+  "tasks": [
+    {
+      "id": "A1",
+      "due": "2026-08-09",
+      "start": null,
+      "time": null,
+      "text": null,
+      "raw": "- [ ] #task 샘플 📅 2026-08-09 🆔 A1"
+    }
+  ],
+  "engine": {
+    "pullCycleDone": true,
+    "behindSince": "<now+0>",
+    "settledSince": null
+  }
+}

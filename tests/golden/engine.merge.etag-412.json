@@ -1,0 +1,136 @@
+{
+  "trace": [
+    [
+      "run",
+      {
+        "force": false,
+        "fullScan": false
+      }
+    ],
+    [
+      "client.listEvents",
+      "cal-1",
+      {
+        "singleEvents": "true",
+        "showDeleted": "false",
+        "maxResults": "2500",
+        "timeMin": "2024-08-06T12:00:00~local",
+        "timeMax": "2028-08-05T12:00:00~local"
+      }
+    ],
+    [
+      "client.listEvents",
+      "cal-1",
+      {
+        "singleEvents": "true",
+        "showDeleted": "true",
+        "maxResults": "2500",
+        "timeMin": "2026-07-07T12:00:00~local"
+      }
+    ],
+    [
+      "client.getEvent",
+      "cal-1",
+      "ev-A1"
+    ],
+    [
+      "client.patchEvent",
+      "cal-1",
+      "ev-A1",
+      {
+        "summary": "☐ 샘플",
+        "extendedProperties": {
+          "private": {
+            "tgsTaskId": "A1",
+            "tgsSource": "tasks-gcal-sync",
+            "tgsVault": "vault",
+            "tgsDue": "2026-08-09",
+            "tgsStart": "2026-08-09",
+            "tgsTime": "",
+            "tgsDone": "0",
+            "tgsTitle": "샘플"
+          }
+        },
+        "description": "— tasks-gcal-sync —\n📁 vault\n🆔 A1\n🔗 obsidian://open?vault=vault&file=note.md",
+        "colorId": null,
+        "start": {
+          "date": "2026-08-09",
+          "dateTime": null,
+          "timeZone": null
+        },
+        "end": {
+          "date": "2026-08-10",
+          "dateTime": null,
+          "timeZone": null
+        }
+      },
+      "\"etag-v1\""
+    ]
+  ],
+  "results": [
+    {
+      "created": 0,
+      "updated": 0,
+      "moved": 0,
+      "deleted": 0,
+      "pulled": 0,
+      "skipped": 1,
+      "skips": {
+        "push-precondition": 1
+      },
+      "failures": [],
+      "entries": [
+        {
+          "action": "SKIP",
+          "id": "A1",
+          "title": "샘플",
+          "calendar": "cal-1",
+          "eventId": "ev-A1",
+          "where": "note.md:1",
+          "detail": "pull 이후 GCal이 또 바뀜 → push 포기(다음 run이 새 상태로 다시 판정한다)"
+        },
+        {
+          "action": "HOLD",
+          "id": "A1",
+          "title": "샘플",
+          "calendar": "cal-1",
+          "eventId": "ev-A1",
+          "where": "note.md:1",
+          "detail": "⏸ pull 이후 GCal이 또 바뀜 → push 포기(덮지 않는다. 다음 run이 새 상태로 재판정)"
+        }
+      ]
+    }
+  ],
+  "records": {
+    "A1": {
+      "eventId": "ev-A1",
+      "calendarId": "cal-1",
+      "due": "2026-08-06",
+      "start": "2026-08-06",
+      "done": false,
+      "title": "샘플",
+      "gcalUpdated": "100",
+      "lastLine": "- [ ] #task 샘플 📅 2026-08-09 🆔 A1",
+      "lastWhere": "note.md:1"
+    }
+  },
+  "syncTokens": {
+    "cal-1": "tok"
+  },
+  "lastFullScanAt": "<now+0>",
+  "tasks": [
+    {
+      "id": "A1",
+      "due": "2026-08-09",
+      "start": null,
+      "time": null,
+      "text": null,
+      "raw": "- [ ] #task 샘플 📅 2026-08-09 🆔 A1"
+    }
+  ],
+  "engine": {
+    "pullCycleDone": true,
+    "behindSince": null,
+    "settledSince": "<now-600000>"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "trace": [
+    [
+      "run",
+      {
+        "force": false,
+        "fullScan": false
+      }
+    ],
+    [
+      "client.listEvents",
+      "cal-1",
+      {
+        "singleEvents": "true",
+        "showDeleted": "false",
+        "maxResults": "2500",
+        "timeMin": "2024-08-06T12:00:00~local",
+        "timeMax": "2028-08-05T12:00:00~local"
+      }
+    ]
+  ],
+  "results": [
+    {
+      "created": 0,
+      "updated": 0,
+      "moved": 0,
+      "deleted": 0,
+      "pulled": 0,
+      "skipped": 0,
+      "skips": {},
+      "failures": [],
+      "entries": []
+    }
+  ],
+  "records": {},
+  "syncTokens": {},
+  "lastFullScanAt": "<now+0>",
+  "tasks": [
+    {
+      "id": "N1",
+      "due": "2026-08-09",
+      "start": null,
+      "time": null,
+      "text": null,
+      "raw": "- [x] #task 샘플 📅 2026-08-09 🆔 N1"
+    }
+  ],
+  "engine": {
+    "pullCycleDone": true,
+    "behindSince": null,
+    "settledSince": "<now-600000>"
+  }
+}

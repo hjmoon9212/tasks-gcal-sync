@@ -17,18 +17,7 @@ import {
   conflictResolutionAllowed,
 } from "../src/sync/reconcile";
 import { SyncRecord } from "../src/sync/StateStore";
-
-let pass = 0;
-let fail = 0;
-function eq(actual: unknown, expected: unknown, msg: string) {
-  if (JSON.stringify(actual) === JSON.stringify(expected)) pass++;
-  else {
-    fail++;
-    console.error(
-      `✗ ${msg}\n   expected: ${JSON.stringify(expected)}\n   actual:   ${JSON.stringify(actual)}`
-    );
-  }
-}
+import { eq, done } from "./helpers/assert";
 
 const DAY = "2026-08-06";
 const NOW = 1_800_000_000_000;
@@ -693,5 +682,4 @@ const merge = (o: Partial<DecideInput> = {}): MergePlan =>
   );
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-if (fail > 0) process.exit(1);
+done();

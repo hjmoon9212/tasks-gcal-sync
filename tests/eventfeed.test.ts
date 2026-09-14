@@ -22,21 +22,7 @@ import {
   toExternalEvent,
   windowForMonthKey,
 } from "../src/gcal/externalEvent";
-
-let pass = 0;
-let fail = 0;
-function eq(actual: unknown, expected: unknown, msg: string) {
-  if (JSON.stringify(actual) === JSON.stringify(expected)) pass++;
-  else {
-    fail++;
-    console.error(
-      `✗ ${msg}\n   expected: ${JSON.stringify(expected)}\n   actual:   ${JSON.stringify(actual)}`
-    );
-  }
-}
-function ok(cond: boolean, msg: string) {
-  eq(cond, true, msg);
-}
+import { eq, ok, done } from "./helpers/assert";
 
 const CAL: FeedCalendar = { id: "work@x.com", name: "회사", color: "#3366cc" };
 
@@ -612,6 +598,5 @@ const feedOf = (client: any, cals: FeedCalendar[] = [CAL]) =>
   eq(fired, 1, "구독 해제하면 더 안 온다");
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-if (fail > 0) process.exit(1);
+done();
 })();

@@ -24,21 +24,7 @@ import {
   targetLabel,
   withDeviceTag,
 } from "../src/sync/SyncLog";
-
-let pass = 0;
-let fail = 0;
-function eq(actual: unknown, expected: unknown, msg: string) {
-  if (JSON.stringify(actual) === JSON.stringify(expected)) pass++;
-  else {
-    fail++;
-    console.error(
-      `✗ ${msg}\n   expected: ${JSON.stringify(expected)}\n   actual:   ${JSON.stringify(actual)}`
-    );
-  }
-}
-function ok(cond: boolean, msg: string) {
-  eq(cond, true, msg);
-}
+import { eq, ok, done } from "./helpers/assert";
 
 // --- 한 줄 포맷 ---
 const created: SyncLogEntry = {
@@ -631,6 +617,5 @@ function fakeVault(seed: Record<string, string> = {}) {
   );
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-if (fail > 0) process.exit(1);
+done();
 })();
