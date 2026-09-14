@@ -27,6 +27,7 @@ jobs:
           npm ci
           npm run build
           npm run typecheck:test
+          npm run check-shared
           npm test
           # 골든은 동작의 기준선이다 — 테스트가 다시 쓴 흔적이 남으면 안 된다
           git diff --exit-code tests/golden

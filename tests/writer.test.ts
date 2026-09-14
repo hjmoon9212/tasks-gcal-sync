@@ -11,7 +11,7 @@ installFakeEnv();
 import { TFile } from "obsidian";
 import { eq, ok, done } from "./helpers/assert";
 import { TaskWriter, TaskLineDriftError } from "../src/write/TaskWriter";
-import { parseTaskLine } from "../src/data/TaskLine";
+import { parseTaskLine } from "../src/shared/tasks/TaskLine";
 import { VaultTask } from "../src/data/TaskRepository";
 
 const F = "#task";

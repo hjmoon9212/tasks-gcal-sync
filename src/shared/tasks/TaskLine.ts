@@ -1,3 +1,6 @@
+/* @shared taskline v1.0.0 sha256:9bca6fff72d402f78a4acab69544d08aad52aea06d634a5ac0586306ca5af105
+ * 정본: tasks-gcal-sync-plugin/src/shared/tasks/TaskLine.ts — 이 파일은 두 저장소에 **그대로** 복사된다.
+ * 고칠 때: 정본 저장소에서만 고치고 → 헤더 버전을 올리고 → `node scripts/check-shared.mjs --write` → 복사. */
 /*
  * TaskLine — Obsidian Tasks(이모지 포맷) 한 줄을 무손실로 파싱하고,
  * 단일 필드만 "수술적으로" 재작성하는 순수 함수 모음.
@@ -5,7 +8,7 @@
  * 절대 줄 전체를 재직렬화하지 않는다 → 모델링하지 않은 이모지/메타데이터 유실 방지.
  */
 
-import { normalizeTimeRange } from "../sync/dates";
+import { normalizeTimeRange } from "./timeRange";
 
 export const EMOJI = {
   due: "📅",

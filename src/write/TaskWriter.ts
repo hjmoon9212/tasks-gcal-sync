@@ -1,6 +1,6 @@
 import { App, TFile } from "obsidian";
 import { VaultTask } from "../data/TaskRepository";
-import * as TaskLine from "../data/TaskLine";
+import * as TaskLine from "../shared/tasks/TaskLine";
 
 export class TaskLineDriftError extends Error {
   constructor(path: string, line: number) {

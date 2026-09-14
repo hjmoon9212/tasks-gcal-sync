@@ -1,3 +1,6 @@
+/* @shared taskline v1.0.0 sha256:de4231fee605eebf13b41e181e98851de91172d7d20f0bbd162e17078e38c11f
+ * 정본: tasks-gcal-sync-plugin/tests/taskline.shared.test.ts — 이 파일은 두 저장소에 **그대로** 복사된다.
+ * 고칠 때: 정본 저장소에서만 고치고 → 헤더 버전을 올리고 → `node scripts/check-shared.mjs --write` → 복사. */
 /*
  * TaskLine 공유 테스트 — tasks-gcal-sync 와 gcal-calendar-view 가 **같은 파일을 그대로** 돌린다.
  *
@@ -21,8 +24,8 @@ import {
   setStart,
   setStatusChar,
   setTime,
-} from "../src/data/TaskLine";
-import { isValidTimeRange, normalizeTimeRange } from "../src/sync/dates";
+} from "../src/shared/tasks/TaskLine";
+import { isValidTimeRange, normalizeTimeRange } from "../src/shared/tasks/timeRange";
 
 let pass = 0;
 let fail = 0;

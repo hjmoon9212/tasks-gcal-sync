@@ -1,0 +1,13 @@
+{
+  "canonical": "tasks-gcal-sync",
+  "groups": {
+    "taskline": {
+      "1.0.0": {
+        "src/shared/tasks/TaskLine.ts": "9bca6fff72d402f78a4acab69544d08aad52aea06d634a5ac0586306ca5af105",
+        "src/shared/tasks/timeRange.ts": "6ae703764de647a9b109c00498bc6a3b31ddb582b8df028ce22dc305a17c431c",
+        "tests/taskline.shared.test.ts": "de4231fee605eebf13b41e181e98851de91172d7d20f0bbd162e17078e38c11f",
+        "scripts/check-shared.mjs": "76b1c1fa3198584f5b9e6228554a63303928f7dc7fe1a5c7108e26ff7f922e76"
+      }
+    }
+  }
+}

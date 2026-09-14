@@ -1,0 +1,5 @@
+# 공유 파일(두 플러그인에 그대로 복사) — 줄끝을 고정해 peer 비교가 흔들리지 않게 한다
+src/shared/** text eol=lf
+tests/*.shared.test.ts text eol=lf
+scripts/check-shared.mjs text eol=lf
+shared.lock.json text eol=lf

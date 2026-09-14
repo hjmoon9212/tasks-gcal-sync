@@ -1,5 +1,5 @@
 import { App, CachedMetadata, TFile } from "obsidian";
-import { ParsedTask, parseTaskLine } from "./TaskLine";
+import { ParsedTask, parseTaskLine } from "../shared/tasks/TaskLine";
 
 export interface VaultTask extends ParsedTask {
   path: string;

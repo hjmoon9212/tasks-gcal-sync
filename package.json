@@ -7,6 +7,7 @@
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "typecheck:test": "tsc -p tsconfig.test.json",
+    "check-shared": "node scripts/check-shared.mjs",
     "test": "node esbuild.test.mjs",
     "test:one": "node scripts/test-one.mjs",
     "version-bump": "node version-bump.mjs"
