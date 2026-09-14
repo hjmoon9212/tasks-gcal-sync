@@ -1,10 +1,5 @@
 import { App, Notice, Platform } from "obsidian";
-import {
-  LEGACY_DONE_TAG,
-  PluginSettings,
-  ROUTING_TAG_PREFIX,
-  resolveCalendar,
-} from "../settings/Settings";
+import { PluginSettings, resolveCalendar } from "../settings/Settings";
 import { PersistedState, SyncRecord } from "./StateStore";
 import { TaskRepository, VaultTask, taskWhere } from "../data/TaskRepository";
 import {
@@ -13,7 +8,6 @@ import {
   PreconditionFailedError,
 } from "../gcal/CalendarClient";
 import { TaskWriter } from "../write/TaskWriter";
-import { SyncLogEntry } from "./SyncLog";
 import {
   SkipKind,
   SyncResult,
@@ -24,30 +18,27 @@ import {
 } from "./engine/result";
 import { SKIP_TEXT } from "./engine/skipText";
 import { errMsg } from "../util/errors";
+import { CodecCtx } from "./codec/ctx";
+import { buildEvent, presentationPatch } from "./codec/payload";
+import { mergeDescription, titleBase } from "./codec/presentation";
 import {
-  decideReconcile,
-  Field,
-  LocalView,
-  MergePlan,
-  RemoteView,
-  RunGuards,
-  Snapshot,
-  TaskState,
-} from "./reconcile";
+  assignSnapshot,
+  isOurs,
+  recordFromEvent,
+  recordFromEventOnly,
+  remoteView,
+  taskState,
+} from "./codec/stamp";
 import {
-  addDay,
-  addDays,
-  daysBetween,
-  genId,
-  isoDaysAgo,
-  isValidDate,
-  isValidTimeRange,
-  localTimeZone,
-  shiftDateTime,
-  timeOfDateTime,
-  toDateTime,
-  todayStr,
-} from "./dates";
+  DatesSnapshot,
+  datePatch,
+  datesChanged,
+  exclusiveDates,
+  spanStart,
+  taskTime,
+} from "./codec/timeMapping";
+import { decideReconcile, Field, MergePlan, RunGuards, Snapshot } from "./reconcile";
+import { genId, isoDaysAgo, isValidDate, todayStr } from "./dates";
 
 // 타입은 engine/result.ts 로 옮겼다(0.12.2) — 기존 import 경로(main·테스트)를 위해 다시 내보낸다.
 export type { SkipKind, SyncFailure, SyncResult } from "./engine/result";
@@ -135,221 +126,18 @@ export class SyncEngine {
     private client: CalendarClient,
     private writer: TaskWriter,
     private saveState: () => Promise<void>
-  ) {}
-
-  private titleBase(t: VaultTask): string {
-    const prefix = ROUTING_TAG_PREFIX;
-    return t.title
-      .split(/\s+/)
-      .filter((w) => !w.startsWith(prefix))
-      .join(" ")
-      .trim();
-  }
-
-  private summary(t: VaultTask): string {
-    const base = this.titleBase(t);
-    // 반복(🔁) task는 아이콘으로 표시 → 캘린더에서 반복 할일임을 한눈에.
-    const recur = t.recurrence ? this.settings.recurringPrefix?.trim() : "";
-    const withIcon = recur ? `${recur} ${base}` : base;
-    // 상태별 체크박스 접두사: 미완료=☐, 완료=☑️ → 모바일에서 제목만 보고 완료 확인.
-    const box = (
-      t.checked ? this.settings.donePrefix : this.settings.todoPrefix
-    )?.trim();
-    const title = box ? `${box} ${withIcon}` : withIcon;
-    // ⛔ 색·접두사를 둘 다 껐으면 **제목에 아무것도 안 붙인다**(0.11.2~).
-    //    예전에는 그때 `#done` 을 끼워 넣었는데, 둘 다 끈 것은 "제목에 표시하지 마라" 는
-    //    뜻이라 그건 두 번째 추측이었다. 옛 이벤트에 붙어 있는 글자는 아래 gcalTitleBase 가
-    //    계속 떼어낸다 → LEGACY_DONE_TAG
-    return title;
-  }
-
-  /** 완료 상태에 대응하는 colorId. 색 완료 활성 시: 완료=완료색, 미완료=null(기본색). 비활성 시 undefined(색 안 건드림). */
-  private doneColor(t: VaultTask): string | null | undefined {
-    if (!this.settings.doneColorId) return undefined;
-    return t.checked ? this.settings.doneColorId : null;
-  }
-
-  /** GCal 이벤트 제목에서 체크박스/반복 아이콘/완료 접두사를 떼어 순수 제목 추출(pull용). */
-  private gcalTitleBase(ev: GCalEvent): string {
-    let s = (ev.summary ?? "").trim();
-    const prefixes = [
-      this.settings.donePrefix,
-      this.settings.todoPrefix,
-      this.settings.recurringPrefix,
-      LEGACY_DONE_TAG, // 설정에서는 사라졌지만 옛 이벤트 제목에는 남아 있다
-    ]
-      .map((p) => p?.trim())
-      .filter((p): p is string => !!p);
-    // ☐/☑️ 와 🔁 가 어떤 순서로 붙어도 앞에서부터 반복 제거.
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const pp of prefixes) {
-        if (s.startsWith(pp)) {
-          s = s.slice(pp.length).trim();
-          changed = true;
-        }
-      }
-    }
-    return s;
-  }
-
-  /** task로 점프하는 Obsidian 딥링크. note=노트까지, line=정확한 줄(Advanced URI 필요). */
-  private deepLink(t: VaultTask): string | null {
-    const mode = this.settings.deepLink;
-    if (mode === "off") return null;
-    const vault = encodeURIComponent(this.app.vault.getName());
-    const fp = encodeURIComponent(t.path);
-    if (mode === "line") {
-      // Advanced URI의 line은 1-based(에디터 표시 줄). VaultTask.line은 0-based.
-      return `obsidian://adv-uri?vault=${vault}&filepath=${fp}&line=${t.line + 1}`;
-    }
-    return `obsidian://open?vault=${vault}&file=${fp}`;
-  }
-
-  /** 우리가 관리하는 설명 블록의 시작 표시. 이 줄부터 끝까지가 플러그인 영역이다. */
-  private static readonly NOTE_MARKER = "— tasks-gcal-sync —";
-
-  /** 우리 블록: 볼트 이름 + task ID (+ 딥링크). */
-  private noteBlock(id: string, t?: VaultTask): string {
-    const base = `${SyncEngine.NOTE_MARKER}\n📁 ${this.app.vault.getName()}\n🆔 ${id}`;
-    const link = t ? this.deepLink(t) : null;
-    return link ? `${base}\n🔗 ${link}` : base;
-  }
-
-  /**
-   * 기존 설명에서 **사용자가 쓴 부분만** 남긴다.
-   *
-   * 예전에는 설명을 통째로 우리 블록으로 갈아치웠다 — GCal 이벤트에 적어 둔 메모가
-   * 다음 push 마다 사라졌다. 이제 우리 영역은 마커 아래로 한정한다.
-   * 마커가 없는 구버전 이벤트는 **끝에 붙은 📁/🆔/🔗 줄만** 걷어낸다(그 시절 설명은
-   * 그 줄들이 전부였다).
-   */
-  private userDescription(prev: string): string {
-    const lines = prev.split("\n");
-    const i = lines.findIndex((l) => l.trim() === SyncEngine.NOTE_MARKER);
-    if (i >= 0) return lines.slice(0, i).join("\n").trimEnd();
-    let end = lines.length;
-    while (end > 0) {
-      const t = lines[end - 1].trim();
-      if (t === "" || /^(📁|🆔|🔗)/u.test(t)) end--;
-      else break;
-    }
-    return lines.slice(0, end).join("\n").trimEnd();
-  }
-
-  /** 사용자 텍스트를 보존한 채 우리 블록만 갱신한 설명. */
-  private mergeDescription(prev: string, id: string, t?: VaultTask): string {
-    const user = this.userDescription(prev);
-    const block = this.noteBlock(id, t);
-    return user ? `${user}\n\n${block}` : block;
-  }
-
-  /** 이벤트 시작일: 🛫 start가 있고 due보다 같거나 앞이면 start, 아니면 due. (다중일 블록 시작) */
-  private spanStart(t: VaultTask): string {
-    if (t.start && t.due && t.start <= t.due) return t.start;
-    return t.due!;
-  }
-
-  /** 종일/시간지정 모두에서 시작 날짜(YYYY-MM-DD) 추출. */
-  private eventStartDate(ev: GCalEvent): string | undefined {
-    if (ev.start?.date) return ev.start.date;
-    if (ev.start?.dateTime) return ev.start.dateTime.slice(0, 10);
-    return undefined;
-  }
-
-  /** 이벤트에서 due(마감일) 추출: all-day는 end.date(배타적)−1, 시간지정은 end 날짜(없으면 start). */
-  private eventDueDate(ev: GCalEvent): string | undefined {
-    if (ev.end?.date) return addDays(ev.end.date, -1);
-    if (ev.end?.dateTime) return ev.end.dateTime.slice(0, 10);
-    return this.eventStartDate(ev);
-  }
-
-  /**
-   * 이벤트의 타임블록 "HH:MM-HH:MM". 종일이면 "", 판정 불가면 undefined.
-   *
-   * 양끝이 모두 dateTime 일 때만 시각으로 인정한다. 한쪽만 dateTime 인 혼합형은
-   * (iPhone 기본 캘린더 등이 만든다) 애초에 patch 하면 400 이 나는 모양이라 손대지 않는다.
-   * 자정을 넘기거나 여러 날에 걸친 시간지정 이벤트도 "HH:MM-HH:MM" 한 줄로는 표현할 수
-   * 없으므로 판정 불가로 둔다 — 억지로 접으면 노트의 ⏰ 를 엉뚱한 값으로 덮어쓴다.
-   */
-  private eventTimeRange(ev: GCalEvent): string | undefined {
-    if (ev.start?.date && ev.end?.date) return "";
-    const s = ev.start?.dateTime;
-    const e = ev.end?.dateTime;
-    if (!s || !e) return undefined;
-    const st = timeOfDateTime(s);
-    const et = timeOfDateTime(e);
-    if (!st || !et) return undefined;
-    const range = `${st}-${et}`;
-    return isValidTimeRange(range) ? range : undefined;
-  }
-
-  /** 🛫 가 📅 보다 앞서 이벤트가 여러 날에 걸치는가. (같은 날이면 하루짜리) */
-  private isMultiDay(t: VaultTask): boolean {
-    return !!(t.start && t.due && t.start < t.due);
-  }
-
-  /**
-   * 노트의 타임블록("" = 종일). 유효하지 않은 값은 종일로 본다.
-   *
-   * **다중일(🛫 < 📅)이면 ⏰ 가 있어도 종일로 본다.** GCal 의 시간지정 이벤트는
-   * "첫날 시작시각 → 마지막날 종료시각" 한 덩어리라, ⏰ 09:00-11:00 에 🛫/📅 가 3일이면
-   * 매일 09-11시가 아니라 50시간짜리 통짜 블록이 된다. "여러 날 · 매일 같은 시간대"는
-   * 반복 이벤트라야 표현되므로, 표현 못 하는 것을 억지로 만들지 않고 종일 다중일 블록으로 둔다.
-   *
-   * 노트의 ⏰ 는 지우지 않는다 — 🛫 를 떼거나 📅 를 당겨 하루짜리로 돌아오면 시각이 그대로
-   * 살아난다. 이 함수가 시각의 **단일 관문**이라 여기서 "" 를 주면 push(timedDates) ·
-   * 스냅샷(tgsTime) · 비교(local.time)가 모두 같은 값을 보고, 노트와 이벤트가 서로 밀지 않는다.
-   */
-  private taskTime(t: VaultTask): string {
-    if (this.isMultiDay(t)) return "";
-    return isValidTimeRange(t.time) ? t.time : "";
-  }
-
-  /**
-   * ⏰ 가 있으면 시간지정 이벤트의 start/end 를, 없으면 null.
-   * timeZone 을 반드시 함께 보낸다 — 안 보내면 캘린더 기본 타임존으로 해석돼
-   * 기기 타임존이 다를 때 시각이 밀린다(DST 포함).
-   */
-  private timedDates(t: VaultTask): Partial<GCalEvent> | null {
-    const range = this.taskTime(t);
-    if (!range) return null;
-    const [st, et] = range.split("-");
-    const tz = localTimeZone();
-    return {
-      start: { dateTime: toDateTime(this.spanStart(t), st), timeZone: tz },
-      end: { dateTime: toDateTime(t.due!, et), timeZone: tz },
+  ) {
+    this.codec = {
+      settings: this.settings,
+      vaultName: () => this.app.vault.getName(),
     };
   }
 
   /**
-   * Obsidian 변경분을 이벤트에 반영.
-   *  - 제목/완료만 바뀌면 summary/description만 patch → 시간(타임블록) 보존.
-   *  - 날짜가 바뀌면: 시간지정 이벤트는 시각 유지한 채 날짜만 이동, 종일이면 종일로.
+   * 코덱(표현·스탬프·시각 매핑)이 보는 것. settings 는 **원본 참조**, 볼트 이름은 **매번 읽는다** —
+   * 테스트가 app 을 바꿔 끼우거나 설정 탭이 값을 제자리에서 고쳐도 다음 호출에 반영된다.
    */
-  /**
-   * 날짜를 뺀 "표현" patch — 제목(체크박스·반복 아이콘) · 설명 · 완료색 · free · 스냅샷.
-   * pushUpdate와 아래 pushPresentation이 공유한다.
-   */
-  private presentationPatch(
-    id: string,
-    t: VaultTask,
-    ev?: GCalEvent
-  ): Partial<GCalEvent> {
-    const patch: Partial<GCalEvent> = {
-      summary: this.summary(t),
-      // 마지막 push 스냅샷을 이벤트에 갱신 기록(기기 간 상태 복원용).
-      extendedProperties: { private: this.privateProps(id, t) },
-    };
-    // **현재 설명을 모르면 아예 안 보낸다.** patch 는 키 단위 병합이라 이 키를 빼면
-    // 이벤트의 설명이 그대로 남는다 — 사용자가 적어 둔 메모를 날리느니 우리 블록이
-    // 한 사이클 낡는 편이 낫다. 다음에 이벤트를 손에 쥐면 갱신된다.
-    if (ev) patch.description = this.mergeDescription(ev.description ?? "", id, t);
-    const color = this.doneColor(t);
-    if (color !== undefined) patch.colorId = color; // 완료=완료색, 미완료=null(기본색 복귀)
-    return patch;
-  }
+  private readonly codec: CodecCtx;
 
   /**
    * 날짜는 건드리지 않고 표현만 다시 찍는다.
@@ -368,41 +156,18 @@ export class SyncEngine {
     return this.client.patchEvent(
       rec.calendarId,
       rec.eventId,
-      this.presentationPatch(id, task, ev),
+      presentationPatch(this.codec, id, task, ev),
       ev?.etag // 조건부: pull 이후 또 바뀌었으면 덮지 않고 412
     );
   }
 
   /**
-   * PATCH 용 start/end 를 **한 가지 표현만 남게** 만든다.
-   *
-   * PATCH 는 객체를 병합한다. 종일 이벤트(`start.date`)에 시각 표현(`start.dateTime`)만
-   * 보내면 서버 쪽 start 에는 date 와 dateTime 이 **함께** 남고, Google 은 그걸
-   * `400 Invalid start time` 으로 거절한다 — 노트에 ⏰ 를 새로 붙인 task 가 매 sync 마다
-   * 이 400 을 반복했다(2026-08-16). 반대 방향(시간 → 종일)도 같은 이유로 깨진다.
-   * 그래서 쓰지 않는 쪽을 null 로 명시해 지운다.
+   * Obsidian 변경분을 이벤트에 반영.
+   *  - 제목/완료만 바뀌면 summary/description만 patch → 시간(타임블록) 보존.
+   *  - 날짜가 바뀌면: 시간지정 이벤트는 시각 유지한 채 날짜만 이동, 종일이면 종일로(datePatch).
    */
-  private exclusiveDates(d: Partial<GCalEvent>): Partial<GCalEvent> {
-    const one = (v: GCalEvent["start"]): GCalEvent["start"] => {
-      if (!v) return v;
-      return v.dateTime
-        ? { ...v, date: null } // 시간지정 → 종일 표현 제거
-        : { ...v, dateTime: null, timeZone: null }; // 종일 → 시간 표현 제거
-    };
-    const out: Partial<GCalEvent> = { ...d };
-    if (d.start) out.start = one(d.start);
-    if (d.end) out.end = one(d.end);
-    return out;
-  }
-
   private async pushUpdate(
-    rec: {
-      calendarId: string;
-      eventId: string;
-      due: string;
-      start?: string;
-      time?: string;
-    },
+    rec: DatesSnapshot & { calendarId: string; eventId: string },
     task: VaultTask,
     id: string,
     doneOverride?: boolean,
@@ -411,153 +176,22 @@ export class SyncEngine {
     // done 회귀를 보류한 채 다른 필드(날짜·제목)만 올리는 경우 — 완료 상태는 기존 값으로
     // 고정한다. 안 그러면 제목 push에 미완료가 딸려가 보류가 무의미해진다.
     const t = doneOverride === undefined ? task : { ...task, checked: doneOverride };
-    const startDate = this.spanStart(task);
-    const dateChanged =
-      task.due !== rec.due ||
-      startDate !== (rec.start ?? rec.due) ||
-      this.taskTime(task) !== (rec.time ?? "");
     let cur: GCalEvent | undefined = ev;
     let dates: Partial<GCalEvent> | undefined;
-    if (dateChanged) {
+    if (datesChanged(rec, task)) {
       try {
         cur = await this.client.getEvent(rec.calendarId, rec.eventId);
       } catch (e) {
         console.warn("[tasks-gcal-sync] getEvent 실패(종일로 처리):", e);
       }
-      // 노트에 ⏰ 가 있으면 그 값이 이긴다 — 시각도 노트가 소유하는 필드가 됐다.
-      const timed = this.timedDates(task);
-      // 노트에서 ⏰ 를 **뗀** 경우인가. 기준은 마지막 동기화 스냅샷이다:
-      //   rec.time 이 비어 있음  = 우리가 시각을 올린 적이 없다 → 이벤트의 시각은 GCal 에서
-      //                            사람이 지정한 것이므로 보존한다(0.5.0 설계).
-      //   rec.time 이 차 있음    = 우리가 올렸던 시각이 노트에서 사라졌다 → 종일로 되돌린다.
-      // 이 구분이 없으면 아래 보존 분기가 "⏰ 제거" 까지 삼켜, 노트에서 지워도 GCal 은
-      // 계속 시간지정으로 남는다(2026-08-16).
-      const timeRemoved = !this.taskTime(task) && !!(rec.time ?? "");
-      if (timed) {
-        dates = timed;
-      }
-      // ⏰ 가 없고 제거된 것도 아니면 예전 동작을 유지한다: GCal 에서 사람이 지정해 둔 시각을
-      // 날짜만 밀어 보존한다. 순수 timed(양끝 모두 dateTime)일 때만 — 한쪽만 dateTime 인
-      // 혼합형을 그대로 patch 하면 타입 불일치로 GCal 400 → 종일로 정규화.
-      else if (!timeRemoved && cur?.start?.dateTime && cur?.end?.dateTime) {
-        const oldDate = cur.start.dateTime.slice(0, 10);
-        const delta = daysBetween(oldDate, task.due!);
-        dates = {
-          start: {
-            dateTime: shiftDateTime(cur.start.dateTime, delta),
-            timeZone: cur.start.timeZone,
-          },
-          end: {
-            dateTime: shiftDateTime(cur.end.dateTime, delta),
-            timeZone: cur.end.timeZone,
-          },
-        };
-      } else {
-        dates = {
-          start: { date: startDate },
-          end: { date: addDay(task.due!) },
-        };
-      }
+      dates = datePatch(rec, task, cur);
     }
     // 설명 병합은 현재 이벤트를 알아야 하므로 getEvent 뒤에 만든다.
-    const patch = this.presentationPatch(id, t, cur);
-    if (dates) Object.assign(patch, this.exclusiveDates(dates));
+    const patch = presentationPatch(this.codec, id, t, cur);
+    if (dates) Object.assign(patch, exclusiveDates(dates));
     // 조건부 수정: 우리가 마지막으로 **읽은** 버전(getEvent를 탔으면 그쪽이 더 최신) 기준.
     // 그 사이 사람이 캘린더에서 고쳤으면 덮지 않고 412 → 이번 push 포기.
     return this.client.patchEvent(rec.calendarId, rec.eventId, patch, cur?.etag);
-  }
-
-  /**
-   * 이벤트에 심는 private 확장속성.
-   *  - 식별용: tgsTaskId / tgsSource / tgsVault
-   *  - 마지막 push 스냅샷: tgsDue / tgsStart / tgsDone / tgsTitle
-   * 스냅샷을 이벤트에 함께 저장해 두면, 기기 간 data.json(records)이 유실/충돌해도
-   * GCal에서 "마지막으로 동기화된 상태"를 그대로 복원할 수 있다(recordFromEvent).
-   * patch 시에도 항상 전체 세트를 넣어 키 누락을 방지한다.
-   */
-  private privateProps(id: string, t: VaultTask): Record<string, string> {
-    const p: Record<string, string> = {
-      tgsTaskId: id,
-      tgsSource: "tasks-gcal-sync",
-      tgsVault: this.app.vault.getName(),
-      tgsDue: t.due!,
-      tgsStart: this.spanStart(t),
-      // 종일이면 빈 문자열을 **명시적으로** 싣는다. patch는 키 단위 병합이라 키를 빼면
-      // 이벤트에 직전 시각이 남아, 시간지정 → 종일로 되돌린 게 다음 판정에서 안 보인다.
-      tgsTime: this.taskTime(t),
-      tgsDone: t.checked ? "1" : "0",
-      tgsTitle: this.titleBase(t),
-    };
-    // 완료일(✅)은 **있을 때만** 싣는다. patch는 키 단위로 병합되므로 이 키를 안 보내면
-    // 이벤트엔 직전 완료일이 그대로 남는다 — 노트에서 체크가 풀려도 "언제 완료였는지"가
-    // 남는 유일한 사본이다. 다시 체크하면 Tasks가 오늘 날짜를 쓰므로 원래 날짜는
-    // 노트만으로는 복구되지 않는다(2026-08-09 CISS).
-    if (t.done) p.tgsDoneAt = t.done;
-    return p;
-  }
-
-  /**
-   * 이 볼트가 만든 이벤트인가.
-   *
-   * 매핑키(tgsTaskId)는 볼트 안에서만 유일하다 — 볼트 두 개가 같은 캘린더를 쓰면
-   * (`#gcal/` 라우팅은 태그 한 줄로 그렇게 된다) 남의 볼트 이벤트를 record로 입양하고,
-   * 우리 볼트엔 대응 task가 없으므로 다음 사이클에 "task 없음 → 삭제"로 지워버린다.
-   * tgsVault를 심어만 두고 아무도 읽지 않던 구멍(~0.3.15).
-   *
-   * tgsVault가 없는 옛 이벤트는 통과시킨다 — 다음 push에서 자연 backfill된다.
-   */
-  private isOurs(ev: GCalEvent): boolean {
-    const v = ev.extendedProperties?.private?.tgsVault;
-    return !v || v === this.app.vault.getName();
-  }
-
-  /**
-   * GCal 이벤트에 심긴 스냅샷으로 record를 복원한다(구버전 이벤트엔 없으므로 현재 task값 폴백).
-   * 기기 간 records 유실 시 "마지막 동기화 상태"를 되살려 잘못된 방향 판정을 막는다.
-   */
-  private recordFromEvent(
-    ev: GCalEvent,
-    calendarId: string,
-    t: VaultTask
-  ): SyncRecord {
-    const p = ev.extendedProperties?.private ?? {};
-    return {
-      eventId: ev.id!,
-      calendarId,
-      due: p.tgsDue ?? t.due!,
-      start: p.tgsStart ?? this.spanStart(t),
-      time: p.tgsTime ?? this.taskTime(t),
-      done: p.tgsDone != null ? p.tgsDone === "1" : t.checked,
-      title: p.tgsTitle ?? this.titleBase(t),
-      gcalUpdated: ev.updated,
-    };
-  }
-
-  /**
-   * task 없이 이벤트만으로 record 복원. 볼트에 대응 task가 없는 이벤트(삭제됐거나
-   * 아직 동기화 안 된)도 record로 만들어야 조정 루프의 시야에 들어온다.
-   * tgs* 스냅샷이 없는 옛 이벤트는 복원 불가 → null (backfill-ids로 채운 뒤 잡힌다).
-   */
-  private recordFromEventOnly(
-    ev: GCalEvent,
-    calendarId: string
-  ): SyncRecord | null {
-    const p = ev.extendedProperties?.private ?? {};
-    if (!ev.id || !p.tgsDue) return null;
-    return {
-      eventId: ev.id,
-      calendarId,
-      due: p.tgsDue,
-      start: p.tgsStart ?? p.tgsDue,
-      // 스냅샷(tgsTime)이 없는 옛 이벤트는 **종일로 본다.** 이벤트의 모양에서 읽으면,
-      // GCal 에서 사람이 지정해 둔 시각이 "우리가 마지막에 올린 값" 으로 둔갑해
-      // 노트에 ⏰ 가 없다는 이유로 다음 push 가 그 시각을 지운다. 실제로 시각이 바뀐
-      // 이벤트라면 pull 경로(remote.time + gcalChanged)가 노트에 ⏰ 를 써 넣는다.
-      time: p.tgsTime ?? "",
-      done: p.tgsDone === "1",
-      title: p.tgsTitle ?? this.gcalTitleBase(ev),
-      gcalUpdated: ev.updated,
-    };
   }
 
   /** 우리가 이벤트를 올리는 캘린더 전부(기본 + 라우팅 규칙 + 기존 record). */
@@ -607,9 +241,9 @@ export class SyncEngine {
       for (const ev of items) {
         const tid = ev.extendedProperties?.private?.tgsTaskId;
         if (!tid || ev.status === "cancelled") continue;
-        if (!this.isOurs(ev)) continue; // 다른 볼트의 이벤트 — 입양하면 지워버린다
+        if (!isOurs(this.codec, ev)) continue; // 다른 볼트의 이벤트 — 입양하면 지워버린다
         if (this.state.records[tid]) continue; // 이미 알고 있음
-        const rec = this.recordFromEventOnly(ev, cal);
+        const rec = recordFromEventOnly(this.codec, ev, cal);
         if (!rec) continue;
         this.state.records[tid] = rec;
         adopted.add(tid);
@@ -771,23 +405,6 @@ export class SyncEngine {
     return this.pullCycleDone;
   }
 
-  private buildEvent(t: VaultTask, id: string): GCalEvent {
-    const timed = this.timedDates(t);
-    const ev: GCalEvent = {
-      summary: this.summary(t),
-      description: this.noteBlock(id, t),
-      // ⏰ 가 있으면 시간지정, 없으면 종일. 🛫 start가 있으면 거기서부터(다중일)
-      ...(timed ?? {
-        start: { date: this.spanStart(t) },
-        end: { date: addDay(t.due!) },
-      }),
-      extendedProperties: { private: this.privateProps(id, t) },
-    };
-    const color = this.doneColor(t);
-    if (color !== undefined) ev.colorId = color;
-    return ev;
-  }
-
   /** 기존 모든 record의 이벤트 설명(note)에 🆔 ID를 일괄 기록. */
   async backfillDescriptions(): Promise<{ ok: number; fail: number }> {
     let ok = 0;
@@ -798,7 +415,7 @@ export class SyncEngine {
         // 설명을 다시 쓰는 명령이므로 현재 값을 읽어 사용자 텍스트를 보존한다.
         const cur = await this.client.getEvent(rec.calendarId, rec.eventId);
         await this.client.patchEvent(rec.calendarId, rec.eventId, {
-          description: this.mergeDescription(cur.description ?? "", id),
+          description: mergeDescription(this.codec, cur.description ?? "", id),
         });
         ok++;
       } catch (e) {
@@ -826,7 +443,7 @@ export class SyncEngine {
       try {
         // 다른 볼트의 이벤트는 "중복"이 아니다 — 지우면 남의 일정을 없앤다.
         evs = (await this.client.findByTaskId(target.id, t.id)).filter((e) =>
-          this.isOurs(e)
+          isOurs(this.codec, e)
         );
       } catch (e) {
         console.warn("[tasks-gcal-sync] 중복 조회 실패:", t.id, e);
@@ -848,14 +465,14 @@ export class SyncEngine {
         }
       }
       this.state.records[t.id] = keepEv
-        ? this.recordFromEvent(keepEv, target.id, t)
+        ? recordFromEvent(keepEv, target.id, t)
         : {
             eventId: keepId,
             calendarId: target.id,
             due: t.due,
-            start: this.spanStart(t),
+            start: spanStart(t),
             done: t.checked,
-            title: this.titleBase(t),
+            title: titleBase(t),
             gcalUpdated: undefined,
           };
     }
@@ -893,82 +510,9 @@ export class SyncEngine {
         continue;
       }
       const tid = ev.extendedProperties?.private?.tgsTaskId;
-      if (tid && this.isOurs(ev)) byTaskId.set(tid, ev);
+      if (tid && isOurs(this.codec, ev)) byTaskId.set(tid, ev);
     }
     return { byTaskId, cancelledEventIds };
-  }
-
-  /** 조정 판단에 넘길 노트 상태. due가 유효하지 않으면 별도 상태로 구분한다. */
-  private taskState(task?: VaultTask): TaskState {
-    if (!task) return { kind: "missing" };
-    if (!isValidDate(task.due)) return { kind: "due-invalid" };
-    return { kind: "ok", local: this.localView(task) };
-  }
-
-  private localView(t: VaultTask): LocalView {
-    return {
-      due: t.due!,
-      start: this.spanStart(t),
-      time: this.taskTime(t),
-      done: t.checked,
-      title: this.titleBase(t),
-      hasStart: !!t.start,
-      multiDay: this.isMultiDay(t),
-    };
-  }
-
-  /** 이벤트를 판단에 쓸 순수 값으로 환원. 설정 의존(완료 판정·제목 접두사)은 여기서 끝난다. */
-  private remoteView(ev?: GCalEvent): RemoteView | undefined {
-    if (!ev) return undefined;
-    const due = this.eventDueDate(ev); // 다중일 블록은 끝(배타적−1)
-    return {
-      updated: ev.updated,
-      due,
-      start: due ? this.eventStartDate(ev) ?? due : undefined,
-      time: this.eventTimeRange(ev),
-      title: this.gcalTitleBase(ev),
-      stamp: this.eventStamp(ev),
-    };
-  }
-
-  /**
-   * 이벤트에 심긴 마지막 push 스냅샷(`tgs*`). **원격 변경이 사람의 GCal 편집인지
-   * 메아리인지 가르는 유일한 근거**다 → RemoteView.stamp
-   *
-   * `tgsDue`가 없으면(우리가 올린 적 없는/아주 옛 이벤트) 통째로 undefined —
-   * **판정 불가는 "사람이 편집했다"가 아니다.** 없는 키를 빈 문자열로 메우면 현재 값과
-   * 무조건 달라 보여서 모든 메아리가 사람 편집으로 승격된다.
-   */
-  private eventStamp(ev: GCalEvent): RemoteView["stamp"] {
-    const p = ev.extendedProperties?.private;
-    if (!p?.tgsDue) return undefined;
-    return {
-      due: p.tgsDue,
-      start: p.tgsStart ?? p.tgsDue,
-      // 옛 이벤트는 이 키가 없다. "" 로 메우면 시각이 지정된 이벤트가 전부 사람 편집으로
-      // 읽히므로 그대로 undefined 로 둬서 시각만 판정 불가로 남긴다.
-      time: p.tgsTime,
-      title: p.tgsTitle,
-    };
-  }
-
-  /** 스냅샷 한 필드를 옮긴다. record(start가 optional)와 Snapshot 둘 다 대상이 된다. */
-  private assignSnapshot(
-    dst: {
-      due: string;
-      start?: string;
-      time?: string;
-      done: boolean;
-      title: string;
-    },
-    f: Field,
-    src: Snapshot
-  ): void {
-    if (f === "due") dst.due = src.due;
-    else if (f === "start") dst.start = src.start;
-    else if (f === "time") dst.time = src.time;
-    else if (f === "done") dst.done = src.done;
-    else dst.title = src.title;
   }
 
   /** 병합 결정을 실행한다: 노트에 pull 반영 → 필요하면 push → 스냅샷 갱신. */
@@ -1066,7 +610,7 @@ export class SyncEngine {
     const m: Snapshot = { ...plan.merged };
     // pull이 실패한 필드는 노트가 안 바뀌었으므로 스냅샷도 노트 현재값이다.
     for (const f of plan.pulledFields) {
-      if (!applied.includes(f)) this.assignSnapshot(m, f, plan.local);
+      if (!applied.includes(f)) assignSnapshot(m, f, plan.local);
     }
 
     let pushed = false;
@@ -1078,10 +622,10 @@ export class SyncEngine {
       // 안 그러면 날짜/제목 push에 미완료가 딸려가 보류가 무의미해진다.
       const pushTask = plan.holdDone ? { ...task, checked: rec.done } : task;
       m.due = task.due!;
-      m.start = this.spanStart(task);
-      m.time = this.taskTime(task);
+      m.start = spanStart(task);
+      m.time = taskTime(task);
       m.done = pushTask.checked;
-      m.title = this.titleBase(task);
+      m.title = titleBase(task);
 
       const target = resolveCalendar(task.tags, this.settings);
       if (!plan.pushNeeded) {
@@ -1098,7 +642,7 @@ export class SyncEngine {
         }
         const newEv = await this.client.insertEvent(
           target.id,
-          this.buildEvent(pushTask, id)
+          buildEvent(this.codec, pushTask, id)
         );
         rec.eventId = newEv.id!;
         rec.calendarId = target.id;
@@ -1120,7 +664,7 @@ export class SyncEngine {
       // 완료 해제가 실제로 GCal에 올라간 순간. 되돌리기 힘든 방향이라 조용히 넘기지 않는다 —
       // 노트에서 실수로 풀린 걸 이틀 뒤에 발견한 사고가 있었다(2026-08-09 CISS).
       if (rec.done && !pushTask.checked) {
-        new Notice(`GCal 완료 해제: ${this.titleBase(task)}`, 8000);
+        new Notice(`GCal 완료 해제: ${titleBase(task)}`, 8000);
         console.warn(`[tasks-gcal-sync] 완료 해제를 GCal에 반영: ${id} ${where}`);
       }
       pushed = true;
@@ -1160,7 +704,7 @@ export class SyncEngine {
       rec.title = m.title;
     } else if (plan.pushNeeded) {
       // 부분 반영: pull이 실제로 고친 필드만 기록한다.
-      for (const f of applied) this.assignSnapshot(rec, f, m);
+      for (const f of applied) assignSnapshot(rec, f, m);
     }
     // normalizeNeeded인데 못 찍었으면 스냅샷을 그대로 둔다 →
     // 다음 사이클에 "로컬이 바뀐 것"으로 읽혀 push되고, 그때 표현이 맞춰진다.
@@ -1447,7 +991,7 @@ export class SyncEngine {
         //     record 가 마지막으로 동기화한 제목과 맞는 쪽이 원본이다. 정확히 한 쪽만
         //     맞을 때만 손댄다 — 둘 다 맞거나 둘 다 아니면 사람이 봐야 한다.
         else if (rec?.title) {
-          const mine = lines.filter((t) => this.titleBase(t) === rec.title);
+          const mine = lines.filter((t) => titleBase(t) === rec.title);
           if (mine.length === 1) {
             victim = lines.find((t) => t !== mine[0]);
             why = `서로 다른 task 가 같은 🆔 → 원본(제목 "${rec.title}")이 아닌 줄에서 🆔 제거`;
@@ -1658,8 +1202,8 @@ export class SyncEngine {
       try {
         const plan = decideReconcile({
           rec,
-          task: this.taskState(task),
-          remote: this.remoteView(ev),
+          task: taskState(task),
+          remote: remoteView(this.codec, ev),
           evCancelled,
           guards: guards.for(id),
           now: Date.now(),
@@ -1828,15 +1372,15 @@ export class SyncEngine {
         try {
           const existing = (
             await this.client.findByTaskId(target.id, t.id)
-          ).filter((e) => this.isOurs(e));
+          ).filter((e) => isOurs(this.codec, e));
           if (existing.length > 0) {
             const [keep, ...dupes] = existing;
             // 이벤트에 심긴 스냅샷으로 복원 → 다음 sync에서 어느 쪽이 바뀌었는지 정확 판정.
-            records[t.id] = this.recordFromEvent(keep, target.id, t);
+            records[t.id] = recordFromEvent(keep, target.id, t);
             result.entries.push({
               action: "ADOPT",
               id: t.id,
-              title: this.titleBase(t),
+              title: titleBase(t),
               calendar: target.name || target.id,
               eventId: keep.id,
               where: taskWhere(t),
@@ -1851,7 +1395,7 @@ export class SyncEngine {
                 result.entries.push({
                   action: "DELETE",
                   id: t.id,
-                  title: this.titleBase(t),
+                  title: titleBase(t),
                   calendar: target.name || target.id,
                   eventId: d.id,
                   where: taskWhere(t),
@@ -1879,7 +1423,7 @@ export class SyncEngine {
           result.entries.push({
             action: "FAIL",
             id: t.id,
-            title: this.titleBase(t),
+            title: titleBase(t),
             calendar: target.name || target.id,
             where: taskWhere(t),
             detail: `기존 이벤트 조회 실패 → 새로 생성 진행(중복 가능): ${errMsg(e)}`,
@@ -1907,7 +1451,7 @@ export class SyncEngine {
         result.entries.push({
           action: "SKIP",
           id: t.id,
-          title: this.titleBase(t),
+          title: titleBase(t),
           calendar: target.name || target.id,
           where: taskWhere(t),
           detail: SKIP_TEXT["mobile-readonly"],
@@ -1919,7 +1463,7 @@ export class SyncEngine {
         result.entries.push({
           action: "HOLD",
           id: t.id,
-          title: this.titleBase(t),
+          title: titleBase(t),
           calendar: target.name || target.id,
           where: taskWhere(t),
           detail: SKIP_TEXT["unsettled-create"],
@@ -1931,7 +1475,7 @@ export class SyncEngine {
         result.entries.push({
           action: "HOLD",
           id: t.id,
-          title: this.titleBase(t),
+          title: titleBase(t),
           calendar: target.name || target.id,
           where: taskWhere(t),
           detail: SKIP_TEXT["cold-start-create"],
@@ -1953,7 +1497,7 @@ export class SyncEngine {
           this.fail(result, t.path, e);
           result.entries.push({
             action: "SKIP",
-            title: this.titleBase(t),
+            title: titleBase(t),
             calendar: target.name || target.id,
             where: taskWhere(t),
             detail: `${SKIP_TEXT["ensure-id-failed"]}: ${errMsg(e)}`,
@@ -1968,32 +1512,32 @@ export class SyncEngine {
       try {
         const ev = await this.client.insertEvent(
           target.id,
-          this.buildEvent(t, id)
+          buildEvent(this.codec, t, id)
         );
         records[id] = {
           eventId: ev.id!,
           calendarId: target.id,
           due: t.due,
-          start: this.spanStart(t),
+          start: spanStart(t),
           // ⏰를 빠뜨리면 스냅샷이 "종일"로 남아, 바로 다음 run이 시간대를 바뀐 것으로
           // 읽고 불필요한 push를 한 번 더 한다(다른 복원 경로들은 이미 넣고 있다).
-          time: this.taskTime(t),
+          time: taskTime(t),
           done: t.checked,
-          title: this.titleBase(t),
+          title: titleBase(t),
           gcalUpdated: ev.updated,
         };
         result.created++;
         result.entries.push({
           action: "CREATE",
           id,
-          title: this.titleBase(t),
+          title: titleBase(t),
           calendar: target.name || target.id,
           eventId: ev.id,
           where: taskWhere(t),
           detail:
             `due=${t.due}` +
-            (this.spanStart(t) !== t.due ? ` start=${this.spanStart(t)}` : "") +
-            (this.taskTime(t) ? ` time=${this.taskTime(t)}` : " (종일)") +
+            (spanStart(t) !== t.due ? ` start=${spanStart(t)}` : "") +
+            (taskTime(t) ? ` time=${taskTime(t)}` : " (종일)") +
             (t.checked ? " done=완료" : "") +
             (idWasNew ? " · 🆔를 새로 부여해 노트에 기록" : ""),
         });
@@ -2004,7 +1548,7 @@ export class SyncEngine {
         result.entries.push({
           action: "FAIL",
           id,
-          title: this.titleBase(t),
+          title: titleBase(t),
           calendar: target.name || target.id,
           where: taskWhere(t),
           detail: `이벤트 생성 실패: ${errMsg(e)}`,

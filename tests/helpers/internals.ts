@@ -17,6 +17,11 @@ import { SyncEngine } from "../../src/sync/SyncEngine";
 import { GCalEvent } from "../../src/gcal/CalendarClient";
 import { SyncRecord } from "../../src/sync/StateStore";
 import { Field, LocalView, RemoteView, TaskState } from "../../src/sync/reconcile";
+import { CodecCtx } from "../../src/sync/codec/ctx";
+import * as P from "../../src/sync/codec/presentation";
+import * as PL from "../../src/sync/codec/payload";
+import * as ST from "../../src/sync/codec/stamp";
+import * as TM from "../../src/sync/codec/timeMapping";
 
 /** 테스트 픽스처는 VaultTask 의 일부만 채운다 — 여기서는 느슨하게 받는다. */
 export type TaskLike = any;
@@ -31,72 +36,76 @@ export type SnapLike = {
 
 const E = (engine: SyncEngine): any => engine as any;
 
+// ── 코덱은 0.12.3 에서 src/sync/codec/* 로 옮겼다 — 엔진의 codec 컨텍스트로 모듈을 직접 부른다 ──
+const ctx = (engine: SyncEngine): CodecCtx => E(engine).codec;
+
 // ── 표현(제목·설명·색) ────────────────────────────────────────────────────
-export const titleBase = (engine: SyncEngine, t: TaskLike): string => E(engine).titleBase(t);
-export const summary = (engine: SyncEngine, t: TaskLike): string => E(engine).summary(t);
+export const titleBase = (_engine: SyncEngine, t: TaskLike): string => P.titleBase(t);
+export const summary = (engine: SyncEngine, t: TaskLike): string => P.summary(ctx(engine), t);
 export const doneColor = (engine: SyncEngine, t: TaskLike): string | null | undefined =>
-  E(engine).doneColor(t);
+  P.doneColor(ctx(engine), t);
 export const gcalTitleBase = (engine: SyncEngine, ev: GCalEvent): string =>
-  E(engine).gcalTitleBase(ev);
-export const deepLink = (engine: SyncEngine, t: TaskLike): string | null => E(engine).deepLink(t);
+  P.gcalTitleBase(ctx(engine), ev);
+export const deepLink = (engine: SyncEngine, t: TaskLike): string | null =>
+  P.deepLink(ctx(engine), t);
 export const noteBlock = (engine: SyncEngine, id: string, t?: TaskLike): string =>
-  E(engine).noteBlock(id, t);
-export const userDescription = (engine: SyncEngine, prev: string): string =>
-  E(engine).userDescription(prev);
+  P.noteBlock(ctx(engine), id, t);
+export const userDescription = (_engine: SyncEngine, prev: string): string =>
+  P.userDescription(prev);
 export const mergeDescription = (
   engine: SyncEngine,
   prev: string,
   id: string,
   t?: TaskLike
-): string => E(engine).mergeDescription(prev, id, t);
+): string => P.mergeDescription(ctx(engine), prev, id, t);
 export const presentationPatch = (
   engine: SyncEngine,
   id: string,
   t: TaskLike,
   ev?: GCalEvent
-): Partial<GCalEvent> => E(engine).presentationPatch(id, t, ev);
+): Partial<GCalEvent> => PL.presentationPatch(ctx(engine), id, t, ev);
 export const buildEvent = (engine: SyncEngine, t: TaskLike, id: string): GCalEvent =>
-  E(engine).buildEvent(t, id);
+  PL.buildEvent(ctx(engine), t, id);
 
 // ── 시각·날짜 매핑 ─────────────────────────────────────────────────────────
-export const spanStart = (engine: SyncEngine, t: TaskLike): string => E(engine).spanStart(t);
-export const eventStartDate = (engine: SyncEngine, ev: GCalEvent): string | undefined =>
-  E(engine).eventStartDate(ev);
-export const eventDueDate = (engine: SyncEngine, ev: GCalEvent): string | undefined =>
-  E(engine).eventDueDate(ev);
-export const eventTimeRange = (engine: SyncEngine, ev: GCalEvent): string | undefined =>
-  E(engine).eventTimeRange(ev);
-export const isMultiDay = (engine: SyncEngine, t: TaskLike): boolean => E(engine).isMultiDay(t);
-export const taskTime = (engine: SyncEngine, t: TaskLike): string => E(engine).taskTime(t);
-export const timedDates = (engine: SyncEngine, t: TaskLike): Partial<GCalEvent> | null =>
-  E(engine).timedDates(t);
-export const exclusiveDates = (engine: SyncEngine, d: Partial<GCalEvent>): Partial<GCalEvent> =>
-  E(engine).exclusiveDates(d);
+export const spanStart = (_engine: SyncEngine, t: TaskLike): string => TM.spanStart(t);
+export const eventStartDate = (_engine: SyncEngine, ev: GCalEvent): string | undefined =>
+  TM.eventStartDate(ev);
+export const eventDueDate = (_engine: SyncEngine, ev: GCalEvent): string | undefined =>
+  TM.eventDueDate(ev);
+export const eventTimeRange = (_engine: SyncEngine, ev: GCalEvent): string | undefined =>
+  TM.eventTimeRange(ev);
+export const isMultiDay = (_engine: SyncEngine, t: TaskLike): boolean => TM.isMultiDay(t);
+export const taskTime = (_engine: SyncEngine, t: TaskLike): string => TM.taskTime(t);
+export const timedDates = (_engine: SyncEngine, t: TaskLike): Partial<GCalEvent> | null =>
+  TM.timedDates(t);
+export const exclusiveDates = (_engine: SyncEngine, d: Partial<GCalEvent>): Partial<GCalEvent> =>
+  TM.exclusiveDates(d);
 
 // ── 스탬프(tgs*) 코덱 · 판정 입력 ─────────────────────────────────────────
 export const privateProps = (
   engine: SyncEngine,
   id: string,
   t: TaskLike
-): Record<string, string> => E(engine).privateProps(id, t);
-export const isOurs = (engine: SyncEngine, ev: GCalEvent): boolean => E(engine).isOurs(ev);
+): Record<string, string> => ST.privateProps(ctx(engine), id, t);
+export const isOurs = (engine: SyncEngine, ev: GCalEvent): boolean => ST.isOurs(ctx(engine), ev);
 export const recordFromEvent = (
-  engine: SyncEngine,
+  _engine: SyncEngine,
   ev: GCalEvent,
   calendarId: string,
   t: TaskLike
-): SyncRecord => E(engine).recordFromEvent(ev, calendarId, t);
+): SyncRecord => ST.recordFromEvent(ev, calendarId, t);
 export const recordFromEventOnly = (
   engine: SyncEngine,
   ev: GCalEvent,
   calendarId: string
-): SyncRecord | null => E(engine).recordFromEventOnly(ev, calendarId);
-export const taskState = (engine: SyncEngine, t?: TaskLike): TaskState => E(engine).taskState(t);
-export const localView = (engine: SyncEngine, t: TaskLike): LocalView => E(engine).localView(t);
+): SyncRecord | null => ST.recordFromEventOnly(ctx(engine), ev, calendarId);
+export const taskState = (_engine: SyncEngine, t?: TaskLike): TaskState => ST.taskState(t);
+export const localView = (_engine: SyncEngine, t: TaskLike): LocalView => ST.localView(t);
 export const remoteView = (engine: SyncEngine, ev?: GCalEvent): RemoteView | undefined =>
-  E(engine).remoteView(ev);
-export const eventStamp = (engine: SyncEngine, ev: GCalEvent): RemoteView["stamp"] =>
-  E(engine).eventStamp(ev);
+  ST.remoteView(ctx(engine), ev);
+export const eventStamp = (_engine: SyncEngine, ev: GCalEvent): RemoteView["stamp"] =>
+  ST.eventStamp(ev);
 export const knownCalendarIds = (engine: SyncEngine): string[] => E(engine).knownCalendarIds();
 
 // ── 로그 문구 ─────────────────────────────────────────────────────────────
