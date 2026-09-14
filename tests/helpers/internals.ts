@@ -22,6 +22,7 @@ import * as P from "../../src/sync/codec/presentation";
 import * as PL from "../../src/sync/codec/payload";
 import * as ST from "../../src/sync/codec/stamp";
 import * as TM from "../../src/sync/codec/timeMapping";
+import * as LT from "../../src/sync/engine/logText";
 
 /** 테스트 픽스처는 VaultTask 의 일부만 채운다 — 여기서는 느슨하게 받는다. */
 export type TaskLike = any;
@@ -108,25 +109,31 @@ export const eventStamp = (_engine: SyncEngine, ev: GCalEvent): RemoteView["stam
   ST.eventStamp(ev);
 export const knownCalendarIds = (engine: SyncEngine): string[] => E(engine).knownCalendarIds();
 
-// ── 로그 문구 ─────────────────────────────────────────────────────────────
-export const fieldText = (engine: SyncEngine, s: SnapLike, f: Field): string =>
-  E(engine).fieldText(s, f);
+// ── 로그 문구 — 0.12.4 에서 src/sync/engine/logText.ts 로 옮겼다 ────────────────
+export const fieldText = (_engine: SyncEngine, s: SnapLike, f: Field): string =>
+  LT.fieldText(s, f);
 export const diffText = (
-  engine: SyncEngine,
+  _engine: SyncEngine,
   before: SnapLike,
   after: SnapLike,
   fields: Field[]
-): string => E(engine).diffText(before, after, fields);
+): string => LT.diffText(before, after, fields);
 export const changedFields = (
-  engine: SyncEngine,
+  _engine: SyncEngine,
   before: SnapLike,
   after: SnapLike,
   fields?: readonly Field[]
-): Field[] => E(engine).changedFields(before, after, fields);
-export const lastLineText = (engine: SyncEngine, rec: SyncRecord): string =>
-  E(engine).lastLineText(rec);
-/** 병합 한 건의 로그. `c` 는 SyncEngine.logMerge 의 인자 모양 그대로다. */
-export const logMerge = (engine: SyncEngine, c: any): void => E(engine).logMerge(c);
+): Field[] => LT.changedFields(before, after, fields);
+export const lastLineText = (_engine: SyncEngine, rec: SyncRecord): string =>
+  LT.lastLineText(rec);
+/**
+ * 병합 한 건의 로그. `c` 는 옛 SyncEngine.logMerge 의 인자 모양 그대로다(result 포함) —
+ * 지금은 순수 함수 mergeEntry 가 항목을 돌려주고 applyMerge 가 result 에 넣는다.
+ */
+export const logMerge = (engine: SyncEngine, c: any): void => {
+  const entry = LT.mergeEntry(E(engine).settings, c);
+  if (entry) c.result.entries.push(entry);
+};
 
 // ── 가드(볼트 뒤처짐 · 정착 · 콜드 스타트) ─────────────────────────────────
 export const vaultBehind = (engine: SyncEngine): boolean => E(engine).vaultBehind();
