@@ -134,9 +134,73 @@ export class SettingsTab extends PluginSettingTab {
         t.inputEl.style.width = "100%";
       });
 
+    // ── 기기 간 자격증명 옮기기 ──
+    //
+    // 세 값은 **기기-로컬 localStorage** 에 산다(볼트 단위 네임스페이스). 볼트 파일에 두면
+    // Sync 를 타는데 **그게 v0.3.1/v0.3.8 사고의 원인**이었다 — 며칠 오프라인이던 기기가
+    // 자기가 든 옛 clientSecret 을 서버로 밀어 올려 인증이 통째로 깨졌다.
+    //
+    // 그래서 「동기화되게 하는 것」은 답이 아니고, **옮기는 수고를 줄이는 것**이 답이다.
+    // 기기 × 볼트마다 세 칸을 손으로 채우는 대신 한 덩어리로 복사·붙여넣는다.
+    new Setting(containerEl)
+      .setName("다른 기기로 옮기기")
+      .setDesc(
+        "자격증명은 기기마다·볼트마다 따로 넣어야 합니다(Obsidian Sync를 타지 않습니다 — 옛 값이 " +
+          "서버로 올라가 인증이 깨진 사고가 있었습니다). 데스크탑에서 「복사」하고 다른 기기에서 " +
+          "「붙여넣기」하면 세 칸이 한 번에 채워집니다. ⚠️ 이 문자열이 곧 계정 접근 권한입니다 — " +
+          "옮긴 뒤 메신저·노트에 남기지 마세요."
+      )
+      .addButton((b) =>
+        b.setButtonText("복사").onClick(async () => {
+          if (!s.clientId && !s.refreshToken) {
+            new Notice("옮길 자격증명이 없습니다 — 이 기기는 아직 설정 전입니다");
+            return;
+          }
+          const blob = JSON.stringify({
+            v: 1,
+            clientId: s.clientId,
+            clientSecret: s.clientSecret,
+            refreshToken: s.refreshToken,
+          });
+          try {
+            await navigator.clipboard.writeText(blob);
+            new Notice("자격증명을 복사했습니다 — 다른 기기에서 「붙여넣기」");
+          } catch {
+            new Notice("클립보드에 쓰지 못했습니다");
+          }
+        })
+      )
+      .addButton((b) =>
+        b.setButtonText("붙여넣기").onClick(async () => {
+          try {
+            const txt = (await navigator.clipboard.readText()).trim();
+            const o = JSON.parse(txt);
+            // 셋 다 있어야 받는다 — 반쪽만 덮으면 기존 값과 섞여 더 못 쓰게 된다.
+            if (!o || typeof o.clientId !== "string" || typeof o.refreshToken !== "string") {
+              new Notice("클립보드 내용이 자격증명 형식이 아닙니다");
+              return;
+            }
+            s.clientId = o.clientId;
+            s.clientSecret = typeof o.clientSecret === "string" ? o.clientSecret : "";
+            s.refreshToken = o.refreshToken || null;
+            await this.plugin.saveAll();
+            this.display(); // 인증 상태 줄을 다시 그린다
+            new Notice("자격증명을 넣었습니다 — 「지금 동기화」로 확인하세요");
+          } catch {
+            new Notice("클립보드를 읽지 못했습니다(형식 오류)");
+          }
+        })
+      );
+
     new Setting(containerEl)
       .setName("인증 상태")
-      .setDesc(this.plugin.auth.isAuthenticated() ? "✅ 인증됨" : "❌ 미인증")
+      .setDesc(
+        (this.plugin.auth.isAuthenticated() ? "✅ 인증됨" : "❌ 미인증") +
+          (Platform.isDesktopApp
+            ? ""
+            : " — 이 기기에서는 대화형 인증을 할 수 없습니다(루프백 서버가 데스크탑 전용). " +
+              "데스크탑에서 인증한 뒤 위 「복사 → 붙여넣기」로 옮기세요.")
+      )
       .addButton((b) =>
         b
           .setButtonText(
