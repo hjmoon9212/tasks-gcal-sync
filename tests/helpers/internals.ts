@@ -135,12 +135,13 @@ export const logMerge = (engine: SyncEngine, c: any): void => {
   if (entry) c.result.entries.push(entry);
 };
 
-// ── 가드(볼트 뒤처짐 · 정착 · 콜드 스타트) ─────────────────────────────────
-export const vaultBehind = (engine: SyncEngine): boolean => E(engine).vaultBehind();
+// ── 가드(볼트 뒤처짐 · 정착 · 콜드 스타트) — 0.12.5 에서 VaultGuard(engine.guard)로 옮겼다 ──
+export const vaultBehind = (engine: SyncEngine): boolean => E(engine).guard.vaultBehind();
 export const behindBudgetExceeded = (engine: SyncEngine): boolean =>
-  E(engine).behindBudgetExceeded();
-export const resetBehindBudget = (engine: SyncEngine): void => E(engine).resetBehindBudget();
-export const pushArmed = (engine: SyncEngine): boolean => E(engine).pushArmed();
+  E(engine).guard.behindBudgetExceeded();
+export const resetBehindBudget = (engine: SyncEngine): void =>
+  E(engine).guard.resetBehindBudget();
+export const pushArmed = (engine: SyncEngine): boolean => E(engine).guard.pushArmed();
 
 /** 엔진이 쥔 TaskRepository — 호출 여부를 관찰하려고 메서드를 감쌀 때 쓴다. */
 export const taskRepo = (engine: SyncEngine): { getTasks: () => Promise<any[]> } =>

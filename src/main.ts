@@ -13,6 +13,7 @@ import { TaskRepository } from "./data/TaskRepository";
 import { TaskWriter } from "./write/TaskWriter";
 import { SkipKind, SyncEngine, SyncResult } from "./sync/SyncEngine";
 import { SKIP_LABEL } from "./sync/engine/skipText";
+import { getSyncInstance } from "./obsidian/syncPlugin";
 import { SyncLogWriter, withDeviceTag } from "./sync/SyncLog";
 import { EventFeed } from "./gcal/EventFeed";
 import { GcalReadApi } from "./api/PublicApi";
@@ -540,7 +541,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
   deviceTag(): string {
     if (!this.state) return ""; // loadAll 전 — withDeviceTag가 기본 경로를 그대로 준다
     if (this.state.logDeviceTag) return this.state.logDeviceTag;
-    const sync = (this.app as any).internalPlugins?.plugins?.sync?.instance;
+    const sync = getSyncInstance(this.app);
     const name =
       typeof sync?.deviceName === "string" && sync.deviceName.trim()
         ? sync.deviceName.trim()

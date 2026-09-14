@@ -17,6 +17,15 @@ import {
   mergeRetry,
 } from "./engine/result";
 import { SKIP_TEXT } from "./engine/skipText";
+import { VaultGuard } from "./engine/vaultGuard";
+import {
+  BEHIND_RECHECK_MS,
+  CONFLICT_HOLD_MAX_MS,
+  FULL_SCAN_INTERVAL_MS,
+  REVERT_WINDOW_MS,
+  SETTLE_MS,
+  UNCHECK_HOLD_MS,
+} from "./engine/constants";
 import { calName, fieldText, lastLineText, mergeEntry } from "./engine/logText";
 import { errMsg } from "../util/errors";
 import { CodecCtx } from "./codec/ctx";
@@ -57,67 +66,35 @@ interface CalPull {
  *        같은 필드가 양쪽에서 바뀐 경우에만 GCal을 채택(직접 조작한 화면)하고 warn을 남긴다.
  *  매핑 스냅샷(records)으로 어느 쪽 어느 필드가 바뀌었는지 판정.
  */
-/** 콜드 스타트 push 잠금이 풀리는 최소 시간(ms). pull 1회 완주 + 이 시간 둘 다 필요. */
-const COLD_START_MS = 60_000;
-/** done 회귀를 처음 본 뒤 실제로 push하기까지 최소 대기(ms). 그 사이 Sync가 정착한다. */
-const UNCHECK_HOLD_MS = 60_000;
-/**
- * 캘린더 전수 스캔(rebuildRecords)의 자동 실행 간격.
- * records 가 비었으면 간격과 무관하게 즉시 돈다 — 그때는 스캔이 유일한 복구 경로다.
- */
-const FULL_SCAN_INTERVAL_MS = 24 * 60 * 60 * 1000;
-/**
- * vaultBehind가 계속 참일 때 보류를 포기하고 통과시키는 상한.
- *
- * **시간만 센다.** 예전엔 횟수(5회) 상한도 있었는데, 그건 run 간격이 주기 동기화
- * (기본 5분)뿐이라 "5회 ≈ 25분"이던 시절의 값이다. 보류할 때마다 재확인을 예약하는
- * 지금은 5회가 75초밖에 안 돼 보호가 사실상 사라진다. 예산의 목적은 "영원히 막히지
- * 않기"이므로 원래 시간 개념이 맞다.
- */
-const BEHIND_MAX_MS = 10 * 60_000;
-/**
- * 볼트 뒤처짐으로 run을 보류했을 때 다시 확인하기까지의 간격.
- *
- * 보류 run은 네트워크 호출 전에 반환되므로 사실상 공짜다. 이게 없으면 Sync가 3초 만에
- * 정착해도 다음 트리거(주기 5분)까지 아무 일도 안 일어난다.
- */
-const BEHIND_RECHECK_MS = 15_000;
-/**
- * 충돌 해결 보류의 **상한**(fail-open). 이보다 오래 끌면 정착 전이라도 해결한다.
- *
- * `vaultBehind` 의 10분 상한과 같은 성격이고 더 길다 — 충돌 해결은 한쪽 값을 버리는
- * 일이라 더 참아야 하지만, **영영 미루면 그건 판정이 아니라 고장이다.** 2026-09-10 에
- * 만성적으로 따라잡는 볼트에서 `⚔️` 기록이 전부 보류로만 남았고, 어느 쪽도 안 쓰니
- * 사용자에게는 "언제나 Obsidian 이 이긴다"로 보였다 → reconcile.conflictResolutionAllowed
- */
-const CONFLICT_HOLD_MAX_MS = 15 * 60_000;
-/**
- * pull 로 쓴 줄이 되돌아간 것으로 볼 수 있는 시간 창(ms).
- *
- * 이보다 늦게 달라졌으면 사용자 편집으로 본다 — 우리가 쓴 직후가 아니면 근거가 약하다.
- */
-const REVERT_WINDOW_MS = 3 * 60_000;
-/**
- * 뒤처짐이 풀린 뒤 "정착했다"로 인정하기까지 이어져야 하는 시간.
- *
- * **한 번의 표본은 정착이 아니다.** 2026-09-07 에 40분짜리 보류 구간 두 개 사이의 2초
- * 틈에서 `vaultBehind()`가 false 를 돌려줬고, 그 틈에 (a) 새 🆔 를 노트에 써넣고
- * (b) 40분 뒤 같은 틈에서 이벤트를 지웠다. 되돌리기 힘든 동작은 구간을 보고 결정한다.
- */
-const SETTLE_MS = 30_000;
-
 export class SyncEngine {
-  /** 플러그인 로드 시각. 콜드 스타트 판정 기준(인스턴스는 로드마다 새로 만들어진다). */
-  private readonly loadedAt = Date.now();
-  /** 알려진 캘린더 전부를 예외 없이 pull한 run이 한 번 끝났는가. */
-  private pullCycleDone = false;
-  /** 볼트 뒤처짐 판정이 **연속으로** 참이기 시작한 시각. fail-open 상한의 기준. */
-  private behindSince: number | null = null;
-  /**
-   * 뒤처짐 판정이 **연속으로** 거짓이기 시작한 시각. 정착(SETTLE_MS) 판정의 기준.
-   * 뒤처짐이 한 번이라도 관측되면 다시 null 이 된다 — 시계를 처음부터 다시 센다.
-   */
-  private settledSince: number | null = null;
+  /** 볼트 뒤처짐 · 정착 · 콜드 스타트 시계(0.12.5 에서 VaultGuard 로 옮겼다). */
+  private readonly guard = new VaultGuard(() => this.app);
+
+  // ⚠️ 임시 접근자 — 기존 테스트가 엔진의 옛 필드 이름으로 시계를 조작한다. 0.12.10 에서 걷어낸다.
+  private get loadedAt(): number {
+    return this.guard.loadedAt;
+  }
+  private set loadedAt(v: number) {
+    this.guard.loadedAt = v;
+  }
+  private get pullCycleDone(): boolean {
+    return this.guard.pullCycleDone;
+  }
+  private set pullCycleDone(v: boolean) {
+    this.guard.pullCycleDone = v;
+  }
+  private get behindSince(): number | null {
+    return this.guard.behindSince;
+  }
+  private set behindSince(v: number | null) {
+    this.guard.behindSince = v;
+  }
+  private get settledSince(): number | null {
+    return this.guard.settledSince;
+  }
+  private set settledSince(v: number | null) {
+    this.guard.settledSince = v;
+  }
 
   constructor(
     private app: App,
@@ -257,71 +234,6 @@ export class SyncEngine {
     return adopted;
   }
 
-  /**
-   * 이 기기의 볼트가 뒤처져 있으면 true. Obsidian Sync 코어 플러그인의 상태를 읽는다
-   * (비공식 API — 없거나 모양이 바뀌면 판단을 포기하고 false).
-   *
-   * 뒤처진 볼트에서 "task가 없다 → 이벤트 삭제"를 돌리면, 다른 기기가 방금 만든
-   * task의 이벤트를 지운다. 확실히 동기화 중일 때만 삭제를 미룬다.
-   */
-  private vaultBehind(): boolean {
-    try {
-      const inst = (this.app as any).internalPlugins?.plugins?.sync?.instance;
-      if (!inst) return false;
-      // getStatus()는 표시용 문구(syncStatus: "Fully synced")가 아니라 토큰("synced")을
-      // 준다. 판정 전에 먼저 읽어두는 이유는 **로그 때문**이다 — 어느 신호로 걸렸든
-      // "Sync가 뭐라고 했는지"가 콘솔에 남아야 사후에 원인을 좁힐 수 있다.
-      const raw =
-        typeof inst.getStatus === "function" ? inst.getStatus() : inst.syncStatus;
-      const say = (why: string) =>
-        console.log(`[tasks-gcal-sync] Sync 진행 중(${why}):`, raw);
-      if (inst.pause === true) {
-        say("pause");
-        return true;
-      }
-      // 불리언 신호가 문자열보다 직접적이다(실측: 인스턴스에 syncing/pause/error/ready가 있다).
-      // `=== true`로만 받아 fail-open을 지킨다 — 필드가 없어지면 undefined라 통과한다.
-      if (inst.syncing === true) {
-        say("syncing");
-        return true;
-      }
-      const s = String(raw ?? "").toLowerCase();
-      if (!s) return false;
-      // **fail-open**: "진행 중"이라고 확실히 읽힐 때만 true.
-      // 반대로 "완료"를 인식하는 방식으로 짜면, 비공식 API의 문구가 바뀌거나 다른
-      // 언어로 나올 때 영원히 true가 되어 pull과 삭제가 조용히 멈춘다.
-      // 판단이 안 서면 통과시키고, 오삭제는 2단계 삭제 가드가 막는다.
-      const busy =
-        /syncing|synchronizing|uploading|downloading|pending|queued|동기화\s*중|업로드|다운로드/.test(
-          s
-        );
-      if (busy) say("상태");
-      return busy;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * vaultBehind 보류가 너무 오래 이어지면 포기하고 통과시킨다(**fail-open 상한**).
-   *
-   * `vaultBehind()`는 비공식 API의 상태에 기대고, Sync를 수동 일시정지해두면
-   * `pause === true`가 영구히 참이다. 상한이 없으면 동기화가 조용히 영영 멈춘다.
-   * 가드가 기능을 끄는 쪽으로 실패하면 안 된다 — 0.3.9→0.3.10에서 배운 것.
-   *
-   * 재는 것은 **run 횟수가 아니라 경과 시간**이다(BEHIND_MAX_MS 주석 참고).
-   */
-  private behindBudgetExceeded(): boolean {
-    if (this.behindSince === null) this.behindSince = Date.now();
-    const over = Date.now() - this.behindSince > BEHIND_MAX_MS;
-    if (over) {
-      console.warn(
-        "[tasks-gcal-sync] 볼트 뒤처짐 판정이 계속됨 → 상한 초과, 이번 run은 통과시킴"
-      );
-    }
-    return over;
-  }
-
   /** skip 을 사유와 함께 센다. 합계(`skipped`)와 내역이 항상 같이 움직이게 한다. */
   private skip(r: SyncResult, kind: SkipKind): void {
     countSkip(r, kind);
@@ -330,24 +242,6 @@ export class SyncEngine {
   /** 실제로 터진 것. 콘솔에만 남기면 못 본다. */
   private fail(r: SyncResult, where: string, e: unknown): void {
     addFailure(r, where, e);
-  }
-
-  private resetBehindBudget(): void {
-    this.behindSince = null;
-  }
-
-  /**
-   * 지금 push해도 되는가(콜드 스타트 잠금).
-   *
-   * 플러그인이 막 로드된 직후의 노트는 Obsidian Sync가 아직 내려쓰는 중일 수 있다.
-   * 그 상태로 push하면 다른 기기의 최신 변경을 **낡은 로컬 상태로 덮어쓴다.**
-   * "Sync 완료를 감지"하는 방법은 비공식 API뿐이고 fail-open이어야 하므로 순서를
-   * 보장할 수 없다 → 대신 **첫 행동을 무해하게** 만든다: pull 한 사이클을 완주하고
-   * 로드 후 최소 시간이 지나기 전까지 원격에 쓰지 않는다.
-   */
-  private pushArmed(): boolean {
-    if (Date.now() - this.loadedAt < COLD_START_MS) return false;
-    return this.pullCycleDone;
   }
 
   /** 기존 모든 record의 이벤트 설명(note)에 🆔 ID를 일괄 기록. */
@@ -680,17 +574,11 @@ export class SyncEngine {
     // 예전엔 pull만 껐는데, 그러면 gc.* 판정이 전부 false가 되어 "로컬만 바뀜"으로
     // 결론나고 **낡은 로컬 상태가 그대로 GCal로 올라갔다** — 보호 장치를 끄면서
     // 파괴 경로는 열어두는 구조였다. 읽지 못할 때는 쓰지도 않는다.
-    const behind = this.vaultBehind();
-    // 정착 시계. 뒤처짐이 보이면 처음부터 다시 센다 — 조용한 순간이 아니라 **조용한
-    // 구간**이어야 되돌리기 힘든 동작을 연다. 아래 early return 보다 먼저 갱신해야
-    // 보류로 끝나는 run 도 시계를 리셋한다.
-    if (behind) this.settledSince = null;
-    else if (this.settledSince === null) this.settledSince = Date.now();
-    const settledFor =
-      this.settledSince === null ? 0 : Date.now() - this.settledSince;
-    const vaultUnsettled = settledFor < SETTLE_MS;
-    const overBudget = behind && this.behindBudgetExceeded();
-    if (behind && !overBudget && !opts.force) {
+    // 판정 순서(뒤처짐 → 정착 시계 → 예산)는 VaultGuard.observe 가 지킨다 — 정착 시계는
+    // early return 보다 먼저 갱신돼야 보류로 끝나는 run 도 시계를 리셋한다.
+    const { settledFor, vaultUnsettled, holdWrites, earlyReturn } =
+      this.guard.observe(!!opts.force);
+    if (earlyReturn) {
       console.log("[tasks-gcal-sync] 볼트 동기화 중 → 이번 run 보류");
       // 보류만 하고 끝내면 Sync가 3초 뒤 정착해도 다음 트리거(주기 5분)까지 방치된다.
       // 호출부(main)가 이 값을 보고 재확인을 예약한다.
@@ -708,15 +596,13 @@ export class SyncEngine {
         ],
       };
     }
-    if (!behind) this.resetBehindBudget();
     // 상한 초과 시엔 뒤처짐 판정을 무시하고 평소대로 돈다(fail-open).
-    // 수동 실행(force)만 "뒤처진 채 강행"이므로 노트 쓰기/삭제는 계속 보류한다.
-    const holdWrites = behind && !overBudget;
+    // 수동 실행(force)만 "뒤처진 채 강행"이므로 노트 쓰기/삭제는 계속 보류한다(holdWrites).
     if (holdWrites) {
       console.log("[tasks-gcal-sync] 볼트 동기화 중 강행 → 노트 쓰기/삭제 보류");
     }
     // 콜드 스타트 잠금: 로드 직후에는 원격에 아무것도 쓰지 않는다(pushArmed 주석 참고).
-    const coldHold = !opts.force && !this.pushArmed();
+    const coldHold = this.guard.coldHold(!!opts.force);
     /**
      * 이 기기에서는 GCal 에 쓰지 않는다(모바일 읽기 전용).
      *
@@ -1364,16 +1250,14 @@ export class SyncEngine {
     }
 
     // pull을 예외 없이 끝냈으면 콜드 스타트 잠금을 푼다(시간 하한은 pushArmed가 따로 본다).
-    if (pullOk) this.pullCycleDone = true;
+    if (pullOk) this.guard.pullCycleDone = true;
 
     // 콜드 스타트로 GCal 쓰기를 미뤘고 이제 **시간만** 남았다면, 그 시점에 한 번 더 돈다.
     // 안 그러면 60초에 잠금이 풀려도 깨우는 사람이 없어 다음 주기(기본 5분)를 기다린다.
     // pullCycleDone이 아직 false면(=pull 실패) 예약하지 않는다 — 실패가 이어질 때
     // 2초 간격으로 되도는 것을 막는다. 그 경우는 기존 주기 동기화가 재시도한다.
-    if (coldHold && this.pullCycleDone) {
-      const left =
-        Math.max(0, COLD_START_MS - (Date.now() - this.loadedAt)) + 2_000;
-      mergeRetry(result, left);
+    if (coldHold && this.guard.pullCycleDone) {
+      mergeRetry(result, this.guard.coldRetryMs());
     }
 
     await this.saveState();
