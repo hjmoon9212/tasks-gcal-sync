@@ -1,8 +1,8 @@
 /**
  * sync 상태 영속화 구조.
  * records: 🆔(taskId) → GCal eventId + 마지막 sync 스냅샷.
- *   스냅샷(due/done/title)으로 "어느 쪽이 바뀌었는지"를 다음 sync에서 판정(Phase 2 양방향).
- * syncToken: 캘린더별 GCal 증분 동기화 토큰(Phase 2에서 사용).
+ *   스냅샷(due/start/time/done/title)으로 "어느 쪽이 바뀌었는지"를 다음 sync에서 판정(3-way).
+ * syncTokens: 캘린더별 GCal 증분 동기화 토큰(pullCalendar 가 쓴다 — EventFeed 는 건드리지 않는다).
  */
 export interface SyncRecord {
   eventId: string;

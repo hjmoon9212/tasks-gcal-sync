@@ -193,7 +193,7 @@ export type SkipReason =
   | "hold-unschedule"
   | "hold-conflict";
 
-/** 노트에 반영할 쓰기들. 실행 순서는 due → start → title → done(구조 변경 가능성). */
+/** 노트에 반영할 쓰기들. 실행 순서는 due → start → time → title(applyMerge). 완료는 pull 하지 않는다(v0.4.0). */
 export interface PullOps {
   setDue?: string;
   /** write=none: 값은 채택하되 줄은 안 건드림(🛫가 없는데 단일일로 바뀐 경우). */

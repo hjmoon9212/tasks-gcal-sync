@@ -1,5 +1,10 @@
 import { Notice, Plugin, TFile, normalizePath } from "obsidian";
-import { DEFAULT_SETTINGS, PluginSettings, migrateFeedColors } from "./settings/Settings";
+import {
+  DEFAULT_SETTINGS,
+  DEFAULT_SYNC_LOG_PATH,
+  PluginSettings,
+  migrateFeedColors,
+} from "./settings/Settings";
 import { SettingsTab } from "./settings/SettingsTab";
 import { PersistedState, emptyState } from "./sync/StateStore";
 import { GoogleAuth } from "./auth/GoogleAuth";
@@ -7,6 +12,7 @@ import { CalendarClient } from "./gcal/CalendarClient";
 import { TaskRepository } from "./data/TaskRepository";
 import { TaskWriter } from "./write/TaskWriter";
 import { SkipKind, SyncEngine, SyncResult } from "./sync/SyncEngine";
+import { SKIP_LABEL } from "./sync/engine/skipText";
 import { SyncLogWriter, withDeviceTag } from "./sync/SyncLog";
 import { EventFeed } from "./gcal/EventFeed";
 import { GcalReadApi } from "./api/PublicApi";
@@ -29,29 +35,9 @@ interface LegacySettings {
   doneTag?: string; // #done 폴백 태그 — 0.11.2에서 제거(색·접두사가 완료를 표시한다)
 }
 
-/** skip 사유를 사람이 읽는 말로. 숫자만 보여주면 원인을 못 찾는다. */
-const SKIP_LABEL: Record<SkipKind, string> = {
-  "vault-behind": "볼트 동기화 중",
-  "duplicate-id": "🆔 중복",
-  "hold-task-gone": "task 없음(보류)",
-  "hold-due-invalid": "📅 없음(보류)",
-  "hold-unschedule": "이벤트 삭제됨(보류)",
-  "hold-conflict": "충돌 해결 보류(볼트 정착 대기)",
-  "cold-start-create": "콜드 스타트(생성 보류)",
-  "unsettled-create": "볼트 정착 대기(생성 보류)",
-  "ensure-id-failed": "🆔 쓰기 실패",
-  "create-failed": "이벤트 생성 실패",
-  "pull-failed": "캘린더를 읽지 못함(쓰기 보류)",
-  "mobile-readonly": "모바일 읽기 전용(GCal 쓰기 없음)",
-  "push-precondition": "GCal이 그 사이 또 바뀜(push 포기)",
-  "reconcile-error": "조정 실패",
-};
-
 /** localStorage 키. App.saveLocalStorage가 볼트 단위로 네임스페이스를 붙인다. */
 const STATE_LS_KEY = "tasks-gcal-sync:state";
 
-/** 로그 파일의 기본 경로. 실제 파일에는 여기에 기기 태그가 붙는다. */
-const DEFAULT_LOG_PATH = "Logs/GCal 동기화 로그.md";
 
 /**
  * 종료 직전 플러시에 허용하는 최대 시간(ms).
@@ -531,7 +517,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
   /** 설정에 적힌 '기본 경로'. 실제 파일은 여기에 기기 태그가 붙은 형제 파일이다. */
   logBasePath(): string {
     const p = this.settings.syncLogPath?.trim();
-    return normalizePath(p || DEFAULT_LOG_PATH);
+    return normalizePath(p || DEFAULT_SYNC_LOG_PATH);
   }
 
   /**

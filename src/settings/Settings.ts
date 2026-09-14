@@ -133,6 +133,9 @@ export interface PluginSettings {
   targetCalendarName?: string;
 }
 
+/** 로그 파일의 기본 경로. 실제 파일에는 여기에 기기 태그가 붙는다(main.logPath). */
+export const DEFAULT_SYNC_LOG_PATH = "Logs/GCal 동기화 로그.md";
+
 export const DEFAULT_SETTINGS: PluginSettings = {
   clientId: "",
   clientSecret: "",
@@ -159,7 +162,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   minSyncIntervalSeconds: 60,
   mobileReadOnly: true,
   syncLogEnabled: true,
-  syncLogPath: "Logs/GCal 동기화 로그.md",
+  syncLogPath: DEFAULT_SYNC_LOG_PATH,
   syncLogMaxKB: 512,
   syncLogSkips: true,
 };

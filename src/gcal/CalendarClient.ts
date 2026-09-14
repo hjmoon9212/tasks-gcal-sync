@@ -1,4 +1,5 @@
 import { requestUrl } from "obsidian";
+import { errMsg } from "../util/errors";
 import { GoogleAuth } from "../auth/GoogleAuth";
 
 const BASE = "https://www.googleapis.com/calendar/v3";
@@ -260,7 +261,7 @@ export class CalendarClient {
         "DELETE"
       );
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = errMsg(e);
       if (/GCal DELETE (404|410):/.test(msg)) return; // 이미 삭제됨 → OK
       throw e;
     }

@@ -1,5 +1,6 @@
 import { App, Notice, Platform, PluginSettingTab, Setting } from "obsidian";
 import type TasksGcalSyncPlugin from "../main";
+import { DEFAULT_SYNC_LOG_PATH } from "./Settings";
 
 /** Google Calendar 이벤트 색(colorId 1~11). */
 const GCAL_COLORS: { id: string; name: string }[] = [
@@ -348,8 +349,7 @@ export class SettingsTab extends PluginSettingTab {
       )
       .addText((t) =>
         t.setValue(String(s.feedRefreshMinutes)).onChange(async (v) => {
-          const n = parseInt(v, 10);
-          s.feedRefreshMinutes = isNaN(n) || n < 0 ? 0 : n;
+          s.feedRefreshMinutes = nonNegInt(v);
           await this.plugin.saveAll();
           this.plugin.setupFeedInterval();
         })
@@ -480,8 +480,7 @@ export class SettingsTab extends PluginSettingTab {
       )
       .addText((t) =>
         t.setValue(String(s.autoPushDebounceSeconds)).onChange(async (v) => {
-          const n = parseInt(v, 10);
-          s.autoPushDebounceSeconds = isNaN(n) || n < 0 ? 0 : n;
+          s.autoPushDebounceSeconds = nonNegInt(v);
           await this.plugin.saveAll();
         })
       );
@@ -493,8 +492,7 @@ export class SettingsTab extends PluginSettingTab {
       )
       .addText((t) =>
         t.setValue(String(s.minSyncIntervalSeconds)).onChange(async (v) => {
-          const n = parseInt(v, 10);
-          s.minSyncIntervalSeconds = isNaN(n) || n < 0 ? 0 : n;
+          s.minSyncIntervalSeconds = nonNegInt(v);
           await this.plugin.saveAll();
         })
       );
@@ -511,8 +509,7 @@ export class SettingsTab extends PluginSettingTab {
       .setDesc("0이면 주기 동기화 없음.")
       .addText((t) =>
         t.setValue(String(s.syncIntervalMinutes)).onChange(async (v) => {
-          const n = parseInt(v, 10);
-          s.syncIntervalMinutes = isNaN(n) || n < 0 ? 0 : n;
+          s.syncIntervalMinutes = nonNegInt(v);
           await this.plugin.saveAll();
           this.plugin.setupInterval();
         })
@@ -547,7 +544,7 @@ export class SettingsTab extends PluginSettingTab {
       )
       .addText((t) =>
         t
-          .setPlaceholder("Logs/GCal 동기화 로그.md")
+          .setPlaceholder(DEFAULT_SYNC_LOG_PATH)
           .setValue(s.syncLogPath)
           .onChange(async (v) => {
             s.syncLogPath = v.trim();
@@ -602,10 +599,15 @@ export class SettingsTab extends PluginSettingTab {
       .setDesc("초과하면 오래된 앞부분부터 잘라냅니다. 0 = 무제한.")
       .addText((t) =>
         t.setValue(String(s.syncLogMaxKB)).onChange(async (v) => {
-          const n = parseInt(v, 10);
-          s.syncLogMaxKB = isNaN(n) || n < 0 ? 0 : n;
+          s.syncLogMaxKB = nonNegInt(v);
           await this.plugin.saveAll();
         })
       );
   }
+}
+
+/** 숫자 입력칸: 음수·숫자 아님은 0 으로 본다. */
+function nonNegInt(v: string): number {
+  const n = parseInt(v, 10);
+  return isNaN(n) || n < 0 ? 0 : n;
 }

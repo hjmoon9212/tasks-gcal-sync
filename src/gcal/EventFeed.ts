@@ -40,7 +40,6 @@ interface Bucket {
 interface TrackedWindow {
   from: string;
   to: string;
-  at: number;
 }
 
 /**
@@ -205,7 +204,7 @@ export class EventFeed implements GcalReadApi {
     const k = fromISO + "|" + toISO;
     // 지웠다 넣어 Map 삽입 순서를 최근순으로 만든다 → 넘칠 때 가장 오래된 것부터 나간다
     this.windows.delete(k);
-    this.windows.set(k, { from: fromISO, to: toISO, at: Date.now() });
+    this.windows.set(k, { from: fromISO, to: toISO });
     while (this.windows.size > MAX_WINDOWS) {
       const oldest = this.windows.keys().next().value;
       if (oldest === undefined) break;

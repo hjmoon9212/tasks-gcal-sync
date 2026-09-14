@@ -6,7 +6,7 @@ import {
   resolveCalendar,
 } from "../settings/Settings";
 import { PersistedState, SyncRecord } from "./StateStore";
-import { TaskRepository, VaultTask } from "../data/TaskRepository";
+import { TaskRepository, VaultTask, taskWhere } from "../data/TaskRepository";
 import {
   CalendarClient,
   GCalEvent,
@@ -14,6 +14,16 @@ import {
 } from "../gcal/CalendarClient";
 import { TaskWriter } from "../write/TaskWriter";
 import { SyncLogEntry } from "./SyncLog";
+import {
+  SkipKind,
+  SyncResult,
+  addFailure,
+  countSkip,
+  emptyResult,
+  mergeRetry,
+} from "./engine/result";
+import { SKIP_TEXT } from "./engine/skipText";
+import { errMsg } from "../util/errors";
 import {
   decideReconcile,
   Field,
@@ -28,7 +38,6 @@ import {
   addDay,
   addDays,
   daysBetween,
-  fmt,
   genId,
   isoDaysAgo,
   isValidDate,
@@ -40,82 +49,8 @@ import {
   todayStr,
 } from "./dates";
 
-/**
- * 이번 run 에서 무엇을 못 했는가. `skipped` 는 합계일 뿐이라 원인을 못 알려준다 —
- * 2026-07-21 의 "동기화가 도는 것 같은데 아무것도 안 바뀐다" 가 정확히 이 사각지대였다
- * (인증이 통째로 깨졌는데 항목별 catch 가 조용히 삼키고 있었다).
- */
-export type SkipKind =
-  | "vault-behind" // 볼트가 Sync 중 → run 전체 보류
-  | "duplicate-id" // 같은 🆔 가 두 줄 → 정본 불명
-  | "hold-task-gone" // task 없음, 그러나 지우기엔 이른 상태
-  | "hold-due-invalid" // 📅 유실, 그러나 지우기엔 이른 상태
-  | "hold-unschedule" // 이벤트 삭제됨, 그러나 미일정화하기엔 이른 상태
-  | "hold-conflict" // 값이 갈렸으나 볼트가 정착 전 → 충돌 해결 보류
-  | "cold-start-create" // 콜드 스타트라 새 이벤트를 안 만듦
-  | "unsettled-create" // 볼트가 아직 정착 전이라 새 🆔·이벤트를 안 만듦
-  | "ensure-id-failed" // 🆔 쓰기 실패(줄이 그 사이 바뀜 등)
-  | "create-failed" // 이벤트 생성 실패
-  | "pull-failed" // 그 캘린더를 읽지 못함 → 읽지 못한 곳에는 쓰지 않는다
-  | "mobile-readonly" // 이 기기는 GCal 에 쓰지 않는다(모바일)
-  | "push-precondition" // If-Match 412 — pull 이후 원격이 또 바뀌었다
-  | "reconcile-error"; // 조정 중 예외
-
-export interface SyncFailure {
-  where: string; // task 🆔 또는 경로
-  message: string;
-}
-
-/** skip 사유를 로그에 적을 한국어 라벨. main의 SKIP_LABEL과 같은 문구를 쓴다. */
-const SKIP_TEXT: Record<SkipKind, string> = {
-  "vault-behind": "볼트가 Obsidian Sync로 아직 따라잡는 중 → run 전체 보류",
-  "duplicate-id": "같은 🆔가 두 줄 이상 → 정본 불명, 손대지 않음",
-  "hold-task-gone": "task가 안 보이지만 지우기엔 이름 → 이벤트 유지",
-  "hold-due-invalid": "📅가 없지만 지우기엔 이름 → 이벤트 유지",
-  "hold-unschedule": "이벤트가 삭제됐지만 미일정화하기엔 이름 → 📅 유지",
-  "hold-conflict":
-    "노트·GCal 값이 갈렸으나 볼트가 아직 정착 전 → 충돌 해결 보류(어느 쪽도 쓰지 않음)",
-  "cold-start-create": "콜드 스타트 → 새 이벤트 생성 보류",
-  "unsettled-create":
-    "볼트가 아직 정착 전 → 새 🆔 발급·이벤트 생성 보류(노트에 쓰는 순간 편집·Sync와 겹친다)",
-  "ensure-id-failed": "🆔를 노트에 쓰지 못함",
-  "create-failed": "이벤트 생성 실패",
-  "pull-failed":
-    "캘린더를 읽지 못함 → 그 캘린더의 record는 손대지 않음(읽지 못할 때는 쓰지도 않는다)",
-  "mobile-readonly":
-    "모바일 읽기 전용 → GCal에 쓰지 않음(pull은 정상. 반영은 데스크탑이 맡는다)",
-  "push-precondition":
-    "pull 이후 GCal이 또 바뀜 → push 포기(다음 run이 새 상태로 다시 판정한다)",
-  "reconcile-error": "조정 중 예외",
-};
-
-export interface SyncResult {
-  created: number;
-  updated: number;
-  moved: number;
-  deleted: number;
-  pulled: number; // GCal → Obsidian 반영 건수
-  skipped: number;
-  /** 사유별 skip 건수. 합이 `skipped` 다. */
-  skips: Partial<Record<SkipKind, number>>;
-  /** 실제로 터진 것. 콘솔에만 남기면 못 본다 — 호출부가 사용자에게 보여준다. */
-  failures: SyncFailure[];
-  /**
-   * 건별 기록. 카운터는 "몇 건"만 알려주므로 사후에 원인을 못 찾는다 —
-   * 무엇이 어느 캘린더에서 왜 바뀌었는지는 여기에만 남는다(호출부가 파일로 적는다).
-   */
-  entries: SyncLogEntry[];
-  /**
-   * 이 시간(ms) 뒤에 다시 돌면 반영될 것이 있다. 없으면 undefined.
-   * 사유는 셋 — **done 회귀 보류 · 볼트 뒤처짐 보류 · 콜드 스타트 쓰기 잠금**.
-   * 호출부(main)가 후속 run을 예약한다 — 안 그러면 보류가 풀려도 다음 주기(기본 5분)
-   * 까지 GCal이 그대로라 "아무 변화가 없다"로 보인다.
-   *
-   * 여러 보류가 겹치면 **가장 이른 시각**을 쓴다(`Math.min`). 각 run이 남아 있는 보류를
-   * 매번 다시 알리므로, 이르게 깨어나도 그 run이 다음 재확인을 또 예약해 수렴한다.
-   */
-  retryAfterMs?: number;
-}
+// 타입은 engine/result.ts 로 옮겼다(0.12.2) — 기존 import 경로(main·테스트)를 위해 다시 내보낸다.
+export type { SkipKind, SyncFailure, SyncResult } from "./engine/result";
 
 interface CalPull {
   byTaskId: Map<string, GCalEvent>;
@@ -754,16 +689,12 @@ export class SyncEngine {
 
   /** skip 을 사유와 함께 센다. 합계(`skipped`)와 내역이 항상 같이 움직이게 한다. */
   private skip(r: SyncResult, kind: SkipKind): void {
-    r.skipped++;
-    r.skips[kind] = (r.skips[kind] ?? 0) + 1;
+    countSkip(r, kind);
   }
 
   /** 실제로 터진 것. 콘솔에만 남기면 못 본다. */
   private fail(r: SyncResult, where: string, e: unknown): void {
-    r.failures.push({
-      where,
-      message: e instanceof Error ? e.message : String(e),
-    });
+    addFailure(r, where, e);
   }
 
   /** calendarId → 사람이 읽을 이름. 설정 캐시에 없으면 id 그대로. */
@@ -1053,7 +984,7 @@ export class SyncEngine {
     remoteReadOnly: boolean;
   }): Promise<void> {
     const { plan, id, rec, task } = c;
-    const where = `${task.path}:${task.line + 1}`;
+    const where = taskWhere(task);
     // rec은 아래에서 갱신된다 → 로그에 "무엇이 무엇으로" 바뀌었는지 적으려면
     // 직전 스냅샷을 먼저 떠 둔다. 이게 양쪽 변경을 판정한 기준값이기도 하다.
     const before = {
@@ -1125,10 +1056,7 @@ export class SyncEngine {
       console.log(`[tasks-gcal-sync] 완료 해제 → 다음 사이클에 재확인: ${id}`);
     }
     if (plan.retryAfterMs !== undefined) {
-      c.result.retryAfterMs = Math.min(
-        c.result.retryAfterMs ?? plan.retryAfterMs,
-        plan.retryAfterMs
-      );
+      mergeRetry(c.result, plan.retryAfterMs);
     }
 
     // ── 2) push: GCal이 가져가지 않은 Obsidian 변경, 또는 표현 정규화 ──
@@ -1395,17 +1323,7 @@ export class SyncEngine {
   async run(
     opts: { pull?: boolean; fullScan?: boolean; force?: boolean } = {}
   ): Promise<SyncResult> {
-    const empty: SyncResult = {
-      created: 0,
-      updated: 0,
-      moved: 0,
-      deleted: 0,
-      pulled: 0,
-      skipped: 0,
-      skips: {},
-      failures: [],
-      entries: [],
-    };
+    const empty = emptyResult();
 
     // 볼트가 아직 동기화 중이면 **run 전체를 건너뛴다**(0.3.13~).
     // 예전엔 pull만 껐는데, 그러면 gc.* 판정이 전부 false가 되어 "로컬만 바뀜"으로
@@ -1486,7 +1404,7 @@ export class SyncEngine {
     for (const id of dupIds) {
       const where = tasks
         .filter((t) => t.id === id)
-        .map((t) => `${t.path}:${t.line + 1}`)
+        .map((t) => taskWhere(t))
         .join(", ");
       dupWhere.set(id, where);
       console.warn(`[tasks-gcal-sync] 🆔 ${id} 중복 → 건너뜀: ${where}`);
@@ -1542,7 +1460,7 @@ export class SyncEngine {
           dupIds.delete(id);
           const keep = lines.find((t) => t !== victim)!;
           tasksById.set(id, keep);
-          const where = `${victim.path}:${victim.line + 1}`;
+          const where = taskWhere(victim);
           dupRepairs.push({ id, where, why });
           console.warn(`[tasks-gcal-sync] 🆔 ${id} 중복 자동 정리: ${why} ${where}`);
         } catch (e) {
@@ -1553,17 +1471,7 @@ export class SyncEngine {
 
     const records = this.state.records;
     const today = todayStr();
-    const result: SyncResult = {
-      created: 0,
-      updated: 0,
-      moved: 0,
-      deleted: 0,
-      pulled: 0,
-      skipped: 0,
-      skips: {},
-      failures: [],
-      entries: [],
-    };
+    const result = emptyResult();
     for (const r of dupRepairs) {
       result.entries.push({
         action: "REPAIR",
@@ -1610,9 +1518,7 @@ export class SyncEngine {
           result.entries.push({
             action: "FAIL",
             calendar: this.calName(cal),
-            detail: `캘린더를 읽지 못함 → 이 캘린더의 record 는 이번 run 에서 손대지 않는다: ${
-              e instanceof Error ? e.message : String(e)
-            }`,
+            detail: `캘린더를 읽지 못함 → 이 캘린더의 record 는 이번 run 에서 손대지 않는다: ${errMsg(e)}`,
           });
           pullFailedCals.add(cal);
           pullOk = false; // 한 캘린더라도 못 읽었으면 콜드 스타트 잠금을 풀지 않는다
@@ -1631,10 +1537,7 @@ export class SyncEngine {
           settledFor / 1000
         )}/${SETTLE_MS / 1000}초) → 삭제·충돌 해결·새 🆔 발급 보류`
       );
-      result.retryAfterMs = Math.min(
-        result.retryAfterMs ?? SETTLE_MS - settledFor + 2_000,
-        SETTLE_MS - settledFor + 2_000
-      );
+      mergeRetry(result, SETTLE_MS - settledFor + 2_000);
     }
     const guards = new RunGuards({
       dupIds,
@@ -1662,7 +1565,7 @@ export class SyncEngine {
           calendar: this.calName(rec.calendarId),
           eventId: rec.eventId,
           where: tasksById.get(id)
-            ? `${tasksById.get(id)!.path}:${tasksById.get(id)!.line + 1}`
+            ? taskWhere(tasksById.get(id)!)
             : undefined,
           detail: SKIP_TEXT["pull-failed"],
         });
@@ -1695,7 +1598,7 @@ export class SyncEngine {
           else if (fetched) ev = fetched;
         } catch (e) {
           // 404/410 = 이미 지워졌다. 그것도 관측이다(미일정화 경로가 받는다).
-          if (/\b(404|410)\b/.test(e instanceof Error ? e.message : String(e))) {
+          if (/\b(404|410)\b/.test(errMsg(e))) {
             evCancelled = true;
           } else {
             console.warn("[tasks-gcal-sync] 보류 record 재조회 실패:", id, e);
@@ -1731,14 +1634,14 @@ export class SyncEngine {
           title: rec.title,
           calendar: this.calName(rec.calendarId),
           eventId: rec.eventId,
-          where: `${task.path}:${task.line + 1}`,
+          where: taskWhere(task),
           detail:
             `※ 관측: ${sec}초 전 pull 로 쓴 줄이 달라졌다(GCal 은 그대로). ` +
             `사용자 편집이면 정상이고, 건드린 적이 없다면 되돌림이다 — ` +
             `쓴 줄 \`${rec.pulledLine}\` → 지금 \`${task.raw}\``,
         });
         console.warn(
-          `[tasks-gcal-sync] pull 로 쓴 줄이 ${sec}초 만에 달라짐(되돌림 의심): ${id} ${task.path}:${task.line + 1}`
+          `[tasks-gcal-sync] pull 로 쓴 줄이 ${sec}초 만에 달라짐(되돌림 의심): ${id} ${taskWhere(task)}`
         );
         delete rec.pulledLine;
         delete rec.pulledAt;
@@ -1749,7 +1652,7 @@ export class SyncEngine {
       // "무엇을 지웠는지"를 로그에 남길 방법이 이것뿐이다.
       if (task) {
         rec.lastLine = task.raw;
-        rec.lastWhere = `${task.path}:${task.line + 1}`;
+        rec.lastWhere = taskWhere(task);
       }
 
       try {
@@ -1781,16 +1684,13 @@ export class SyncEngine {
           continue;
         }
 
-        const logWhere = task ? `${task.path}:${task.line + 1}` : undefined;
+        const logWhere = task ? taskWhere(task) : undefined;
         switch (plan.kind) {
           case "skip": {
             this.skip(result, plan.reason);
             // 보류로 끝난 run은 그대로 두면 다음 주기(기본 5분)까지 방치된다.
             if (plan.retryAfterMs !== undefined) {
-              result.retryAfterMs = Math.min(
-                result.retryAfterMs ?? plan.retryAfterMs,
-                plan.retryAfterMs
-              );
+              mergeRetry(result, plan.retryAfterMs);
             }
             let detail = SKIP_TEXT[plan.reason];
             // 중복은 **어디에 있는지**가 곧 조치 방법이다. 콘솔에만 두면 재시작하면 사라진다.
@@ -1893,8 +1793,8 @@ export class SyncEngine {
           title: rec.title,
           calendar: this.calName(rec.calendarId),
           eventId: rec.eventId,
-          where: task ? `${task.path}:${task.line + 1}` : undefined,
-          detail: `조정 중 예외: ${e instanceof Error ? e.message : String(e)}`,
+          where: task ? taskWhere(task) : undefined,
+          detail: `조정 중 예외: ${errMsg(e)}`,
         });
       }
     }
@@ -1939,7 +1839,7 @@ export class SyncEngine {
               title: this.titleBase(t),
               calendar: target.name || target.id,
               eventId: keep.id,
-              where: `${t.path}:${t.line + 1}`,
+              where: taskWhere(t),
               detail:
                 "GCal에 이미 있던 이벤트를 매핑으로 회수(다른 기기가 만든 것) — " +
                 "새로 만들지 않음",
@@ -1954,7 +1854,7 @@ export class SyncEngine {
                   title: this.titleBase(t),
                   calendar: target.name || target.id,
                   eventId: d.id,
-                  where: `${t.path}:${t.line + 1}`,
+                  where: taskWhere(t),
                   detail: `같은 🆔의 중복 이벤트 정리 (정본 ${keep.id} 유지)`,
                 });
               } catch (e) {
@@ -1964,9 +1864,7 @@ export class SyncEngine {
                   id: t.id,
                   calendar: target.name || target.id,
                   eventId: d.id,
-                  detail: `중복 이벤트 삭제 실패: ${
-                    e instanceof Error ? e.message : String(e)
-                  }`,
+                  detail: `중복 이벤트 삭제 실패: ${errMsg(e)}`,
                 });
               }
             }
@@ -1983,10 +1881,8 @@ export class SyncEngine {
             id: t.id,
             title: this.titleBase(t),
             calendar: target.name || target.id,
-            where: `${t.path}:${t.line + 1}`,
-            detail: `기존 이벤트 조회 실패 → 새로 생성 진행(중복 가능): ${
-              e instanceof Error ? e.message : String(e)
-            }`,
+            where: taskWhere(t),
+            detail: `기존 이벤트 조회 실패 → 새로 생성 진행(중복 가능): ${errMsg(e)}`,
           });
         }
       }
@@ -2013,7 +1909,7 @@ export class SyncEngine {
           id: t.id,
           title: this.titleBase(t),
           calendar: target.name || target.id,
-          where: `${t.path}:${t.line + 1}`,
+          where: taskWhere(t),
           detail: SKIP_TEXT["mobile-readonly"],
         });
         continue;
@@ -2025,7 +1921,7 @@ export class SyncEngine {
           id: t.id,
           title: this.titleBase(t),
           calendar: target.name || target.id,
-          where: `${t.path}:${t.line + 1}`,
+          where: taskWhere(t),
           detail: SKIP_TEXT["unsettled-create"],
         });
         continue;
@@ -2037,7 +1933,7 @@ export class SyncEngine {
           id: t.id,
           title: this.titleBase(t),
           calendar: target.name || target.id,
-          where: `${t.path}:${t.line + 1}`,
+          where: taskWhere(t),
           detail: SKIP_TEXT["cold-start-create"],
         });
         continue;
@@ -2059,10 +1955,8 @@ export class SyncEngine {
             action: "SKIP",
             title: this.titleBase(t),
             calendar: target.name || target.id,
-            where: `${t.path}:${t.line + 1}`,
-            detail: `${SKIP_TEXT["ensure-id-failed"]}: ${
-              e instanceof Error ? e.message : String(e)
-            }`,
+            where: taskWhere(t),
+            detail: `${SKIP_TEXT["ensure-id-failed"]}: ${errMsg(e)}`,
           });
           continue;
         }
@@ -2095,7 +1989,7 @@ export class SyncEngine {
           title: this.titleBase(t),
           calendar: target.name || target.id,
           eventId: ev.id,
-          where: `${t.path}:${t.line + 1}`,
+          where: taskWhere(t),
           detail:
             `due=${t.due}` +
             (this.spanStart(t) !== t.due ? ` start=${this.spanStart(t)}` : "") +
@@ -2112,8 +2006,8 @@ export class SyncEngine {
           id,
           title: this.titleBase(t),
           calendar: target.name || target.id,
-          where: `${t.path}:${t.line + 1}`,
-          detail: `이벤트 생성 실패: ${e instanceof Error ? e.message : String(e)}`,
+          where: taskWhere(t),
+          detail: `이벤트 생성 실패: ${errMsg(e)}`,
         });
       }
     }
@@ -2128,7 +2022,7 @@ export class SyncEngine {
     if (coldHold && this.pullCycleDone) {
       const left =
         Math.max(0, COLD_START_MS - (Date.now() - this.loadedAt)) + 2_000;
-      result.retryAfterMs = Math.min(result.retryAfterMs ?? left, left);
+      mergeRetry(result, left);
     }
 
     await this.saveState();

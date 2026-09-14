@@ -9,6 +9,7 @@
 import { GCalEvent } from "./CalendarClient";
 import { FeedCalendar } from "../settings/Settings";
 import { ExternalEvent } from "../api/PublicApi";
+import { DATE_RE } from "../sync/dates";
 
 /** 로컬 벽시계로 분해한 순간. 타임존 변환을 테스트에서 통제하려고 값으로 뽑았다. */
 export interface WallClock {
@@ -44,7 +45,6 @@ const pad2 = (n: number) => String(n).padStart(2, "0");
 const wallISO = (w: WallClock) => `${w.y}-${pad2(w.mo)}-${pad2(w.d)}`;
 const wallMin = (w: WallClock) => w.hh * 60 + w.mi;
 
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DEFAULT_MIN = 60;
 
 /** uid 구분자. 캘린더 id 는 이메일이라 무엇이든 들어갈 수 있어 보이지 않는 문자를 쓴다. */

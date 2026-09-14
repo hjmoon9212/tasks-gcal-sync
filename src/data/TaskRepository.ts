@@ -67,3 +67,8 @@ export class TaskRepository {
     return f instanceof TFile ? f : null;
   }
 }
+
+/** 로그·콘솔에 싣는 task 위치 `경로:줄`(줄은 1부터). */
+export function taskWhere(t: { path: string; line: number }): string {
+  return `${t.path}:${t.line + 1}`;
+}
