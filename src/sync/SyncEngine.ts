@@ -1,5 +1,10 @@
 import { App, Notice, Platform } from "obsidian";
-import { PluginSettings, resolveCalendar } from "../settings/Settings";
+import {
+  LEGACY_DONE_TAG,
+  PluginSettings,
+  ROUTING_TAG_PREFIX,
+  resolveCalendar,
+} from "../settings/Settings";
 import { PersistedState, SyncRecord } from "./StateStore";
 import { TaskRepository, VaultTask } from "../data/TaskRepository";
 import {
@@ -198,7 +203,7 @@ export class SyncEngine {
   ) {}
 
   private titleBase(t: VaultTask): string {
-    const prefix = this.settings.routingTagPrefix || "#gcal/";
+    const prefix = ROUTING_TAG_PREFIX;
     return t.title
       .split(/\s+/)
       .filter((w) => !w.startsWith(prefix))
@@ -216,9 +221,10 @@ export class SyncEngine {
       t.checked ? this.settings.donePrefix : this.settings.todoPrefix
     )?.trim();
     const title = box ? `${box} ${withIcon}` : withIcon;
-    // 색·박스 둘 다 없을 때만 #done 폴백으로 완료 표시.
-    if (!this.settings.doneColorId && t.checked && !this.settings.donePrefix)
-      return `${this.settings.doneTag} ${title}`;
+    // ⛔ 색·접두사를 둘 다 껐으면 **제목에 아무것도 안 붙인다**(0.11.2~).
+    //    예전에는 그때 `#done` 을 끼워 넣었는데, 둘 다 끈 것은 "제목에 표시하지 마라" 는
+    //    뜻이라 그건 두 번째 추측이었다. 옛 이벤트에 붙어 있는 글자는 아래 gcalTitleBase 가
+    //    계속 떼어낸다 → LEGACY_DONE_TAG
     return title;
   }
 
@@ -235,7 +241,7 @@ export class SyncEngine {
       this.settings.donePrefix,
       this.settings.todoPrefix,
       this.settings.recurringPrefix,
-      this.settings.doneTag,
+      LEGACY_DONE_TAG, // 설정에서는 사라졌지만 옛 이벤트 제목에는 남아 있다
     ]
       .map((p) => p?.trim())
       .filter((p): p is string => !!p);

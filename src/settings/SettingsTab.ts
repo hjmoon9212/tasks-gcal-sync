@@ -20,33 +20,8 @@ export class SettingsTab extends PluginSettingTab {
   /** 기기 태그가 붙은 실제 로그 경로를 보여주는 줄. 경로·기기명이 바뀌면 다시 그린다. */
   private logPathEl?: HTMLElement;
 
-  /** 접힘 상태는 화면 상태일 뿐이라 저장하지 않는다(설정 창을 닫으면 초기값으로). */
-  private showDoneDetails = false;
-
   constructor(app: App, private plugin: TasksGcalSyncPlugin) {
     super(app, plugin);
-  }
-
-  /** '세부 설정 보기' 토글 + 그 아래 접히는 컨테이너. 반환된 곳에 Setting을 넣는다. */
-  private collapsible(
-    parent: HTMLElement,
-    desc: string,
-    open: boolean,
-    onToggle: (v: boolean) => void
-  ): HTMLElement {
-    let box: HTMLElement;
-    new Setting(parent)
-      .setName("세부 설정 보기")
-      .setDesc(desc)
-      .addToggle((t) =>
-        t.setValue(open).onChange((v) => {
-          onToggle(v);
-          box.style.display = v ? "" : "none";
-        })
-      );
-    box = parent.createDiv();
-    box.style.display = open ? "" : "none";
-    return box;
   }
 
   /**
@@ -270,17 +245,6 @@ export class SettingsTab extends PluginSettingTab {
         });
       });
 
-    // 태그 prefix
-    new Setting(containerEl)
-      .setName("라우팅 태그 prefix")
-      .setDesc("기본 #gcal/ — task의 이 prefix 뒤 이름으로 캘린더를 찾습니다.")
-      .addText((t) =>
-        t.setValue(s.routingTagPrefix).onChange(async (v) => {
-          s.routingTagPrefix = v.trim() || "#gcal/";
-          await this.plugin.saveAll();
-        })
-      );
-
     // 보정 규칙 (선택)
     containerEl.createEl("h4", { text: "보정 규칙 (선택)" });
     containerEl.createEl("p", {
@@ -490,24 +454,6 @@ export class SettingsTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(s.includeOverdue).onChange(async (v) => {
           s.includeOverdue = v;
-          await this.plugin.saveAll();
-        })
-      );
-
-    // 완료 색과 제목 접두사를 둘 다 꺼야 쓰이는 폴백이라 평소엔 접어 둔다.
-    const doneBox = this.collapsible(
-      containerEl,
-      "완료 색과 제목 접두사를 둘 다 껐을 때만 쓰이는 폴백 설정.",
-      this.showDoneDetails,
-      (v) => (this.showDoneDetails = v)
-    );
-
-    new Setting(doneBox)
-      .setName("완료 표시 태그 (#done 폴백용)")
-      .setDesc("완료 색과 제목 접두사가 둘 다 없을 때 — 완료 task 제목 앞에 붙는 태그.")
-      .addText((t) =>
-        t.setValue(s.doneTag).onChange(async (v) => {
-          s.doneTag = v.trim() || "#done";
           await this.plugin.saveAll();
         })
       );

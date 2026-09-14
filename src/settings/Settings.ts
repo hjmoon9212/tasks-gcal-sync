@@ -47,6 +47,26 @@ export interface RoutingRule {
   calendarName: string;
 }
 
+/**
+ * 라우팅 태그 접두사. **설정이 아니라 상수다**(0.11.2~).
+ *
+ * 설정으로 두던 시절에도 `#gcal/` 말고 쓴 적이 없고, 기본값 폴백(`|| "#gcal/"`)이 두 곳에
+ * 하드코딩돼 있어 사실상 고정이었다. 게다가 이 값은 **노트의 태그·캘린더 이름·블록 옵션
+ * `gcal:` 이 전부 맞물린 약속**이라 기기마다 다르면 곧바로 깨진다 —
+ * *"옵션을 늘리기 전에 이게 기기마다 달라도 되는 값인가를 먼저 묻는다"* 에 걸린다.
+ */
+export const ROUTING_TAG_PREFIX = "#gcal/";
+
+/**
+ * 옛 `#done` 폴백 태그. **설정에서 사라졌지만 떼어내기는 계속한다**(0.11.2~).
+ *
+ * 완료 표시는 색(`doneColorId`)과 접두사(`donePrefix`)가 하고, 둘 다 껐다면 그건
+ * "제목에 표시하지 마라" 는 뜻이다 — 거기에 `#done` 을 끼워 넣는 건 두 번째 추측이었다.
+ * 다만 **옛 이벤트 제목에는 이미 이 글자가 붙어 있으므로**, pull 할 때 떼지 않으면
+ * 노트 제목이 오염된다. 그래서 쓰기에서만 빠지고 읽기에는 남는다.
+ */
+export const LEGACY_DONE_TAG = "#done";
+
 export interface PluginSettings {
   // OAuth (사용자 자신의 Google Cloud 프로젝트 자격증명)
   clientId: string;
@@ -67,12 +87,8 @@ export interface PluginSettings {
   // **동기화 주기와 무관하다** — 회의는 우리 동기화와 상관없이 바뀐다.
   feedRefreshMinutes: number;
 
-  // 라우팅 태그 prefix. 기본 "#gcal/" → task에 #gcal/Growth 식으로 캘린더 지정
-  routingTagPrefix: string;
-
   // 동작
   globalFilter: string; // 기본 #task
-  doneTag: string; // 완료 이벤트 제목에 붙일 표시, 기본 #done (색·접두사를 둘 다 껐을 때의 폴백)
   todoPrefix: string; // 미완료 task 이벤트 제목 접두사(예: ☐). "" = 없음
   donePrefix: string; // 완료 task 이벤트 제목 접두사(예: ☑️). "" = 없음
   recurringPrefix: string; // 🔁 반복(🔁) task 이벤트 제목 아이콘(예: 🔁). "" = 표시 안 함
@@ -127,9 +143,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   calendars: [],
   feedCalendars: [], // 빈 배열 = 기능 꺼짐 → 업그레이드해도 동작이 바뀌지 않는다
   feedRefreshMinutes: 15,
-  routingTagPrefix: "#gcal/",
   globalFilter: "#task",
-  doneTag: "#done",
   todoPrefix: "☐",
   donePrefix: "☑️",
   recurringPrefix: "🔁",
@@ -161,7 +175,7 @@ export function resolveCalendar(
   tags: string[],
   settings: PluginSettings
 ): CalendarRef | null {
-  const prefix = settings.routingTagPrefix || "#gcal/";
+  const prefix = ROUTING_TAG_PREFIX;
   const tag = tags.find((t) => t.startsWith(prefix) && t.length > prefix.length);
   if (tag) {
     const name = tag.slice(prefix.length);

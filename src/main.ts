@@ -25,6 +25,8 @@ interface LegacySettings {
   syncOnBlur?: boolean;
   syncOnFocus?: boolean;
   skipPullOnEdit?: boolean;
+  routingTagPrefix?: string; // 라우팅 태그 접두사 — 0.11.2에서 상수로(#gcal/ 고정)
+  doneTag?: string; // #done 폴백 태그 — 0.11.2에서 제거(색·접두사가 완료를 표시한다)
 }
 
 /** skip 사유를 사람이 읽는 말로. 숫자만 보여주면 원인을 못 찾는다. */
@@ -770,6 +772,8 @@ export default class TasksGcalSyncPlugin extends Plugin {
       "syncOnWindowSwitch",
       "syncPreset",
       "pushOnly",
+      "routingTagPrefix",
+      "doneTag",
     ];
     for (const k of dead) delete (this.settings as Partial<LegacySettings>)[k];
   }
