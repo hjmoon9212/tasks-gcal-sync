@@ -243,30 +243,32 @@ const withLine = (i: number, s: string) => {
     eq(t.due, "2026-08-06", "removeId: due kept");
   }
 
-  // ── rewriteLine: 통째로 교체
+  // ── 쓰기 뒤 refresh: 새 원문을 다시 파싱해 인메모리 task 를 갱신한다
+  //    (0.12.10: 안 쓰이던 rewriteLine 을 지우면서 같은 성질을 replaceTitle 로 고정한다)
   {
     const e = env({ [P]: DOC });
     const t = vt(DOC, P, 1);
-    const line = "- [x] #task 다른 제목 📅 2026-07-01 🆔 zzz999 ✅ 2026-07-02";
-    const r = await e.writer.rewriteLine(t, line);
-    eq(r, line, "rewriteLine: returns line");
-    eq(e.store[P], withLine(1, line), "rewriteLine: file text");
-    eq(t.checked, true, "rewriteLine: checked refreshed");
-    eq(t.statusChar, "x", "rewriteLine: statusChar");
-    eq(t.id, "zzz999", "rewriteLine: id");
-    eq(t.done, "2026-07-02", "rewriteLine: done");
-    eq(t.title, "다른 제목", "rewriteLine: title");
+    const line = "- [ ] #task 다른 제목 📅 2026-08-06 🆔 abc123";
+    const r = await e.writer.replaceTitle(t, "보고서 작성", "다른 제목");
+    eq(r, line, "refresh: returns line");
+    eq(e.store[P], withLine(1, line), "refresh: file text");
+    eq(t.title, "다른 제목", "refresh: title");
+    eq(t.body, "#task 다른 제목 📅 2026-08-06 🆔 abc123", "refresh: body");
+    eq(t.id, "abc123", "refresh: id kept");
+    eq(t.due, "2026-08-06", "refresh: due kept");
+    eq(t.checked, false, "refresh: checked");
   }
-  // 파싱이 안 되는 결과(필터 없음)면 raw 만 바뀌고 파싱 필드는 낡은 값 그대로
+  // 파싱이 안 되는 결과(필터 태그가 사라짐)면 raw 만 바뀌고 파싱 필드는 낡은 값 그대로 — 현재 동작
   {
     const e = env({ [P]: DOC });
     const t = vt(DOC, P, 1);
-    await e.writer.rewriteLine(t, "그냥 텍스트");
-    eq(e.store[P], withLine(1, "그냥 텍스트"), "rewriteLine non-task: file text");
-    eq(t.raw, "그냥 텍스트", "rewriteLine non-task: raw updated");
-    eq(t.due, "2026-08-06", "rewriteLine non-task: stale due kept");
-    eq(t.title, "보고서 작성", "rewriteLine non-task: stale title kept");
-    eq(t.body, "#task 보고서 작성 📅 2026-08-06 🆔 abc123", "rewriteLine non-task: stale body");
+    const line = "- [ ] 그냥 텍스트 📅 2026-08-06 🆔 abc123";
+    await e.writer.replaceTitle(t, "#task 보고서 작성", "그냥 텍스트");
+    eq(e.store[P], withLine(1, line), "refresh non-task: file text");
+    eq(t.raw, line, "refresh non-task: raw updated");
+    eq(t.tags, ["#task"], "refresh non-task: stale tags kept");
+    eq(t.title, "보고서 작성", "refresh non-task: stale title kept");
+    eq(t.body, "#task 보고서 작성 📅 2026-08-06 🆔 abc123", "refresh non-task: stale body");
   }
 
   // ── setStart / removeStart
