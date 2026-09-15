@@ -91,7 +91,133 @@ export class PluginSettingTab {
     this.plugin = plugin;
   }
 }
-export class Setting {}
+/*
+ * Setting 레코더 — 설정 탭이 무엇을 어떤 순서로 그렸고 각 컨트롤에 어떤 핸들러를 달았는지
+ * 기록한다(tests/settingsTab.test.ts). 실제 Setting 처럼 생성자에서 컨테이너에 자신을 붙인다.
+ */
+class RecText {
+  type = "text";
+  value = "";
+  placeholder = "";
+  inputEl: any = { type: "text", style: {} };
+  onChangeCb?: (v: string) => any;
+  setValue(v: string) {
+    this.value = v;
+    return this;
+  }
+  setPlaceholder(p: string) {
+    this.placeholder = p;
+    return this;
+  }
+  onChange(cb: (v: string) => any) {
+    this.onChangeCb = cb;
+    return this;
+  }
+}
+class RecToggle {
+  type = "toggle";
+  value = false;
+  onChangeCb?: (v: boolean) => any;
+  setValue(v: boolean) {
+    this.value = v;
+    return this;
+  }
+  onChange(cb: (v: boolean) => any) {
+    this.onChangeCb = cb;
+    return this;
+  }
+}
+class RecDropdown {
+  type = "dropdown";
+  value = "";
+  options: [string, string][] = [];
+  onChangeCb?: (v: string) => any;
+  addOption(v: string, label: string) {
+    this.options.push([v, label]);
+    return this;
+  }
+  setValue(v: string) {
+    this.value = v;
+    return this;
+  }
+  onChange(cb: (v: string) => any) {
+    this.onChangeCb = cb;
+    return this;
+  }
+}
+class RecButton {
+  type: string;
+  buttonText = "";
+  icon = "";
+  tooltip = "";
+  cta = false;
+  disabled = false;
+  onClickCb?: () => any;
+  constructor(type: string) {
+    this.type = type;
+  }
+  setButtonText(t: string) {
+    this.buttonText = t;
+    return this;
+  }
+  setIcon(i: string) {
+    this.icon = i;
+    return this;
+  }
+  setTooltip(t: string) {
+    this.tooltip = t;
+    return this;
+  }
+  setCta() {
+    this.cta = true;
+    return this;
+  }
+  setDisabled(d: boolean) {
+    this.disabled = d;
+    return this;
+  }
+  onClick(cb: () => any) {
+    this.onClickCb = cb;
+    return this;
+  }
+}
+export class Setting {
+  nameText = "";
+  descText = "";
+  controls: any[] = [];
+  controlEl: any = { style: {} };
+  constructor(containerEl: any) {
+    containerEl?.__push?.({ kind: "setting", setting: this });
+  }
+  setName(n: string) {
+    this.nameText = n;
+    return this;
+  }
+  setDesc(d: string) {
+    this.descText = d;
+    return this;
+  }
+  private add(c: any, cb: (c: any) => any) {
+    this.controls.push(c);
+    cb(c);
+    return this;
+  }
+  addText(cb: (c: any) => any) {
+    return this.add(new RecText(), cb);
+  }
+  addToggle(cb: (c: any) => any) {
+    return this.add(new RecToggle(), cb);
+  }
+  addDropdown(cb: (c: any) => any) {
+    return this.add(new RecDropdown(), cb);
+  }
+  addButton(cb: (c: any) => any) {
+    return this.add(new RecButton("button"), cb);
+  }
+  addExtraButton(cb: (c: any) => any) {
+    return this.add(new RecButton("extraButton"), cb);
+  }
+}
 export const Platform = { isDesktopApp: true, isMobile: false };
 export function normalizePath(p: string): string {
   return p.replace(/\\/g, "/");

@@ -1,0 +1,535 @@
+[
+  {
+    "el": "h2",
+    "text": "Tasks ⇄ Google Calendar Sync"
+  },
+  {
+    "el": "h3",
+    "text": "0. 이 기기(모바일)"
+  },
+  {
+    "setting": "모바일에서는 GCal에 쓰지 않기",
+    "desc": "켜 두면 이 기기는 **pull 만** 합니다 — GCal에서 고친 것이 노트에 들어오고, 📆 일정도 보입니다. 노트 편집의 GCal 반영은 데스크탑이 맡습니다. 끄면 폰에서도 GCal에 씁니다 ⚠️ 폰 세션은 콜드 스타트 60초·정착 30초를 못 채우는 일이 잦고, 종료 직전 플러시도 폰에서는 돌지 않으며, 체크박스 오탭이 곧바로 GCal 완료 해제가 됩니다.",
+    "controls": [
+      {
+        "type": "toggle",
+        "value": true,
+        "handler": true
+      }
+    ]
+  },
+  {
+    "el": "h3",
+    "text": "1. Google 인증"
+  },
+  {
+    "el": "p",
+    "text": "Google Cloud Console에서 OAuth 클라이언트(Desktop app)를 만들고 Client ID/Secret을 입력하세요. **대화형 인증은 데스크탑에서만** 실행됩니다(루프백 서버를 씁니다). 자격증명은 이 기기의 localStorage에만 저장되어 Obsidian Sync를 타지 않습니다 — 기기마다 개별 설정이 필요합니다. 모바일에서는 아래 「Refresh Token」에 데스크탑에서 받은 값을 붙여넣으세요.",
+    "cls": "setting-item-description"
+  },
+  {
+    "setting": "Client ID",
+    "controls": [
+      {
+        "type": "text",
+        "value": "cid.apps.googleusercontent.com",
+        "placeholder": "xxxx.apps.googleusercontent.com",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "Client Secret",
+    "controls": [
+      {
+        "type": "text",
+        "value": "secret",
+        "inputType": "password",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "Refresh Token",
+    "desc": "데스크탑에서 「Google 인증」을 마치면 채워집니다. 모바일에는 인증 경로가 없으므로 여기에 붙여넣으세요. ⚠️ 이 값이 곧 계정 접근 권한입니다 — 볼트 노트에 적어 두지 마세요.",
+    "controls": [
+      {
+        "type": "text",
+        "value": "1//tok",
+        "placeholder": "1//0e...",
+        "inputType": "password",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "다른 기기로 옮기기",
+    "desc": "자격증명은 기기마다·볼트마다 따로 넣어야 합니다(Obsidian Sync를 타지 않습니다 — 옛 값이 서버로 올라가 인증이 깨진 사고가 있었습니다). 데스크탑에서 「복사」하고 다른 기기에서 「붙여넣기」하면 세 칸이 한 번에 채워집니다. ⚠️ 이 문자열이 곧 계정 접근 권한입니다 — 옮긴 뒤 메신저·노트에 남기지 마세요.",
+    "controls": [
+      {
+        "type": "button",
+        "buttonText": "복사",
+        "handler": true
+      },
+      {
+        "type": "button",
+        "buttonText": "붙여넣기",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "인증 상태",
+    "desc": "✅ 인증됨 — 이 기기에서는 대화형 인증을 할 수 없습니다(루프백 서버가 데스크탑 전용). 데스크탑에서 인증한 뒤 위 「복사 → 붙여넣기」로 옮기세요.",
+    "controls": [
+      {
+        "type": "button",
+        "buttonText": "인증은 데스크탑에서",
+        "cta": true,
+        "disabled": true,
+        "handler": true
+      }
+    ]
+  },
+  {
+    "el": "h3",
+    "text": "2. 캘린더 라우팅 (#gcal/캘린더명)"
+  },
+  {
+    "el": "p",
+    "text": "task에 #gcal/캘린더명 태그를 붙이면 그 이름의 캘린더로 보냅니다 (예: #gcal/Growth → Growth 캘린더, 자동 매칭). 태그가 없으면 기본 캘린더로. 먼저 캘린더 목록을 불러오세요.",
+    "cls": "setting-item-description"
+  },
+  {
+    "setting": "캘린더 목록",
+    "desc": "2개 로드됨",
+    "controls": [
+      {
+        "type": "button",
+        "buttonText": "목록 불러오기",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "기본 캘린더",
+    "desc": "어느 규칙에도 매칭되지 않는 task가 갈 곳.",
+    "controls": [
+      {
+        "type": "dropdown",
+        "value": "cal-a",
+        "options": [
+          [
+            "",
+            "— 선택 —"
+          ],
+          [
+            "cal-a",
+            "Growth"
+          ],
+          [
+            "cal-b",
+            "Work"
+          ]
+        ],
+        "handler": true
+      }
+    ]
+  },
+  {
+    "el": "h4",
+    "text": "보정 규칙 (선택)"
+  },
+  {
+    "el": "p",
+    "text": "태그 이름과 실제 캘린더명이 다를 때만 사용 (예: #gcal/Personal → '개인 일정' 캘린더). 보통은 비워두면 됩니다.",
+    "cls": "setting-item-description"
+  },
+  {
+    "setting": "(이름 없음)",
+    "controls": [
+      {
+        "type": "text",
+        "value": "Personal",
+        "placeholder": "Personal (= #gcal/Personal)",
+        "handler": true
+      },
+      {
+        "type": "dropdown",
+        "value": "cal-b",
+        "options": [
+          [
+            "",
+            "— 캘린더 —"
+          ],
+          [
+            "cal-a",
+            "Growth"
+          ],
+          [
+            "cal-b",
+            "Work"
+          ]
+        ],
+        "handler": true
+      },
+      {
+        "type": "extraButton",
+        "icon": "trash",
+        "tooltip": "규칙 삭제",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "(이름 없음)",
+    "controls": [
+      {
+        "type": "button",
+        "buttonText": "+ 규칙 추가",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "el": "h4",
+    "text": "캘린더 뷰에 표시할 일정"
+  },
+  {
+    "el": "p",
+    "text": "여기서 고른 캘린더의 일정(회의·약속·초대)이 gcal-calendar-view 위젯에 읽기 전용으로 그려집니다. task로 만든 이벤트는 자동으로 빠집니다. 아무것도 고르지 않으면 기능이 꺼진 것과 같습니다.",
+    "cls": "setting-item-description"
+  },
+  {
+    "el": "p",
+    "text": "여기서는 «어느 캘린더를 가져올지» 만 정합니다. 색은 그리는 쪽인 gcal-calendar-view 설정 → «GCal 일정 캘린더» 에 모여 있습니다 — 카테고리 색 바로 아래라 task 막대와 나란히 놓고 맞출 수 있습니다.",
+    "cls": "setting-item-description"
+  },
+  {
+    "setting": "Growth",
+    "controls": [
+      {
+        "type": "toggle",
+        "value": false,
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "Work",
+    "controls": [
+      {
+        "type": "toggle",
+        "value": true,
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "일정 갱신 주기(분)",
+    "desc": "이 일정들을 몇 분마다 조용히 다시 받아올지. 0이면 자동 갱신 없음. 자동 동기화 주기와 무관합니다 — 회의는 우리 동기화와 상관없이 바뀝니다. 손으로 «지금 동기화»(리본·명령·아래 버튼)를 누르면 주기와 상관없이 같이 받아옵니다. 받아오는 동안에도 화면은 비지 않고, 내용이 실제로 달라졌을 때만 다시 그립니다.",
+    "controls": [
+      {
+        "type": "text",
+        "value": "15",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "(이름 없음)",
+    "controls": [
+      {
+        "type": "button",
+        "buttonText": "지금 다시 받아오기",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "el": "h3",
+    "text": "3. 동작"
+  },
+  {
+    "setting": "Global filter",
+    "desc": "이 태그가 있는 task만 대상. Obsidian Tasks 설정과 동일하게.",
+    "controls": [
+      {
+        "type": "text",
+        "value": "#task",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "제목 접두사 (미완료 / 완료)",
+    "desc": "이벤트 제목 앞 체크박스 표식. 미완료=☐, 완료=☑️ → 색이 안 보이는 모바일에서도 제목으로 완료 확인. 표시 전용이며, 완료 여부는 Obsidian에서만 바꾼다. 비우면 안 붙음.",
+    "controls": [
+      {
+        "type": "text",
+        "value": "☐",
+        "placeholder": "☐ (미완료)",
+        "handler": true
+      },
+      {
+        "type": "text",
+        "value": "☑️",
+        "placeholder": "☑️ (완료)",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "반복 task 아이콘",
+    "desc": "🔁 반복 규칙이 있는 task의 이벤트 제목 앞에 붙일 아이콘. 캘린더에서 반복 할일임을 한눈에 확인. 비우면 안 붙음.",
+    "controls": [
+      {
+        "type": "text",
+        "value": "🔁",
+        "placeholder": "🔁",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "완료 색",
+    "desc": "완료한 task의 이벤트를 이 색으로 표시한다(표시 전용 — 캘린더에서 색을 바꿔도 Obsidian은 바뀌지 않는다). '끄기' 선택 시 색을 건드리지 않는다.",
+    "controls": [
+      {
+        "type": "dropdown",
+        "value": "8",
+        "options": [
+          [
+            "",
+            "끄기 (제목 #done)"
+          ],
+          [
+            "1",
+            "1. 라벤더 (연보라)"
+          ],
+          [
+            "2",
+            "2. 세이지 (연녹)"
+          ],
+          [
+            "3",
+            "3. 포도 (자주)"
+          ],
+          [
+            "4",
+            "4. 플라밍고 (연빨강)"
+          ],
+          [
+            "5",
+            "5. 바나나 (노랑)"
+          ],
+          [
+            "6",
+            "6. 귤 (주황)"
+          ],
+          [
+            "7",
+            "7. 공작 (청록)"
+          ],
+          [
+            "8",
+            "8. 그래파이트 (회색)"
+          ],
+          [
+            "9",
+            "9. 블루베리 (남색)"
+          ],
+          [
+            "10",
+            "10. 바질 (진녹)"
+          ],
+          [
+            "11",
+            "11. 토마토 (빨강)"
+          ]
+        ],
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "이벤트 → Obsidian 딥링크",
+    "desc": "GCal 이벤트 설명에 🔗 링크를 넣어 캘린더에서 노트/task로 바로 점프. '줄 단위'는 Advanced URI 플러그인 필요.",
+    "controls": [
+      {
+        "type": "dropdown",
+        "value": "note",
+        "options": [
+          [
+            "off",
+            "끄기"
+          ],
+          [
+            "note",
+            "노트까지 (obsidian://open)"
+          ],
+          [
+            "line",
+            "줄 단위 (Advanced URI)"
+          ]
+        ],
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "Overdue 포함",
+    "desc": "오늘 이전인데 아직 미완료인 task도 동기화.",
+    "controls": [
+      {
+        "type": "toggle",
+        "value": false,
+        "handler": true
+      }
+    ]
+  },
+  {
+    "el": "h3",
+    "text": "4. 동기화 타이밍"
+  },
+  {
+    "setting": "편집 시 자동 동기화",
+    "desc": "task를 수정하면 잠시 뒤 자동으로 밀어 올린다(push만 — GCal 쪽 변경은 시작/주기에서 받아온다).",
+    "controls": [
+      {
+        "type": "toggle",
+        "value": true,
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "편집 후 대기(초)",
+    "desc": "편집이 멎고 이 시간이 지나면 동기화. 길수록 연속 작업(날짜 → 시작일 → 우선순위)이 한 번으로 합쳐진다.",
+    "controls": [
+      {
+        "type": "text",
+        "value": "3",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "자동 동기화 최소 간격(초)",
+    "desc": "직전 동기화 후 이 시간 안에는 자동으로 다시 돌지 않는다(자동 트리거만 해당, 수동/리본은 항상 즉시). 0이면 제한 없음.",
+    "controls": [
+      {
+        "type": "text",
+        "value": "60",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "시작 시 동기화",
+    "controls": [
+      {
+        "type": "toggle",
+        "value": true,
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "자동 동기화 주기(분)",
+    "desc": "0이면 주기 동기화 없음.",
+    "controls": [
+      {
+        "type": "text",
+        "value": "5",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "(이름 없음)",
+    "controls": [
+      {
+        "type": "button",
+        "buttonText": "지금 동기화",
+        "cta": true,
+        "handler": true
+      }
+    ]
+  },
+  {
+    "el": "h3",
+    "text": "5. 동기화 로그"
+  },
+  {
+    "el": "p",
+    "text": "무엇이 왜 생성·수정·삭제됐는지 건별로 노트에 기록합니다. 충돌이면 어느 필드가 겹쳤고 노트와 GCal이 각각 무엇으로 바꿨고 어느 쪽이 채택돼 무엇이 폐기됐는지까지 남습니다. 변화가 없는 동기화는 기록하지 않습니다.",
+    "cls": "setting-item-description"
+  },
+  {
+    "setting": "로그 기록",
+    "controls": [
+      {
+        "type": "toggle",
+        "value": true,
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "로그 파일 경로",
+    "desc": "볼트 루트 기준. 볼트 안에 두면 바로 열어볼 수 있고, 이 파일의 수정은 자동 push 감시에서 제외됩니다.",
+    "controls": [
+      {
+        "type": "text",
+        "value": "Logs/GCal 동기화 로그.md",
+        "placeholder": "Logs/GCal 동기화 로그.md",
+        "handler": true
+      },
+      {
+        "type": "button",
+        "buttonText": "열기",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "el": "div",
+    "text": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)",
+    "cls": "setting-item-description"
+  },
+  {
+    "setting": "이 기기 이름",
+    "desc": "로그 파일 이름에 붙습니다. 기기마다 자기 파일에만 써야 하기 때문입니다 — 한 파일에 두 기기가 쓰면 Obsidian Sync가 두 사본을 병합하면서 기록이 중복·재정렬되고 일부가 사라집니다. 이 값은 동기화되지 않습니다(기기 로컬). 바꾸면 새 파일로 옮겨 가고 옛 파일은 그대로 남습니다.",
+    "controls": [
+      {
+        "type": "text",
+        "value": "기기-test",
+        "placeholder": "예: 회사PC",
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "보류·건너뜀·실패도 기록",
+    "desc": "콜드 스타트 보류, 🆔 중복, API 실패처럼 '아무 일도 안 일어난' 이유. 끄면 콘솔에만 남고 재시작하면 사라집니다. 켜도 목차(Outline)는 어지럽지 않습니다 — 보류·건너뜀만 있던 run 은 제목 없이 `- ⏸` 묶음으로 접혀 들어갑니다.",
+    "controls": [
+      {
+        "type": "toggle",
+        "value": true,
+        "handler": true
+      }
+    ]
+  },
+  {
+    "setting": "최대 크기(KB)",
+    "desc": "초과하면 오래된 앞부분부터 잘라냅니다. 0 = 무제한.",
+    "controls": [
+      {
+        "type": "text",
+        "value": "512",
+        "handler": true
+      }
+    ]
+  }
+]

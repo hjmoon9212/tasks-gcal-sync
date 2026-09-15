@@ -1,0 +1,663 @@
+[
+  {
+    "section": "0. 이 기기(모바일)",
+    "setting": "모바일에서는 GCal에 쓰지 않기",
+    "control": "0:toggle",
+    "input": false,
+    "changed": {
+      "mobileReadOnly": false
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "1. Google 인증",
+    "setting": "Client ID",
+    "control": "0:text",
+    "input": "  7  ",
+    "changed": {
+      "clientId": "7"
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "1. Google 인증",
+    "setting": "Client Secret",
+    "control": "0:text",
+    "input": "  7  ",
+    "changed": {
+      "clientSecret": "7"
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "1. Google 인증",
+    "setting": "Refresh Token",
+    "control": "0:text",
+    "input": "  7  ",
+    "changed": {
+      "refreshToken": "7"
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "1. Google 인증",
+    "setting": "다른 기기로 옮기기",
+    "control": "0:button 복사",
+    "changed": {},
+    "calls": [],
+    "notices": [
+      "옮길 자격증명이 없습니다 — 이 기기는 아직 설정 전입니다"
+    ],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "1. Google 인증",
+    "setting": "다른 기기로 옮기기",
+    "control": "1:button 붙여넣기",
+    "changed": {
+      "clientId": "pasted-id",
+      "clientSecret": "pasted-secret",
+      "refreshToken": "1//pasted"
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [
+      "자격증명을 넣었습니다 — 「지금 동기화」로 확인하세요"
+    ],
+    "display": 1,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "1. Google 인증",
+    "setting": "인증 상태",
+    "control": "0:button 인증은 데스크탑에서",
+    "changed": {},
+    "calls": [
+      [
+        "auth.authenticateInteractive"
+      ]
+    ],
+    "notices": [
+      "Google 인증 완료"
+    ],
+    "display": 1,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "2. 캘린더 라우팅 (#gcal/캘린더명)",
+    "setting": "캘린더 목록",
+    "control": "0:button 목록 불러오기",
+    "changed": {
+      "calendars": [
+        {
+          "id": "cal-z",
+          "name": "Z",
+          "color": "#000000"
+        }
+      ]
+    },
+    "calls": [
+      [
+        "client.listCalendars"
+      ],
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [
+      "1개 캘린더 로드됨"
+    ],
+    "display": 1,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "2. 캘린더 라우팅 (#gcal/캘린더명)",
+    "setting": "기본 캘린더",
+    "control": "0:dropdown",
+    "input": "cal-b",
+    "changed": {
+      "defaultCalendarId": "cal-b",
+      "defaultCalendarName": "Work"
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "보정 규칙 (선택)",
+    "setting": "(이름 없음)",
+    "control": "0:text",
+    "input": "  7  ",
+    "changed": {
+      "rules": [
+        {
+          "tag": "7",
+          "calendarId": "cal-b",
+          "calendarName": "Work"
+        }
+      ]
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "보정 규칙 (선택)",
+    "setting": "(이름 없음)",
+    "control": "1:dropdown",
+    "input": "cal-a",
+    "changed": {
+      "rules": [
+        {
+          "tag": "Personal",
+          "calendarId": "cal-a",
+          "calendarName": "Growth"
+        }
+      ]
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "보정 규칙 (선택)",
+    "setting": "(이름 없음)",
+    "control": "2:extraButton",
+    "changed": {
+      "rules": []
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 1,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "보정 규칙 (선택)",
+    "setting": "(이름 없음)",
+    "control": "0:button + 규칙 추가",
+    "changed": {
+      "rules": [
+        {
+          "tag": "Personal",
+          "calendarId": "cal-b",
+          "calendarName": "Work"
+        },
+        {
+          "tag": "",
+          "calendarId": "",
+          "calendarName": ""
+        }
+      ]
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 1,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "캘린더 뷰에 표시할 일정",
+    "setting": "Growth",
+    "control": "0:toggle",
+    "input": true,
+    "changed": {
+      "feedCalendars": [
+        {
+          "id": "cal-b",
+          "name": "Work",
+          "color": ""
+        },
+        {
+          "id": "cal-a",
+          "name": "Growth",
+          "color": ""
+        }
+      ]
+    },
+    "calls": [
+      [
+        "saveAll"
+      ],
+      [
+        "feed.dropUnselected"
+      ]
+    ],
+    "notices": [],
+    "display": 1,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "캘린더 뷰에 표시할 일정",
+    "setting": "Work",
+    "control": "0:toggle",
+    "input": false,
+    "changed": {
+      "feedCalendars": []
+    },
+    "calls": [
+      [
+        "saveAll"
+      ],
+      [
+        "feed.dropUnselected"
+      ]
+    ],
+    "notices": [],
+    "display": 1,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "캘린더 뷰에 표시할 일정",
+    "setting": "일정 갱신 주기(분)",
+    "control": "0:text",
+    "input": "  7  ",
+    "changed": {
+      "feedRefreshMinutes": 7
+    },
+    "calls": [
+      [
+        "saveAll"
+      ],
+      [
+        "setupFeedInterval"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "캘린더 뷰에 표시할 일정",
+    "setting": "(이름 없음)",
+    "control": "0:button 지금 다시 받아오기",
+    "changed": {},
+    "calls": [
+      [
+        "feed.refreshAll"
+      ]
+    ],
+    "notices": [
+      "캘린더 뷰 일정을 다시 받아옵니다."
+    ],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "3. 동작",
+    "setting": "Global filter",
+    "control": "0:text",
+    "input": "  7  ",
+    "changed": {
+      "globalFilter": "7"
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "3. 동작",
+    "setting": "제목 접두사 (미완료 / 완료)",
+    "control": "0:text",
+    "input": "  7  ",
+    "changed": {
+      "todoPrefix": "  7  "
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "3. 동작",
+    "setting": "제목 접두사 (미완료 / 완료)",
+    "control": "1:text",
+    "input": "  7  ",
+    "changed": {
+      "donePrefix": "  7  "
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "3. 동작",
+    "setting": "반복 task 아이콘",
+    "control": "0:text",
+    "input": "  7  ",
+    "changed": {
+      "recurringPrefix": "  7  "
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "3. 동작",
+    "setting": "완료 색",
+    "control": "0:dropdown",
+    "input": "11",
+    "changed": {
+      "doneColorId": "11"
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "3. 동작",
+    "setting": "이벤트 → Obsidian 딥링크",
+    "control": "0:dropdown",
+    "input": "line",
+    "changed": {
+      "deepLink": "line"
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "3. 동작",
+    "setting": "Overdue 포함",
+    "control": "0:toggle",
+    "input": true,
+    "changed": {
+      "includeOverdue": true
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "4. 동기화 타이밍",
+    "setting": "편집 시 자동 동기화",
+    "control": "0:toggle",
+    "input": false,
+    "changed": {
+      "autoPushOnEdit": false
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "4. 동기화 타이밍",
+    "setting": "편집 후 대기(초)",
+    "control": "0:text",
+    "input": "  7  ",
+    "changed": {
+      "autoPushDebounceSeconds": 7
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "4. 동기화 타이밍",
+    "setting": "자동 동기화 최소 간격(초)",
+    "control": "0:text",
+    "input": "  7  ",
+    "changed": {
+      "minSyncIntervalSeconds": 7
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "4. 동기화 타이밍",
+    "setting": "시작 시 동기화",
+    "control": "0:toggle",
+    "input": false,
+    "changed": {
+      "syncOnStartup": false
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "4. 동기화 타이밍",
+    "setting": "자동 동기화 주기(분)",
+    "control": "0:text",
+    "input": "  7  ",
+    "changed": {
+      "syncIntervalMinutes": 7
+    },
+    "calls": [
+      [
+        "saveAll"
+      ],
+      [
+        "setupInterval"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "4. 동기화 타이밍",
+    "setting": "(이름 없음)",
+    "control": "0:button 지금 동기화",
+    "changed": {},
+    "calls": [
+      [
+        "runSync",
+        false,
+        {
+          "manual": true,
+          "trigger": "수동(설정)"
+        }
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "5. 동기화 로그",
+    "setting": "로그 기록",
+    "control": "0:toggle",
+    "input": false,
+    "changed": {
+      "syncLogEnabled": false
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "5. 동기화 로그",
+    "setting": "로그 파일 경로",
+    "control": "0:text",
+    "input": "  7  ",
+    "changed": {
+      "syncLogPath": "7"
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: 7 (기기-test)"
+  },
+  {
+    "section": "5. 동기화 로그",
+    "setting": "로그 파일 경로",
+    "control": "1:button 열기",
+    "changed": {},
+    "calls": [
+      [
+        "openSyncLog"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "5. 동기화 로그",
+    "setting": "이 기기 이름",
+    "control": "0:text",
+    "input": "  7  ",
+    "changed": {},
+    "calls": [
+      [
+        "setDeviceTag",
+        "  7  "
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "5. 동기화 로그",
+    "setting": "보류·건너뜀·실패도 기록",
+    "control": "0:toggle",
+    "input": false,
+    "changed": {
+      "syncLogSkips": false
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  },
+  {
+    "section": "5. 동기화 로그",
+    "setting": "최대 크기(KB)",
+    "control": "0:text",
+    "input": "  7  ",
+    "changed": {
+      "syncLogMaxKB": 7
+    },
+    "calls": [
+      [
+        "saveAll"
+      ]
+    ],
+    "notices": [],
+    "display": 0,
+    "logPathLine": "실제 파일: Logs/GCal 동기화 로그.md (기기-test)"
+  }
+]
