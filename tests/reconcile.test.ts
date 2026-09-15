@@ -70,13 +70,13 @@ import {
       events: [doneEvent("A1", false, "200")],
       records: { A1: rec({ gcalUpdated: "200" }) },
     });
-    (h.engine as any).loadedAt = Date.now(); // 방금 로드됨
-    (h.engine as any).pullCycleDone = false;
+    (h.engine as any).guard.loadedAt = Date.now(); // 방금 로드됨
+    (h.engine as any).guard.pullCycleDone = false;
     await h.engine.run();
     eq(h.calls.patch.length, 0, "콜드 스타트: 기존 이벤트 push 없음");
     eq(h.calls.insert.length, 0, "콜드 스타트: 새 이벤트 생성 없음");
     eq(h.state.records.A1.due, TODAY, "콜드 스타트: 못 올린 변경을 스냅샷에 안 남김");
-    eq((h.engine as any).pullCycleDone, true, "pull 완주 → 잠금 해제 준비");
+    eq((h.engine as any).guard.pullCycleDone, true, "pull 완주 → 잠금 해제 준비");
   }
 
   // ── 5) 회귀 확인: 평상시 날짜 변경은 그대로 올라간다
@@ -123,7 +123,7 @@ import {
     // 횟수 상한(옛 5회)은 75초 만에 보호를 풀어버려 제거했다.
     for (let i = 0; i < 6; i++) await h.engine.run();
     eq(h.calls.patch.length, 0, "짧게 여러 번 보류해도 상한은 안 풀린다");
-    (h.engine as any).behindSince = Date.now() - 11 * 60_000;
+    (h.engine as any).guard.behindSince = Date.now() - 11 * 60_000;
     await h.engine.run();
     eq(h.calls.patch.length >= 1, true, "fail-open 시간 상한 초과 후에는 통과");
   }
@@ -191,8 +191,8 @@ import {
       events: [cancelledEvent("A1")],
       records: { A1: rec() },
     });
-    (h.engine as any).loadedAt = Date.now();
-    (h.engine as any).pullCycleDone = false;
+    (h.engine as any).guard.loadedAt = Date.now();
+    (h.engine as any).guard.pullCycleDone = false;
     await h.engine.run();
     eq(h.calls.unschedule, [], "콜드 스타트: 미일정화 보류");
     eq(h.state.records.A1 !== undefined, true, "콜드 스타트: record 유지");
@@ -206,8 +206,8 @@ import {
       events: [doneEvent("A1", false, "200")],
       records: { A1: rec({ gcalUpdated: "200" }) },
     });
-    (h.engine as any).loadedAt = Date.now() - 20_000;
-    (h.engine as any).pullCycleDone = false;
+    (h.engine as any).guard.loadedAt = Date.now() - 20_000;
+    (h.engine as any).guard.pullCycleDone = false;
     const r = await h.engine.run();
     eq(h.calls.patch.length, 0, "콜드 스타트: GCal 쓰기 없음");
     // 남은 40초 + 여유 2초. 실행 시간만큼 오차가 나므로 범위로 본다.
@@ -225,8 +225,8 @@ import {
       records: { A1: rec({ gcalUpdated: "200" }) },
       pullFails: true,
     });
-    (h.engine as any).loadedAt = Date.now();
-    (h.engine as any).pullCycleDone = false;
+    (h.engine as any).guard.loadedAt = Date.now();
+    (h.engine as any).guard.pullCycleDone = false;
     const r = await h.engine.run();
     eq(r.retryAfterMs, undefined, "콜드 스타트 + pull 실패: 예약 없음");
   }
@@ -251,8 +251,8 @@ import {
       events: [doneEvent("A1", false, "200")],
       records: { A1: rec() },
     });
-    (h.engine as any).loadedAt = Date.now();
-    (h.engine as any).pullCycleDone = false;
+    (h.engine as any).guard.loadedAt = Date.now();
+    (h.engine as any).guard.pullCycleDone = false;
     await h.engine.run();
     eq(h.calls.del, [], "콜드 스타트: due 유실이어도 삭제 보류");
     eq(h.state.records.A1 !== undefined, true, "콜드 스타트: record 유지");
@@ -720,7 +720,7 @@ import {
       events: [doneEvent("A1", false, "100")],
       records: { A1: rec({ lastLine: "- [ ] #task 음산협 계약서 변경건 확인 📅 2026-09-07 🆔 A1", lastWhere: "note.md:45" }) },
     });
-    (h.engine as any).settledSince = Date.now() - 1_000; // 1초 전에야 조용해졌다
+    (h.engine as any).guard.settledSince = Date.now() - 1_000; // 1초 전에야 조용해졌다
     const r = await h.engine.run();
     eq(h.calls.del, [], "정착 전이면 줄이 사라져도 이벤트를 지우지 않는다 ★");
     eq(!!h.state.records.A1, true, "record 도 유지된다");
@@ -763,7 +763,7 @@ import {
       events: [],
       records: {},
     });
-    (h.engine as any).settledSince = Date.now() - 1_000;
+    (h.engine as any).guard.settledSince = Date.now() - 1_000;
     const r = await h.engine.run();
     eq(h.calls.insert, [], "정착 전에는 새 이벤트를 만들지 않는다");
     eq(r.skips["unsettled-create"], 1, "보류 사유가 집계된다");
@@ -947,14 +947,14 @@ import {
   };
 
   // 1) 정착 전 → 충돌 보류
-  (h.engine as any).settledSince = Date.now(); // 정착 시계를 방금 시작 = 아직 30초 전
+  (h.engine as any).guard.settledSince = Date.now(); // 정착 시계를 방금 시작 = 아직 30초 전
   await h.engine.run();
   eq(h.state.records.A1.recheckRemote, true, "보류하면 재조회 표시를 남긴다 ★★");
   eq(h.calls.patch, [], "보류 중엔 아무것도 안 올린다");
 
   // 2) 다음 run — **델타에는 이벤트가 없다.** 재조회로 관측을 되살려야 한다.
   deliver = false;
-  (h.engine as any).settledSince = Date.now() - 60_000; // 이제 정착했다
+  (h.engine as any).guard.settledSince = Date.now() - 60_000; // 이제 정착했다
   await h.engine.run();
   eq(fetched > 0, true, "델타에 없으면 직접 조회해 관측을 되살린다 ★★");
   eq(
@@ -1088,7 +1088,7 @@ import {
       events: [],
       records: {},
     });
-    (h.engine as any).settledSince = Date.now(); // 정착 시계를 방금 시작 = 30초 전
+    (h.engine as any).guard.settledSince = Date.now(); // 정착 시계를 방금 시작 = 30초 전
     return h;
   };
 
@@ -1111,7 +1111,7 @@ import {
     events: [doneEvent("A1", false, "100")],
     records: { A1: rec() },
   });
-  (del.engine as any).settledSince = Date.now();
+  (del.engine as any).guard.settledSince = Date.now();
   await del.engine.run({ force: true });
   eq(del.calls.del, [], "수동 실행이어도 삭제는 계속 보류 ★★");
 }
@@ -1211,7 +1211,7 @@ import {
     events: [doneEvent("A1", false, "100")],
     records: { A1: rec({ title: "샘플" }) },
   });
-  (h.engine as any).settledSince = Date.now(); // 정착 전
+  (h.engine as any).guard.settledSince = Date.now(); // 정착 전
   await h.engine.run({ force: true });
   eq(h.calls.writes, ["removeId"], "수동 실행은 정착 전에도 중복을 푼다 ★");
 }

@@ -36,32 +36,6 @@ export class SyncEngine {
   /** 볼트 뒤처짐 · 정착 · 콜드 스타트 시계(0.12.5 에서 VaultGuard 로 옮겼다). */
   private readonly guard = new VaultGuard(() => this.app);
 
-  // ⚠️ 임시 접근자 — 기존 테스트가 엔진의 옛 필드 이름으로 시계를 조작한다. 0.12.10 에서 걷어낸다.
-  private get loadedAt(): number {
-    return this.guard.loadedAt;
-  }
-  private set loadedAt(v: number) {
-    this.guard.loadedAt = v;
-  }
-  private get pullCycleDone(): boolean {
-    return this.guard.pullCycleDone;
-  }
-  private set pullCycleDone(v: boolean) {
-    this.guard.pullCycleDone = v;
-  }
-  private get behindSince(): number | null {
-    return this.guard.behindSince;
-  }
-  private set behindSince(v: number | null) {
-    this.guard.behindSince = v;
-  }
-  private get settledSince(): number | null {
-    return this.guard.settledSince;
-  }
-  private set settledSince(v: number | null) {
-    this.guard.settledSince = v;
-  }
-
   constructor(
     private app: App,
     private settings: PluginSettings,

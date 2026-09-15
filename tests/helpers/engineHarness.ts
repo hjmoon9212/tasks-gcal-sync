@@ -192,9 +192,9 @@ export function harness(opts: {
     async () => {}
   );
   // 기본은 "콜드 스타트 지난 + 볼트가 정착한 상태" — 각각은 따로 테스트한다.
-  (engine as any).loadedAt = Date.now() - 10 * 60_000;
-  (engine as any).pullCycleDone = true;
-  (engine as any).settledSince = Date.now() - 10 * 60_000;
+  (engine as any).guard.loadedAt = Date.now() - 10 * 60_000;
+  (engine as any).guard.pullCycleDone = true;
+  (engine as any).guard.settledSince = Date.now() - 10 * 60_000;
   return { engine, calls, state, settings, client, writer, app };
 }
 

@@ -150,19 +150,19 @@ export const taskRepo = (engine: SyncEngine): { getTasks: () => Promise<any[]> }
   E(engine).repo;
 
 // ── 가드 상태 필드 ────────────────────────────────────────────────────────
-export const getLoadedAt = (engine: SyncEngine): number => E(engine).loadedAt;
+export const getLoadedAt = (engine: SyncEngine): number => E(engine).guard.loadedAt;
 export const setLoadedAt = (engine: SyncEngine, v: number): void => {
-  E(engine).loadedAt = v;
+  E(engine).guard.loadedAt = v;
 };
-export const getPullCycleDone = (engine: SyncEngine): boolean => E(engine).pullCycleDone;
+export const getPullCycleDone = (engine: SyncEngine): boolean => E(engine).guard.pullCycleDone;
 export const setPullCycleDone = (engine: SyncEngine, v: boolean): void => {
-  E(engine).pullCycleDone = v;
+  E(engine).guard.pullCycleDone = v;
 };
-export const getBehindSince = (engine: SyncEngine): number | null => E(engine).behindSince;
+export const getBehindSince = (engine: SyncEngine): number | null => E(engine).guard.behindSince;
 export const setBehindSince = (engine: SyncEngine, v: number | null): void => {
-  E(engine).behindSince = v;
+  E(engine).guard.behindSince = v;
 };
-export const getSettledSince = (engine: SyncEngine): number | null => E(engine).settledSince;
+export const getSettledSince = (engine: SyncEngine): number | null => E(engine).guard.settledSince;
 export const setSettledSince = (engine: SyncEngine, v: number | null): void => {
-  E(engine).settledSince = v;
+  E(engine).guard.settledSince = v;
 };

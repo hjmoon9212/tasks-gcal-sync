@@ -71,9 +71,9 @@ function snapshot(h: H, tasks: any[], trace: any[], results: any[]) {
       raw: t.raw,
     })),
     engine: {
-      pullCycleDone: (h.engine as any).pullCycleDone,
-      behindSince: (h.engine as any).behindSince,
-      settledSince: (h.engine as any).settledSince,
+      pullCycleDone: (h.engine as any).guard.pullCycleDone,
+      behindSince: (h.engine as any).guard.behindSince,
+      settledSince: (h.engine as any).guard.settledSince,
     },
   };
 }
@@ -315,7 +315,7 @@ const noId = (due: string, over: any = {}) => ({
       const r = await realList(c, p);
       return deliver ? r : { ...r, items: [] };
     };
-    (h.engine as any).settledSince = Date.now();
+    (h.engine as any).guard.settledSince = Date.now();
     (h as any).stopDelivery = () => (deliver = false);
     return { h, tasks };
   }, [
@@ -323,7 +323,7 @@ const noId = (due: string, over: any = {}) => ({
     {
       before: (h) => {
         (h as any).stopDelivery();
-        (h.engine as any).settledSince = Date.now() - 60_000;
+        (h.engine as any).guard.settledSince = Date.now() - 60_000;
       },
     },
   ]);
@@ -333,7 +333,7 @@ const noId = (due: string, over: any = {}) => ({
     ev.end = { date: "2026-08-21" };
     const tasks = [task("A1", false, "2026-08-19")];
     const h = harness({ tasks, events: [ev], records: { A1: rec({ gcalUpdated: "100" }) } });
-    (h.engine as any).settledSince = Date.now();
+    (h.engine as any).guard.settledSince = Date.now();
     return { h, tasks };
   }, [{ force: true }]);
 
@@ -349,12 +349,12 @@ const noId = (due: string, over: any = {}) => ({
   await scenario(
     "destroy.task-gone-unsettled-hold",
     mk({ tasks: [], events: [doneEvent("A1", false, "100")], records: { A1: rec() } }),
-    [{ before: (h) => ((h.engine as any).settledSince = Date.now() - 1_000) }]
+    [{ before: (h) => ((h.engine as any).guard.settledSince = Date.now() - 1_000) }]
   );
   await scenario(
     "destroy.task-gone-forced-still-held",
     mk({ tasks: [], events: [doneEvent("A1", false, "100")], records: { A1: rec() } }),
-    [{ force: true, before: (h) => ((h.engine as any).settledSince = Date.now()) }]
+    [{ force: true, before: (h) => ((h.engine as any).guard.settledSince = Date.now()) }]
   );
   await scenario(
     "destroy.due-invalid-delete",
@@ -406,7 +406,7 @@ const noId = (due: string, over: any = {}) => ({
   await scenario("guard.vault-behind", behindCase(), [{ before: syncing }]);
   await scenario("guard.vault-behind-over-budget", behindCase(), [
     { before: syncing },
-    { before: (h) => ((h.engine as any).behindSince = Date.now() - 11 * 60_000) },
+    { before: (h) => ((h.engine as any).guard.behindSince = Date.now() - 11 * 60_000) },
   ]);
   await scenario("guard.vault-behind-forced", behindCase(), [{ force: true, before: syncing }]);
   await scenario("guard.vault-behind-paused", behindCase(), [
@@ -422,13 +422,13 @@ const noId = (due: string, over: any = {}) => ({
       records: { A1: rec({ gcalUpdated: "200" }) },
     });
   const cold = (h: H) => {
-    (h.engine as any).loadedAt = Date.now() - 20_000;
-    (h.engine as any).pullCycleDone = false;
+    (h.engine as any).guard.loadedAt = Date.now() - 20_000;
+    (h.engine as any).guard.pullCycleDone = false;
   };
   await scenario("guard.cold-start", coldCase(), [{ before: cold }]);
   await scenario("guard.cold-start-forced", coldCase(), [{ force: true, before: cold }]);
   const unsettledCreate = () => mk({ tasks: [task("N1", false, FUT), noId(FUT, { line: 1 })], events: [], records: {} });
-  const unsettle = (h: H) => ((h.engine as any).settledSince = Date.now());
+  const unsettle = (h: H) => ((h.engine as any).guard.settledSince = Date.now());
   await scenario("guard.unsettled-create", unsettledCreate(), [{ before: unsettle }]);
   await scenario("guard.unsettled-create-forced", unsettledCreate(), [{ force: true, before: unsettle }]);
 
