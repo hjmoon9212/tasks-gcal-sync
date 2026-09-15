@@ -107,7 +107,9 @@ export const remoteView = (engine: SyncEngine, ev?: GCalEvent): RemoteView | und
   ST.remoteView(ctx(engine), ev);
 export const eventStamp = (_engine: SyncEngine, ev: GCalEvent): RemoteView["stamp"] =>
   ST.eventStamp(ev);
-export const knownCalendarIds = (engine: SyncEngine): string[] => E(engine).knownCalendarIds();
+// 0.12.6 에서 CalendarPuller(engine.puller)로 옮겼다
+export const knownCalendarIds = (engine: SyncEngine): string[] =>
+  E(engine).puller.knownCalendarIds();
 
 // ── 로그 문구 — 0.12.4 에서 src/sync/engine/logText.ts 로 옮겼다 ────────────────
 export const fieldText = (_engine: SyncEngine, s: SnapLike, f: Field): string =>
