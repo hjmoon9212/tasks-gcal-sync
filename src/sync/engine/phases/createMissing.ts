@@ -13,6 +13,7 @@ import { isOurs, recordFromEvent } from "../../codec/stamp";
 import { spanStart, taskTime } from "../../codec/timeMapping";
 import { addFailure, countSkip } from "../result";
 import { SKIP_TEXT } from "../skipText";
+import { createDetail } from "../logText";
 import { errMsg } from "../../../util/errors";
 import { RunContext } from "./context";
 
@@ -209,12 +210,7 @@ export async function createMissing(ctx: RunContext): Promise<void> {
         calendar: target.name || target.id,
         eventId: ev.id,
         where: taskWhere(t),
-        detail:
-          `due=${t.due}` +
-          (spanStart(t) !== t.due ? ` start=${spanStart(t)}` : "") +
-          (taskTime(t) ? ` time=${taskTime(t)}` : " (종일)") +
-          (t.checked ? " done=완료" : "") +
-          (idWasNew ? " · 🆔를 새로 부여해 노트에 기록" : ""),
+        detail: createDetail(t, idWasNew),
       });
     } catch (e) {
       console.error("[tasks-gcal-sync] 생성 실패:", t.path, e);

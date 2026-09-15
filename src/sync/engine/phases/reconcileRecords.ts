@@ -8,7 +8,13 @@ import { taskWhere } from "../../../data/TaskRepository";
 import { decideReconcile, RunGuards } from "../../reconcile";
 import { remoteView, taskState } from "../../codec/stamp";
 import { BEHIND_RECHECK_MS, CONFLICT_HOLD_MAX_MS, REVERT_WINDOW_MS, UNCHECK_HOLD_MS } from "../constants";
-import { calName, fieldText, lastLineText } from "../logText";
+import {
+  calName,
+  deleteDetail,
+  holdConflictDetail,
+  revertObservedDetail,
+  unscheduleDetail,
+} from "../logText";
 import { addFailure, countSkip, mergeRetry } from "../result";
 import { SKIP_TEXT } from "../skipText";
 import { applyMerge } from "../applyMerge";
@@ -101,10 +107,7 @@ export async function reconcileRecords(
         calendar: calName(ctx.settings, rec.calendarId),
         eventId: rec.eventId,
         where: taskWhere(task),
-        detail:
-          `※ 관측: ${sec}초 전 pull 로 쓴 줄이 달라졌다(GCal 은 그대로). ` +
-          `사용자 편집이면 정상이고, 건드린 적이 없다면 되돌림이다 — ` +
-          `쓴 줄 \`${rec.pulledLine}\` → 지금 \`${task.raw}\``,
+        detail: revertObservedDetail(sec, rec.pulledLine, task.raw),
       });
       console.warn(
         `[tasks-gcal-sync] pull 로 쓴 줄이 ${sec}초 만에 달라짐(되돌림 의심): ${id} ${taskWhere(task)}`
@@ -164,23 +167,7 @@ export async function reconcileRecords(
             detail = `${detail} — ${dupWhere.get(id)}`;
           }
           if (plan.reason === "hold-conflict" && plan.local && plan.remote) {
-            const sec = Math.round((plan.retryAfterMs ?? 0) / 1000);
-            const each = (plan.fields ?? [])
-              .map(
-                (f) =>
-                  `${f}(노트 ${fieldText(plan.local!, f)} / GCal ${fieldText(
-                    plan.remote!,
-                    f
-                  )})`
-              )
-              .join(", ");
-            const held =
-              rec.conflictHeldAt === undefined
-                ? ""
-                : ` · ${Math.round(
-                    (Date.now() - rec.conflictHeldAt) / 1000
-                  )}초째 보류(상한 ${CONFLICT_HOLD_MAX_MS / 60_000}분 · 리본으로 즉시 해결)`;
-            detail = `⚔️⏸ ${detail} — ${each}, ${sec}초 뒤 재확인${held}`;
+            detail = holdConflictDetail(detail, plan, rec.conflictHeldAt, Date.now());
           }
           // 보류 시계는 **처음 미룬 시각**에 시작한다 → conflictResolutionAllowed 의 상한
           if (plan.conflictHeldSeen === "set") rec.conflictHeldAt = Date.now();
@@ -212,13 +199,7 @@ export async function reconcileRecords(
             calendar: calName(ctx.settings, rec.calendarId),
             eventId: rec.eventId,
             where: logWhere,
-            detail:
-              (plan.reason === "task-gone"
-                ? `노트에서 task 줄이 사라짐 → 이벤트 삭제 (마지막 스냅샷 due=${rec.due}${
-                    rec.time ? ` ${rec.time}` : ""
-                  })`
-                : `task는 있으나 📅가 없음 → 이벤트 삭제 (마지막 스냅샷 due=${rec.due})`) +
-              lastLineText(rec),
+            detail: deleteDetail(plan.reason, rec),
           });
           break;
         case "drop-record":
@@ -245,7 +226,7 @@ export async function reconcileRecords(
             calendar: calName(ctx.settings, rec.calendarId),
             eventId: rec.eventId,
             where: logWhere,
-            detail: `GCal에서 이벤트가 삭제됨 → 노트의 📅 ${rec.due} · 🆔 ${id} 제거(미일정화)`,
+            detail: unscheduleDetail(rec, id),
           });
           break;
       }

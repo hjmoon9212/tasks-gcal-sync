@@ -10,7 +10,9 @@ import { VaultTask } from "../../data/TaskRepository";
 import { PluginSettings } from "../../settings/Settings";
 import { SyncRecord } from "../StateStore";
 import { SyncLogEntry } from "../SyncLog";
-import { Field, MergePlan } from "../reconcile";
+import { Field, MergePlan, Snapshot } from "../reconcile";
+import { spanStart, taskTime } from "../codec/timeMapping";
+import { CONFLICT_HOLD_MAX_MS } from "./constants";
 
 /** 스냅샷을 문구로 옮길 때 보는 필드. record · Snapshot · LocalView 모두 이 모양을 만족한다. */
 export type SnapText = { due: string; start?: string; time?: string; done: boolean; title: string };
@@ -68,6 +70,74 @@ export function changedFields(
 ): Field[] {
   return fields.filter(
     (f) => fieldText(before, f) !== fieldText(after, f)
+  );
+}
+
+// ── 레코드·생성 한 건의 detail (0.12.7 에서 run() 단계들이 인라인으로 적던 것을 옮겼다) ──
+
+/**
+ * 충돌 해결 보류(HOLD ⚔️⏸). 보류는 "아무 일도 안 일어난" run 이라 무엇이 갈렸는지 ·
+ * 얼마나 끌었는지 · 탈출구(상한·리본)를 함께 말해야 한다.
+ */
+export function holdConflictDetail(
+  base: string,
+  plan: { fields?: Field[]; local?: Snapshot; remote?: Snapshot; retryAfterMs?: number },
+  conflictHeldAt: number | undefined,
+  now: number
+): string {
+  const sec = Math.round((plan.retryAfterMs ?? 0) / 1000);
+  const each = (plan.fields ?? [])
+    .map(
+      (f) =>
+        `${f}(노트 ${fieldText(plan.local!, f)} / GCal ${fieldText(
+          plan.remote!,
+          f
+        )})`
+    )
+    .join(", ");
+  const held =
+    conflictHeldAt === undefined
+      ? ""
+      : ` · ${Math.round(
+          (now - conflictHeldAt) / 1000
+        )}초째 보류(상한 ${CONFLICT_HOLD_MAX_MS / 60_000}분 · 리본으로 즉시 해결)`;
+  return `⚔️⏸ ${base} — ${each}, ${sec}초 뒤 재확인${held}`;
+}
+
+/** 이벤트 삭제. **지운 줄의 원문**을 붙인다 — 복구 경로다(v0.8.1). */
+export function deleteDetail(reason: "task-gone" | "due-invalid", rec: SyncRecord): string {
+  return (
+    (reason === "task-gone"
+      ? `노트에서 task 줄이 사라짐 → 이벤트 삭제 (마지막 스냅샷 due=${rec.due}${
+          rec.time ? ` ${rec.time}` : ""
+        })`
+      : `task는 있으나 📅가 없음 → 이벤트 삭제 (마지막 스냅샷 due=${rec.due})`) +
+    lastLineText(rec)
+  );
+}
+
+/** 미일정화 — GCal 에서 지워진 이벤트의 📅 와 🆔 를 노트에서 뗐다. */
+export function unscheduleDetail(rec: SyncRecord, id: string): string {
+  return `GCal에서 이벤트가 삭제됨 → 노트의 📅 ${rec.due} · 🆔 ${id} 제거(미일정화)`;
+}
+
+/** pull 로 쓴 줄이 곧바로 달라졌다 — **관측만** 남긴다(0.9.7, 사용자 편집일 수 있다). */
+export function revertObservedDetail(sec: number, pulledLine: string | undefined, raw: string): string {
+  return (
+    `※ 관측: ${sec}초 전 pull 로 쓴 줄이 달라졌다(GCal 은 그대로). ` +
+    `사용자 편집이면 정상이고, 건드린 적이 없다면 되돌림이다 — ` +
+    `쓴 줄 \`${pulledLine}\` → 지금 \`${raw}\``
+  );
+}
+
+/** 새 이벤트 생성. */
+export function createDetail(t: VaultTask, idWasNew: boolean): string {
+  return (
+    `due=${t.due}` +
+    (spanStart(t) !== t.due ? ` start=${spanStart(t)}` : "") +
+    (taskTime(t) ? ` time=${taskTime(t)}` : " (종일)") +
+    (t.checked ? " done=완료" : "") +
+    (idWasNew ? " · 🆔를 새로 부여해 노트에 기록" : "")
   );
 }
 
