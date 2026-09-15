@@ -11,9 +11,23 @@ import { GoogleAuth } from "./auth/GoogleAuth";
 import { CalendarClient } from "./gcal/CalendarClient";
 import { TaskRepository } from "./data/TaskRepository";
 import { TaskWriter } from "./write/TaskWriter";
-import { SkipKind, SyncEngine, SyncResult } from "./sync/SyncEngine";
-import { SKIP_LABEL } from "./sync/engine/skipText";
+import { SyncEngine, SyncResult } from "./sync/SyncEngine";
 import { getSyncInstance } from "./obsidian/syncPlugin";
+import { registerCommands, runMaintenance } from "./plugin/commands";
+import { chooseDeviceTag } from "./plugin/deviceTag";
+import {
+  STATE_LS_KEY,
+  StateFile,
+  parseLocalState,
+  pickCredentials,
+  toStateFile,
+} from "./plugin/localState";
+import { describeSkips, hm, reportText, summaryText } from "./plugin/report";
+import {
+  backfillRecordCalendarIds,
+  migrateTargetCalendar,
+  stripLegacySettings,
+} from "./settings/migrate";
 import { SyncLogWriter, withDeviceTag } from "./sync/SyncLog";
 import { EventFeed } from "./gcal/EventFeed";
 import { GcalReadApi } from "./api/PublicApi";
@@ -23,23 +37,6 @@ interface PluginData {
   state?: PersistedState; // 구버전 호환: 예전엔 여기 state가 내장됨(현재는 state.json으로 분리)
 }
 
-/** 지금은 없는 옛 설정들. 남아 있으면 지우기만 한다. */
-interface LegacySettings {
-  syncPreset?: string; // 타이밍 프리셋(≤0.3.13) — 0.3.14에서 제거, 값은 직접 설정만
-  pushOnly?: boolean; // 단방향 모드(≤0.3.13) — 0.3.14에서 제거, 항상 양방향
-  doneOnFree?: boolean; // free(한가함)=완료 제스처(0.3.0~0.3.18) — 0.3.19에서 제거
-  syncOnWindowSwitch?: boolean; // 창 전환 트리거(0.3.11~0.3.12) — 0.3.13에서 제거
-  syncOnBlur?: boolean;
-  syncOnFocus?: boolean;
-  skipPullOnEdit?: boolean;
-  routingTagPrefix?: string; // 라우팅 태그 접두사 — 0.11.2에서 상수로(#gcal/ 고정)
-  doneTag?: string; // #done 폴백 태그 — 0.11.2에서 제거(색·접두사가 완료를 표시한다)
-}
-
-/** localStorage 키. App.saveLocalStorage가 볼트 단위로 네임스페이스를 붙인다. */
-const STATE_LS_KEY = "tasks-gcal-sync:state";
-
-
 /**
  * 종료 직전 플러시에 허용하는 최대 시간(ms).
  *
@@ -48,35 +45,6 @@ const STATE_LS_KEY = "tasks-gcal-sync:state";
  * 미뤄도 잃지 않는다(못 올린 run 은 스냅샷을 안 건드린다).
  */
 const QUIT_FLUSH_MAX_MS = 5_000;
-
-/**
- * 기기-로컬 state 구조. 항목마다 성격이 다르다:
- *  - **자격증명** = 진실원천. 기기 고유이고 동기화되면 안 된다(v0.3.1의 존재 이유).
- *  - **records / syncTokens** = 캐시. 매핑도 스냅샷도 이미 GCal 이벤트의
- *    extendedProperties(tgsTaskId/tgsDue/tgsStart/tgsDone/tgsTitle)에 심겨 있어
- *    캘린더 스캔 한 번으로 복원된다(SyncEngine.rebuildRecords). 잃어도 된다.
- *
- * v0.3.8부터 저장 위치가 플러그인 폴더의 state.json → **localStorage**다.
- * state.json은 `.obsidian/plugins/...` 안이라 "설치된 커뮤니티 플러그인" 동기화가
- * 켜진 기기에서는 결국 동기화된다 — 기기-로컬이라는 전제가 거기서 깨져,
- * 자격증명이 Sync를 타고 기기끼리 파일 단위로 덮어써졌다. localStorage는 동기화되지 않는다.
- */
-interface StateFile {
-  records: PersistedState["records"];
-  syncTokens: PersistedState["syncTokens"];
-  lastFullScanAt?: PersistedState["lastFullScanAt"];
-  clientId?: string;
-  clientSecret?: string;
-  refreshToken?: string | null;
-  /**
-   * 동기화 로그 파일에 붙는 이 기기의 이름.
-   *
-   * **자격증명과 같은 이유로 여기(localStorage)에 있다** — data.json에 두면 기기끼리
-   * 동기화돼 서로의 태그를 덮어쓰고, 그러면 두 기기가 결국 같은 파일에 쓰게 되어
-   * 분리한 의미가 없어진다. 한 번 정해지면 바뀌지 않는다(사용자가 설정에서 바꾸기 전까지).
-   */
-  logDeviceTag?: string;
-}
 
 export default class TasksGcalSyncPlugin extends Plugin {
   settings!: PluginSettings;
@@ -155,64 +123,8 @@ export default class TasksGcalSyncPlugin extends Plugin {
     );
     this.api = this.feed;
 
-    // 수동 실행은 force — 사용자가 명시적으로 요청한 것이므로 콜드 스타트/뒤처짐 보류를
-    // 우회한다(자동 트리거만 보류 대상).
-    this.addRibbonIcon("calendar-clock", "Tasks → Google Calendar 동기화", () =>
-      this.runSync(false, { force: true, manual: true, trigger: "수동(리본)" })
-    );
-    this.addCommand({
-      id: "sync-now",
-      name: "지금 동기화 (Tasks → Google Calendar)",
-      callback: () =>
-        this.runSync(false, { force: true, manual: true, trigger: "수동(명령)" }),
-    });
-    this.addCommand({
-      id: "backfill-ids",
-      name: "기존 이벤트 설명에 🆔 백필",
-      callback: () => this.backfillIds(),
-    });
-    this.addCommand({
-      id: "sync-report",
-      name: "동기화 리포트 (마지막 결과 · 건너뛴 이유 · 실패)",
-      callback: () => this.showReport(),
-    });
-    this.addCommand({
-      id: "rebuild-records",
-      name: "캘린더 전수 스캔 (매핑 재구성 · 고아 이벤트 회수)",
-      callback: () =>
-        this.runSync(false, {
-          fullScan: true,
-          force: true,
-          manual: true,
-          trigger: "수동(전수 스캔)",
-        }),
-    });
-    this.addCommand({
-      id: "cleanup-duplicates",
-      name: "중복 이벤트 정리 (같은 task의 GCal 중복 삭제)",
-      callback: () => this.cleanupDuplicates(),
-    });
-    this.addCommand({
-      id: "open-sync-log",
-      name: "동기화 로그 열기 (건별 상세 기록)",
-      callback: () => this.openSyncLog(),
-    });
-    this.addCommand({
-      id: "refresh-events",
-      name: "캘린더 뷰 일정 새로 고침",
-      callback: () => {
-        void (async () => {
-          await this.feed.refreshAll();
-          // 결과를 말한다. "받아옵니다" 만 띄우고 조용히 실패하면, 화면에 남은 낡은
-          // 일정이 **성공한 결과처럼** 보인다.
-          new Notice(
-            this.feed.lastError
-              ? `일정 조회 실패 — ${this.feed.lastError}`
-              : "캘린더 뷰 일정을 다시 받아왔습니다."
-          );
-        })();
-      },
-    });
+    // 리본·명령. 수동 진입점만 MANUAL(force + manual)을 붙인다 → plugin/commands.ts
+    registerCommands(this);
     this.statusBar = this.addStatusBarItem();
     this.statusBar.setText("GCal —");
     this.addSettingTab(new SettingsTab(this.app, this));
@@ -420,9 +332,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
       for (const f of r.failures) {
         console.error(`[tasks-gcal-sync] 실패 ${f.where}: ${f.message}`);
       }
-      const summary =
-        `+${r.created} ~${r.updated} ↔${r.moved} -${r.deleted} ⬇${r.pulled}` +
-        (r.skipped ? ` (skip ${r.skipped})` : "");
+      const summary = summaryText(r);
       if (!silent || r.created || r.updated || r.moved || r.deleted || r.pulled) {
         const msg = `GCal 동기화: ${summary}`;
         console.log("[tasks-gcal-sync]", msg);
@@ -473,48 +383,21 @@ export default class TasksGcalSyncPlugin extends Plugin {
   }
 
   private describeSkips(r: SyncResult): string {
-    return (Object.keys(r.skips) as SkipKind[])
-      .filter((k) => r.skips[k])
-      .map((k) => `${SKIP_LABEL[k]} ${r.skips[k]}`)
-      .join(" · ");
+    return describeSkips(r);
   }
 
-  /** 상태바 tooltip · 리포트 명령이 함께 쓰는 요약. */
+  /** 상태바 tooltip · 리포트 명령이 함께 쓰는 요약. → plugin/report.ts */
   private reportText(): string {
-    const lines: string[] = [];
-    const r = this.lastResult;
-    lines.push(
-      this.lastSyncAt
-        ? `마지막 동기화: ${this.nowHM()} 기준 ${Math.round(
-            (Date.now() - this.lastSyncAt) / 1000
-          )}초 전`
-        : "아직 동기화한 적 없음"
-    );
-    if (this.lastFatal) lines.push(`⚠ 동기화 실패: ${this.lastFatal}`);
-    if (r) {
-      lines.push(
-        `결과: 생성 ${r.created} · 수정 ${r.updated} · 이동 ${r.moved} · 삭제 ${r.deleted} · 노트반영 ${r.pulled}`
-      );
-      const skips = this.describeSkips(r);
-      if (skips) lines.push(`건너뜀 ${r.skipped}건 — ${skips}`);
-      for (const f of r.failures.slice(0, 5)) {
-        lines.push(`⚠ ${f.where}: ${f.message}`);
-      }
-      if (r.failures.length > 5) {
-        lines.push(`… 외 ${r.failures.length - 5}건 (콘솔 참고)`);
-      }
-    }
-    if (!this.auth.isAuthenticated()) lines.push("⚠ Google 미인증");
-    const scan = this.state.lastFullScanAt;
-    lines.push(
-      scan
-        ? `전수 스캔: ${Math.round((Date.now() - scan) / 3600_000)}시간 전`
-        : "전수 스캔: 아직 안 함"
-    );
-    return lines.join("\n");
+    return reportText({
+      now: new Date(),
+      lastSyncAt: this.lastSyncAt,
+      lastFatal: this.lastFatal,
+      lastResult: this.lastResult,
+      authenticated: this.auth.isAuthenticated(),
+      lastFullScanAt: this.state.lastFullScanAt,
+    });
   }
 
-  /** 동기화 로그 경로(볼트 루트 기준). 비어 있으면 기본값. */
   /** 설정에 적힌 '기본 경로'. 실제 파일은 여기에 기기 태그가 붙은 형제 파일이다. */
   logBasePath(): string {
     const p = this.settings.syncLogPath?.trim();
@@ -541,11 +424,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
   deviceTag(): string {
     if (!this.state) return ""; // loadAll 전 — withDeviceTag가 기본 경로를 그대로 준다
     if (this.state.logDeviceTag) return this.state.logDeviceTag;
-    const sync = getSyncInstance(this.app);
-    const name =
-      typeof sync?.deviceName === "string" && sync.deviceName.trim()
-        ? sync.deviceName.trim()
-        : `기기-${Math.random().toString(36).slice(2, 6)}`;
+    const name = chooseDeviceTag(getSyncInstance(this.app));
     this.state.logDeviceTag = name;
     void this.saveState();
     return name;
@@ -601,58 +480,39 @@ export default class TasksGcalSyncPlugin extends Plugin {
     new Notice("아직 기록된 동기화 로그가 없습니다.", 6000);
   }
 
-  private showReport(): void {
+  showReport(): void {
     const text = this.reportText();
     console.log("[tasks-gcal-sync] 리포트\n" + text);
     new Notice(text, 15000);
   }
 
   private nowHM(): string {
-    const d = new Date();
-    return `${String(d.getHours()).padStart(2, "0")}:${String(
-      d.getMinutes()
-    ).padStart(2, "0")}`;
+    return hm(new Date());
   }
 
-  async backfillIds(): Promise<void> {
-    if (!this.auth.isAuthenticated()) {
-      new Notice("먼저 Google 인증을 하세요.");
-      return;
-    }
-    new Notice("기존 이벤트에 🆔 백필 시작…");
-    try {
-      const r = await this.engine.backfillDescriptions();
-      const msg = `백필 완료: ${r.ok}개 성공${r.fail ? `, ${r.fail} 실패` : ""}`;
-      console.log("[tasks-gcal-sync]", msg);
-      new Notice(msg, 10000);
-    } catch (e: any) {
-      new Notice("백필 실패: " + e.message);
-      console.error(e);
-    }
+  backfillIds(): Promise<void> {
+    return runMaintenance(
+      this,
+      "기존 이벤트에 🆔 백필 시작…",
+      () => this.engine.backfillDescriptions(),
+      (r) => `백필 완료: ${r.ok}개 성공${r.fail ? `, ${r.fail} 실패` : ""}`,
+      "백필 실패"
+    );
   }
 
-  async cleanupDuplicates(): Promise<void> {
-    if (!this.auth.isAuthenticated()) {
-      new Notice("먼저 Google 인증을 하세요.");
-      return;
-    }
-    new Notice("중복 이벤트 정리 시작…");
-    try {
-      const r = await this.engine.cleanupDuplicates();
-      const msg = `중복 정리 완료: ${r.removed}개 삭제 (${r.checked}개 task 확인)`;
-      console.log("[tasks-gcal-sync]", msg);
-      new Notice(msg, 10000);
-    } catch (e: any) {
-      new Notice("중복 정리 실패: " + e.message);
-      console.error(e);
-    }
+  cleanupDuplicates(): Promise<void> {
+    return runMaintenance(
+      this,
+      "중복 이벤트 정리 시작…",
+      () => this.engine.cleanupDuplicates(),
+      (r) => `중복 정리 완료: ${r.removed}개 삭제 (${r.checked}개 task 확인)`,
+      "중복 정리 실패"
+    );
   }
 
   private loadLocalState(): StateFile | null {
     try {
-      const raw = this.app.loadLocalStorage(STATE_LS_KEY);
-      if (raw === null || raw === undefined || raw === "") return null;
-      return (typeof raw === "string" ? JSON.parse(raw) : raw) as StateFile;
+      return parseLocalState(this.app.loadLocalStorage(STATE_LS_KEY));
     } catch (e) {
       console.error("[tasks-gcal-sync] 로컬 state 로드 실패:", e);
       return null;
@@ -687,7 +547,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
   private async loadAll(): Promise<void> {
     const data = (await this.loadData()) as PluginData | null;
     this.settings = { ...DEFAULT_SETTINGS, ...(data?.settings ?? {}) };
-    this.migrateTiming();
+    stripLegacySettings(this.settings);
     migrateFeedColors(this.settings);
 
     // 캐시(records/syncTokens)는 GCal에서 복원되므로 이관할 필요가 없다.
@@ -704,38 +564,16 @@ export default class TasksGcalSyncPlugin extends Plugin {
     const legacy = await this.loadLegacyStateFile();
 
     // data.json 쪽 값은 가장 낮은 우선순위 — Sync를 타는 곳이라 롤백된 옛 secret일 수 있다.
-    const firstStr = (...v: (string | undefined)[]) => v.find((s) => !!s);
-    const firstDef = <T>(...v: (T | undefined)[]) =>
-      v.find((x) => x !== undefined);
-    this.settings.clientId =
-      firstStr(local?.clientId, legacy?.clientId, this.settings.clientId) ?? "";
-    this.settings.clientSecret =
-      firstStr(
-        local?.clientSecret,
-        legacy?.clientSecret,
-        this.settings.clientSecret
-      ) ?? "";
-    this.settings.refreshToken =
-      firstDef(
-        local?.refreshToken,
-        legacy?.refreshToken,
-        this.settings.refreshToken
-      ) ?? null;
+    Object.assign(this.settings, pickCredentials(local, legacy, this.settings));
     // localStorage가 비었거나 구 state.json이 남아 있으면 정규화해서 다시 적는다.
     const migrate = !local || !!legacy;
 
     if (!this.state.syncTokens) this.state.syncTokens = {};
     if (!this.state.records) this.state.records = {};
 
-    // 구버전(단일 대상 캘린더) → 기본 캘린더로 마이그레이션
-    if (this.settings.targetCalendarId && !this.settings.defaultCalendarId) {
-      this.settings.defaultCalendarId = this.settings.targetCalendarId;
-      this.settings.defaultCalendarName = this.settings.targetCalendarName ?? "";
-    }
-    // 구버전 records(calendarId 없음) → 기본 캘린더로 간주
-    for (const rec of Object.values(this.state.records)) {
-      if (!rec.calendarId) rec.calendarId = this.settings.defaultCalendarId;
-    }
+    // 구버전(단일 대상 캘린더) → 기본 캘린더, 구버전 records(calendarId 없음) → 기본 캘린더
+    migrateTargetCalendar(this.settings);
+    backfillRecordCalendarIds(this.state.records, this.settings.defaultCalendarId);
 
     if (migrate) {
       await this.saveState(); // 로컬 state 생성/갱신(자격증명 + 캐시)
@@ -743,26 +581,6 @@ export default class TasksGcalSyncPlugin extends Plugin {
     }
     // 로컬 저장이 끝난 뒤에 지운다 — 순서가 반대면 중간에 죽었을 때 자격증명을 잃는다.
     if (legacy) await this.removeLegacyStateFile();
-  }
-
-  /**
-   * 없어진 옵션을 settings에서 떼어낸다. 다음 저장 때 data.json에서도 빠진다.
-   * 값은 읽지 않는다 — 타이밍은 각 항목을 직접 설정하고(프리셋 없음),
-   * 동기화는 항상 양방향이다(단방향 없음). 기존 값이 남아 있어도 무시한다.
-   */
-  private migrateTiming(): void {
-    const dead: (keyof LegacySettings)[] = [
-      "doneOnFree",
-      "skipPullOnEdit",
-      "syncOnBlur",
-      "syncOnFocus",
-      "syncOnWindowSwitch",
-      "syncPreset",
-      "pushOnly",
-      "routingTagPrefix",
-      "doneTag",
-    ];
-    for (const k of dead) delete (this.settings as Partial<LegacySettings>)[k];
   }
 
   /** 설정만 data.json에 저장 — 자격증명(clientId·clientSecret·refreshToken)은 제외해 Sync로 새어나가지 않게 한다. */
@@ -779,16 +597,7 @@ export default class TasksGcalSyncPlugin extends Plugin {
    * 볼트 파일을 건드리지 않으므로 Obsidian Sync를 타지 않는다.
    */
   async saveState(): Promise<void> {
-    const sf: StateFile = {
-      records: this.state.records,
-      syncTokens: this.state.syncTokens,
-      lastFullScanAt: this.state.lastFullScanAt,
-      clientId: this.settings.clientId,
-      clientSecret: this.settings.clientSecret,
-      refreshToken: this.settings.refreshToken,
-      logDeviceTag: this.state.logDeviceTag,
-    };
-    this.app.saveLocalStorage(STATE_LS_KEY, JSON.stringify(sf));
+    this.app.saveLocalStorage(STATE_LS_KEY, JSON.stringify(toStateFile(this.state, this.settings)));
   }
 
   /** 설정 UI 저장용: 설정(data.json) + 자격증명/state(기기 로컬 localStorage) 둘 다 기록. */
