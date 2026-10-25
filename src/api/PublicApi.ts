@@ -26,6 +26,12 @@ export interface ExternalEvent {
   /** 자정부터의 분. null = 종일 */
   readonly tStart: number | null;
   readonly tEnd: number | null;
+  /**
+   * 날을 넘기는 시간 일정의 **마지막 날 종료 시각**(자정부터의 분). 그 밖엔 null.
+   * `tEnd` 는 첫날 몫(1440)으로 접혀 있어 진짜 종료를 잃는다 — 뷰가 "~ 17:00" 을 쓰는 근거.
+   * 0.12.1~ · 옛 소비자는 이 필드를 모르므로 선택(?)으로 둔다.
+   */
+  readonly tEndLastDay?: number | null;
   readonly allDay: boolean;
   readonly multiDay: boolean;
   /** 반복 일정의 한 회차인가. 뷰가 🔁 아이콘을 붙이는 근거 */

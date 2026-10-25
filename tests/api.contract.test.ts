@@ -233,11 +233,12 @@ async function quiet<T>(fn: () => Promise<T>): Promise<T> {
         "recurring",
         "startISO",
         "tEnd",
+        "tEndLastDay",
         "tStart",
         "title",
         "uid",
       ],
-      "ExternalEvent: 필드 이름 집합(location·htmlLink 는 원본에 없어도 키가 있고 값이 undefined)"
+      "ExternalEvent: 필드 이름 집합(location·htmlLink 는 원본에 없어도 키가 있고 값이 undefined · tEndLastDay 는 0.12.1 에 추가)"
     );
     eq(
       [events[0].location, events[0].htmlLink, "location" in events[0]],

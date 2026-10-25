@@ -170,6 +170,22 @@ const timed = (s: string, e?: string) =>
   eq(e.endISO, "2026-03-06", "자정 넘김: 종료일");
   eq([e.tStart, e.tEnd], [1380, 1440], "자정 넘김: 첫날 몫만 그린다(23:00~24:00)");
   eq(e.multiDay, true, "자정 넘기면 multiDay");
+  eq(e.tEndLastDay, 60, "자정 넘김: 마지막 날 종료 시각(01:00)을 따로 싣는다");
+}
+{
+  // 10/26 10:00 ~ 10/28 17:00 — 뷰가 마지막 날 칩에 "~ 17:00" 을 붙인다
+  const e = toExternalEvent(
+    timed("2026-10-26T10:00:00+09:00", "2026-10-28T17:00:00+09:00"),
+    CAL,
+    KST
+  )!;
+  eq([e.startISO, e.endISO, e.tStart, e.tEnd], ["2026-10-26", "2026-10-28", 600, 1440], "여러 날 시간 일정: tEnd 는 첫날 몫");
+  eq(e.tEndLastDay, 17 * 60, "여러 날 시간 일정: 마지막 날 17:00");
+}
+{
+  const e = toExternalEvent(timed("2026-03-05T14:00:00+09:00", "2026-03-05T15:00:00+09:00"), CAL, KST)!;
+  eq(e.tEndLastDay, null, "하루 안의 시간 일정은 null");
+  eq(toExternalEvent(ev(), CAL)!.tEndLastDay, null, "종일은 null");
 }
 {
   const e = toExternalEvent(

@@ -131,6 +131,7 @@ export function toExternalEvent(
       endISO,
       tStart: null,
       tEnd: null,
+      tEndLastDay: null,
       allDay: true,
       multiDay: endISO > startISO,
     };
@@ -147,6 +148,7 @@ export function toExternalEvent(
   const edt = ev.end?.dateTime;
   let endISO = startISO;
   let tEnd = Math.min(tStart + DEFAULT_MIN, 1440);
+  let tEndLastDay: number | null = null;
   if (edt) {
     const ew = toWall(edt);
     if (Number.isFinite(ew.y) && Number.isFinite(ew.hh)) {
@@ -155,6 +157,8 @@ export function toExternalEvent(
       // 자정을 넘기면 첫날 몫만 그린다. 24시간 그리드에 걸치려면 종료가 그 날 안에
       // 있어야 하고, 여러 날짜에 같은 시간대를 그리는 건 GCal 에서도 반복 이벤트다.
       tEnd = endISO > startISO ? 1440 : Math.min(wallMin(ew), 1440);
+      // 접으면서 버리는 진짜 종료 시각은 따로 싣는다 — 뷰가 마지막 날 칩에 "~ 17:00" 을 붙인다
+      if (endISO > startISO) tEndLastDay = wallMin(ew);
       if (tEnd <= tStart) tEnd = Math.min(tStart + DEFAULT_MIN, 1440);
     }
   }
@@ -165,6 +169,7 @@ export function toExternalEvent(
     endISO,
     tStart,
     tEnd,
+    tEndLastDay,
     allDay: false,
     multiDay: endISO > startISO,
   };
@@ -273,6 +278,7 @@ export function eventsSignature(events: ExternalEvent[]): string {
       e.endISO,
       e.tStart,
       e.tEnd,
+      e.tEndLastDay ?? null,
       e.allDay,
       e.multiDay,
       e.recurring,
